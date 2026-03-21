@@ -1,0 +1,40 @@
+{
+  "eventType": "workitem.updated",
+  "resource": {
+    "workItemId": 42,
+    "revision": {
+      "id": 42,
+      "fields": {
+        "System.WorkItemType": "User Story",
+        "System.Title": "Add user profile page with avatar upload",
+        "System.Description": "<p>As a user, I want to view and edit my profile.</p><br/><p>The page should include:</p><ul><li>Display name</li><li>Email</li><li>Avatar upload</li></ul>",
+        "System.TeamProject": "AcmeProject",
+        "System.State": "Ready for AI",
+        "System.AssignedTo": {
+          "displayName": "Dev User",
+          "uniqueName": "dev@acme.com"
+        },
+        "System.Tags": "ai-implement; sprint-7",
+        "Microsoft.VSTS.Common.Priority": 2,
+        "Microsoft.VSTS.Common.AcceptanceCriteria": "<ul><li>User can view their current profile information</li><li>User can upload a new avatar image</li><li>Avatar must be resized to 256x256</li></ul>"
+      },
+      "relations": [
+        {
+          "rel": "System.LinkTypes.Dependency-Forward",
+          "url": "https://dev.azure.com/acme/AcmeProject/_apis/wit/workItems/50",
+          "attributes": {
+            "name": "Successor"
+          }
+        },
+        {
+          "rel": "AttachedFile",
+          "url": "https://dev.azure.com/acme/AcmeProject/_apis/wit/attachments/abc-123",
+          "attributes": {
+            "name": "profile-mockup.png",
+            "resourceType": "image/png"
+          }
+        }
+      ]
+    }
+  }
+}

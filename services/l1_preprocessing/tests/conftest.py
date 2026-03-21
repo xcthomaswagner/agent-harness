@@ -13,6 +13,7 @@ from main import app
 def _reset_singletons() -> None:
     """Reset lazily-initialized singletons between tests."""
     main._jira_adapter = None
+    main._ado_adapter = None
     main._pipeline = None
 
 

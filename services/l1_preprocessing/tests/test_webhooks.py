@@ -98,13 +98,34 @@ async def test_jira_webhook_skips_signature_when_no_secret() -> None:
         assert response.status_code == 202
 
 
-# --- ADO Webhook (stub) ---
+# --- ADO Webhook ---
 
 
-async def test_ado_webhook_returns_501() -> None:
+async def test_ado_webhook_accepts_valid_payload() -> None:
+    payload = {
+        "eventType": "workitem.updated",
+        "resource": {
+            "id": 10,
+            "fields": {
+                "System.WorkItemType": "Task",
+                "System.Title": "ADO test task",
+            },
+        },
+    }
     async with await _make_client() as client:
-        response = await client.post("/webhooks/ado")
-        assert response.status_code == 501
+        response = await client.post("/webhooks/ado", json=payload)
+        assert response.status_code == 202
+        assert response.json()["status"] == "accepted"
+
+
+async def test_ado_webhook_rejects_non_json() -> None:
+    async with await _make_client() as client:
+        response = await client.post(
+            "/webhooks/ado",
+            content=b"not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 422
 
 
 # --- Manual Process Ticket ---

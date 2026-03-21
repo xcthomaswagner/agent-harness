@@ -10,6 +10,7 @@ from typing import Any
 import structlog
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 
+from adapters.ado_adapter import AdoAdapter
 from adapters.jira_adapter import JiraAdapter
 from config import settings
 from models import TicketPayload
@@ -24,6 +25,7 @@ app = FastAPI(
 )
 
 _jira_adapter: JiraAdapter | None = None
+_ado_adapter: AdoAdapter | None = None
 _pipeline: Pipeline | None = None
 
 
@@ -33,6 +35,14 @@ def _get_jira_adapter() -> JiraAdapter:
     if _jira_adapter is None:
         _jira_adapter = JiraAdapter(settings=settings)
     return _jira_adapter
+
+
+def _get_ado_adapter() -> AdoAdapter:
+    """Return the ADO adapter, creating it lazily on first use."""
+    global _ado_adapter
+    if _ado_adapter is None:
+        _ado_adapter = AdoAdapter(settings=settings)
+    return _ado_adapter
 
 
 def _get_pipeline() -> Pipeline:
@@ -112,10 +122,25 @@ async def jira_webhook(
     return {"status": "accepted", "ticket_id": ticket.id}
 
 
-@app.post("/webhooks/ado", status_code=501)
-async def ado_webhook() -> dict[str, str]:
-    """Azure DevOps webhook — stub for Phase 2."""
-    raise HTTPException(status_code=501, detail="ADO webhook not yet implemented")
+@app.post("/webhooks/ado", status_code=202)
+async def ado_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, str]:
+    """Receive an Azure DevOps Service Hook webhook and enqueue for processing."""
+    body = await request.body()
+
+    try:
+        payload: dict[str, Any] = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON body: {exc}") from exc
+
+    ticket = _get_ado_adapter().normalize(payload)
+
+    logger.info("ado_webhook_received", ticket_id=ticket.id, ticket_type=ticket.ticket_type)
+
+    background_tasks.add_task(_process_ticket, ticket)
+    return {"status": "accepted", "ticket_id": ticket.id}
 
 
 @app.post("/api/process-ticket", status_code=202)
