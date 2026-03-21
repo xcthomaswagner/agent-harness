@@ -1,0 +1,35 @@
+# Agent Orchestrator config for the Agentic Developer Harness
+# This configures Composio to manage Agent Team sessions for client repos.
+
+port: 3000
+terminalPort: 3001
+
+defaults:
+  runtime: tmux
+  agent: claude-code
+  workspace: worktree
+  notifiers:
+    - desktop
+
+projects:
+  harness-test-client:
+    name: Harness Test Client
+    path: ../harness-test-client
+    repo: xcthomaswagner/harness-test-client
+    defaultBranch: main
+    sessionPrefix: htc
+
+    agentConfig:
+      permissions: auto
+      model: claude-opus-4-20250514
+
+    # Inject harness runtime files after worktree creation
+    postCreate:
+      - bash ../agent-harness/scripts/inject-runtime.sh --target-dir .
+
+    # Tracker: Using our L1 service for Jira, not Composio's tracker
+    # tracker:
+    #   plugin: jira  # TODO: Build Jira plugin
+
+    symlinks:
+      - .env

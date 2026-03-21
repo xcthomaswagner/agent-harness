@@ -13,6 +13,7 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from adapters.jira_adapter import JiraAdapter
 from config import settings
 from models import TicketPayload
+from pipeline import Pipeline
 
 logger = structlog.get_logger()
 
@@ -23,6 +24,7 @@ app = FastAPI(
 )
 
 _jira_adapter: JiraAdapter | None = None
+_pipeline: Pipeline | None = None
 
 
 def _get_jira_adapter() -> JiraAdapter:
@@ -31,6 +33,14 @@ def _get_jira_adapter() -> JiraAdapter:
     if _jira_adapter is None:
         _jira_adapter = JiraAdapter(settings=settings)
     return _jira_adapter
+
+
+def _get_pipeline() -> Pipeline:
+    """Return the pipeline, creating it lazily on first use."""
+    global _pipeline
+    if _pipeline is None:
+        _pipeline = Pipeline(settings=settings)
+    return _pipeline
 
 
 # --- Pipeline processing (background) ---
@@ -50,14 +60,8 @@ async def _process_ticket(ticket: TicketPayload) -> None:
     log.info("processing_ticket_started")
 
     try:
-        # TODO (Task 1.4): Integrate ticket analyst
-        # For now, just log that we received and would process the ticket
-        log.info(
-            "processing_ticket_placeholder",
-            title=ticket.title,
-            ticket_type=ticket.ticket_type,
-            ac_count=len(ticket.acceptance_criteria),
-        )
+        result = await _get_pipeline().process(ticket)
+        log.info("processing_ticket_completed", **result)
     except Exception:
         log.exception("processing_ticket_failed")
 

@@ -10,9 +10,10 @@ from main import app
 
 
 @pytest.fixture(autouse=True)
-def _reset_jira_adapter() -> None:
-    """Reset the lazily-initialized Jira adapter between tests."""
+def _reset_singletons() -> None:
+    """Reset lazily-initialized singletons between tests."""
     main._jira_adapter = None
+    main._pipeline = None
 
 
 @pytest.fixture

@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # Webhook
     webhook_secret: str = ""
 
+    # L2 Dispatch
+    default_client_repo: str = ""  # Path to the client repo for spawn-team.sh
+
     # Service
     log_level: str = "INFO"
 
