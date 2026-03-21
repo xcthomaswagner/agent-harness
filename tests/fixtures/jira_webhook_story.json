@@ -1,0 +1,41 @@
+{
+  "webhookEvent": "jira:issue_updated",
+  "issue": {
+    "key": "ACME-42",
+    "fields": {
+      "summary": "Add user profile page with avatar upload",
+      "description": "As a user, I want to view and edit my profile so that I can manage my account settings.\n\nThe page should include:\n- Display name\n- Email\n- Avatar upload\n- Password change link",
+      "issuetype": {
+        "name": "Story"
+      },
+      "priority": {
+        "name": "High"
+      },
+      "assignee": {
+        "emailAddress": "dev@acme.com"
+      },
+      "labels": ["ai-implement", "sprint-7"],
+      "customfield_10429": "- User can view their current profile information\n- User can upload a new avatar image\n- Avatar must be resized to 256x256\n- Profile changes are saved on submit\n- Error message shown if upload fails",
+      "attachment": [
+        {
+          "filename": "profile-mockup.png",
+          "content": "https://acme.atlassian.net/secure/attachment/12345/profile-mockup.png",
+          "mimeType": "image/png"
+        }
+      ],
+      "issuelinks": [
+        {
+          "type": {
+            "name": "Blocks"
+          },
+          "outwardIssue": {
+            "key": "ACME-50",
+            "fields": {
+              "summary": "Release 2.1"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

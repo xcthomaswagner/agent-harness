@@ -1,0 +1,21 @@
+{
+  "webhookEvent": "jira:issue_updated",
+  "issue": {
+    "key": "ACME-99",
+    "fields": {
+      "summary": "App crashes when uploading large avatar",
+      "description": "Steps to reproduce:\n1. Go to profile page\n2. Click upload avatar\n3. Select a file > 10MB\n4. App crashes with 500 error\n\nExpected: Show error message 'File too large'\nActual: Server returns 500, white screen",
+      "issuetype": {
+        "name": "Bug"
+      },
+      "priority": {
+        "name": "Critical"
+      },
+      "assignee": null,
+      "labels": ["ai-implement"],
+      "customfield_10429": "",
+      "attachment": [],
+      "issuelinks": []
+    }
+  }
+}
