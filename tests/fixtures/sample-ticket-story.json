@@ -1,0 +1,50 @@
+{
+  "source": "jira",
+  "id": "DEMO-101",
+  "ticket_type": "story",
+  "title": "Add a user greeting component to the homepage",
+  "description": "As a logged-in user, I want to see a personalized greeting on the homepage so that I know I'm signed in.\n\nThe greeting should display my first name and the current time of day (Good morning/afternoon/evening).",
+  "acceptance_criteria": [
+    "Greeting displays user's first name",
+    "Greeting changes based on time of day: morning (5-12), afternoon (12-17), evening (17-5)",
+    "Component does not render for unauthenticated users"
+  ],
+  "generated_acceptance_criteria": [
+    "Greeting handles missing first name gracefully (display 'Hello!' instead)",
+    "Component is accessible (proper heading level, aria attributes)"
+  ],
+  "test_scenarios": [
+    {
+      "name": "displays_morning_greeting",
+      "test_type": "unit",
+      "description": "When current hour is 8, greeting shows 'Good morning, {name}'",
+      "criteria_ref": "Time of day greeting"
+    },
+    {
+      "name": "hides_for_unauthenticated",
+      "test_type": "unit",
+      "description": "Component returns null when no user is authenticated",
+      "criteria_ref": "No render for unauthenticated"
+    },
+    {
+      "name": "greeting_visible_on_homepage",
+      "test_type": "e2e",
+      "description": "Log in and verify greeting appears on homepage with correct name",
+      "criteria_ref": "Displays first name"
+    }
+  ],
+  "edge_cases": [
+    "User has no first name set in their profile",
+    "Timezone handling — should use the user's local time, not server time"
+  ],
+  "size_assessment": {
+    "classification": "small",
+    "estimated_units": 1,
+    "recommended_dev_count": 1,
+    "decomposition_needed": false,
+    "rationale": "Single component with straightforward logic"
+  },
+  "analyst_notes": "This is a simple presentation component. Check if the project has an existing auth context or user hook to get the current user's name.",
+  "labels": ["ai-implement"],
+  "priority": "Medium"
+}

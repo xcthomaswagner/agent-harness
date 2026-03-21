@@ -1,0 +1,49 @@
+{
+  "source": "jira",
+  "id": "DEMO-202",
+  "ticket_type": "bug",
+  "title": "Login form shows 'undefined' error on empty email submit",
+  "description": "Steps to reproduce:\n1. Navigate to /login\n2. Leave the email field empty\n3. Click 'Sign In'\n4. Error message displays 'undefined' instead of a helpful validation message\n\nExpected: 'Email is required' validation message\nActual: 'undefined' shown below the email field",
+  "acceptance_criteria": [
+    "Empty email shows 'Email is required' validation message",
+    "Invalid email format shows 'Please enter a valid email address'"
+  ],
+  "generated_acceptance_criteria": [
+    "Validation message clears when user starts typing",
+    "Submit button is not disabled — validation happens on submit"
+  ],
+  "test_scenarios": [
+    {
+      "name": "shows_required_message_on_empty_email",
+      "test_type": "unit",
+      "description": "Submitting form with empty email shows 'Email is required'",
+      "criteria_ref": "Empty email validation"
+    },
+    {
+      "name": "shows_format_message_on_invalid_email",
+      "test_type": "unit",
+      "description": "Submitting form with 'notanemail' shows format error",
+      "criteria_ref": "Invalid email format"
+    },
+    {
+      "name": "validation_clears_on_input",
+      "test_type": "unit",
+      "description": "Error message disappears when user types in the email field",
+      "criteria_ref": "Validation clears"
+    }
+  ],
+  "edge_cases": [
+    "Email with only whitespace should be treated as empty",
+    "Email with leading/trailing spaces should be trimmed before validation"
+  ],
+  "size_assessment": {
+    "classification": "small",
+    "estimated_units": 1,
+    "recommended_dev_count": 1,
+    "decomposition_needed": false,
+    "rationale": "Single form validation fix"
+  },
+  "analyst_notes": "Likely a missing validation rule in the form schema. Check if using Zod or Yup for validation.",
+  "labels": ["ai-implement", "bug"],
+  "priority": "High"
+}
