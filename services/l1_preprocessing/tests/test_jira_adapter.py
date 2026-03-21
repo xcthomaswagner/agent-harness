@@ -189,6 +189,97 @@ class TestParseAcceptanceCriteria:
         assert result == ["Tenth item", "Eleventh item"]
 
 
+# --- ADF (Atlassian Document Format) handling ---
+
+
+class TestAdfHandling:
+    def test_plain_string_passes_through(self) -> None:
+        assert JiraAdapter._extract_text("hello world") == "hello world"
+
+    def test_empty_string(self) -> None:
+        assert JiraAdapter._extract_text("") == ""
+
+    def test_none_returns_empty(self) -> None:
+        assert JiraAdapter._extract_text(None) == ""
+
+    def test_adf_paragraph(self) -> None:
+        adf = {
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": "Hello world"}],
+                }
+            ],
+        }
+        result = JiraAdapter._extract_text(adf)
+        assert "Hello world" in result
+
+    def test_adf_bullet_list(self) -> None:
+        adf = {
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {
+                    "type": "bulletList",
+                    "content": [
+                        {
+                            "type": "listItem",
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [{"type": "text", "text": "Item one"}],
+                                }
+                            ],
+                        },
+                        {
+                            "type": "listItem",
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [{"type": "text", "text": "Item two"}],
+                                }
+                            ],
+                        },
+                    ],
+                }
+            ],
+        }
+        result = JiraAdapter._extract_text(adf)
+        assert "- Item one" in result
+        assert "- Item two" in result
+
+    def test_adf_mixed_content(self) -> None:
+        adf = {
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": "Description text"}],
+                },
+                {
+                    "type": "bulletList",
+                    "content": [
+                        {
+                            "type": "listItem",
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [{"type": "text", "text": "Bullet"}],
+                                }
+                            ],
+                        }
+                    ],
+                },
+            ],
+        }
+        result = JiraAdapter._extract_text(adf)
+        assert "Description text" in result
+        assert "- Bullet" in result
+
+
 # --- Write-back operations ---
 
 

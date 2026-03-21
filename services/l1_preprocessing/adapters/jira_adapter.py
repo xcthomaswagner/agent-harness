@@ -69,7 +69,8 @@ class JiraAdapter:
 
         # Acceptance criteria from custom field
         ac_field = self._settings.jira_ac_field_id
-        raw_ac = fields.get(ac_field, "") or ""
+        raw_ac_value = fields.get(ac_field, "") or ""
+        raw_ac = self._extract_text(raw_ac_value)
         acceptance_criteria = self._parse_acceptance_criteria(raw_ac)
 
         # Attachments
@@ -118,7 +119,7 @@ class JiraAdapter:
             id=key,
             ticket_type=ticket_type,
             title=fields.get("summary", ""),
-            description=fields.get("description", "") or "",
+            description=self._extract_text(fields.get("description", "")),
             acceptance_criteria=acceptance_criteria,
             attachments=attachments,
             linked_items=linked_items,
@@ -128,6 +129,54 @@ class JiraAdapter:
             callback=callback,
             raw_payload=webhook_payload,
         )
+
+    @staticmethod
+    def _extract_text(value: object) -> str:
+        """Extract plain text from a field value.
+
+        Handles both plain strings and Atlassian Document Format (ADF) dicts.
+        ADF is used by Jira REST API v3 for rich text fields.
+        """
+        if isinstance(value, str):
+            return value
+        if not isinstance(value, dict):
+            return str(value) if value else ""
+        if value.get("type") != "doc":
+            return str(value)
+        return JiraAdapter._adf_to_text(value)
+
+    @staticmethod
+    def _adf_to_text(node: dict[str, Any]) -> str:
+        """Recursively convert an ADF document node to plain text."""
+        node_type = node.get("type", "")
+        text_parts: list[str] = []
+
+        # Text node — the leaf
+        if node_type == "text":
+            return node.get("text", "")
+
+        # Hard break
+        if node_type == "hardBreak":
+            return "\n"
+
+        # Process children
+        for child in node.get("content", []):
+            text_parts.append(JiraAdapter._adf_to_text(child))
+
+        joined = "".join(text_parts)
+
+        # Add formatting based on node type
+        if node_type == "paragraph":
+            return joined + "\n"
+        if node_type == "listItem":
+            return "- " + joined
+        if node_type in ("bulletList", "orderedList"):
+            return joined + "\n"
+        if node_type == "heading":
+            level = node.get("attrs", {}).get("level", 1)
+            return "#" * level + " " + joined + "\n"
+
+        return joined
 
     @staticmethod
     def _parse_acceptance_criteria(raw: str) -> list[str]:
