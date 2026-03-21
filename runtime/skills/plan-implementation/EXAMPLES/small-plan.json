@@ -1,0 +1,47 @@
+{
+  "ticket_id": "DEMO-101",
+  "plan_version": 1,
+  "units": [
+    {
+      "id": "unit-1",
+      "description": "Add UserGreeting component that displays a personalized time-of-day greeting using the current user's first name",
+      "affected_files": [
+        "src/components/user-greeting.tsx",
+        "src/lib/greeting.ts",
+        "src/__tests__/greeting.test.ts",
+        "src/__tests__/user-greeting.test.tsx"
+      ],
+      "dependencies": [],
+      "complexity": "simple",
+      "test_criteria": [
+        {
+          "scenario": "displays_morning_greeting",
+          "test_type": "unit",
+          "description": "When current hour is 8, greeting shows 'Good morning, {name}'"
+        },
+        {
+          "scenario": "hides_for_unauthenticated",
+          "test_type": "unit",
+          "description": "Component returns null when no user is authenticated"
+        },
+        {
+          "scenario": "handles_missing_name",
+          "test_type": "unit",
+          "description": "Displays 'Hello!' when user has no first name"
+        }
+      ]
+    }
+  ],
+  "test_strategy": {
+    "unit_tests": "Test greeting logic in isolation + component rendering with mocked auth",
+    "integration_tests": "none",
+    "e2e_tests": "Verify greeting appears on homepage after login (deferred to QA)"
+  },
+  "architecture_notes": "Use existing useAuth hook for user context. Greeting logic extracted to a utility for testability.",
+  "sizing": {
+    "total_units": 1,
+    "parallel_tracks": 1,
+    "recommended_devs": 1,
+    "estimated_complexity": "small"
+  }
+}

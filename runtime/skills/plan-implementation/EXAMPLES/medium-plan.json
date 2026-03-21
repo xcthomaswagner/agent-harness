@@ -1,0 +1,85 @@
+{
+  "ticket_id": "PROJ-500",
+  "plan_version": 1,
+  "units": [
+    {
+      "id": "unit-1",
+      "description": "Add avatar upload API endpoint with file validation (max 5MB, PNG/JPG/GIF only)",
+      "affected_files": [
+        "src/server/api/routes/avatar.ts",
+        "src/server/lib/file-validation.ts",
+        "src/server/api/routes/__tests__/avatar.test.ts"
+      ],
+      "dependencies": [],
+      "complexity": "moderate",
+      "test_criteria": [
+        {
+          "scenario": "upload_valid_avatar",
+          "test_type": "integration",
+          "description": "POST /api/avatar with valid PNG returns 200 and stores file"
+        },
+        {
+          "scenario": "reject_oversized_file",
+          "test_type": "integration",
+          "description": "POST /api/avatar with 10MB file returns 413"
+        },
+        {
+          "scenario": "reject_invalid_format",
+          "test_type": "integration",
+          "description": "POST /api/avatar with .exe returns 415"
+        }
+      ]
+    },
+    {
+      "id": "unit-2",
+      "description": "Add avatar resize service (256x256) using sharp, triggered after upload",
+      "affected_files": [
+        "src/server/services/image-resize.ts",
+        "src/server/services/__tests__/image-resize.test.ts"
+      ],
+      "dependencies": ["unit-1"],
+      "complexity": "simple",
+      "test_criteria": [
+        {
+          "scenario": "resize_to_256x256",
+          "test_type": "unit",
+          "description": "Resizes a 1000x800 image to exactly 256x256"
+        }
+      ]
+    },
+    {
+      "id": "unit-3",
+      "description": "Add AvatarUpload React component with drag-and-drop, preview, and error display",
+      "affected_files": [
+        "src/components/avatar-upload.tsx",
+        "src/components/__tests__/avatar-upload.test.tsx"
+      ],
+      "dependencies": ["unit-1"],
+      "complexity": "moderate",
+      "test_criteria": [
+        {
+          "scenario": "shows_preview_after_select",
+          "test_type": "unit",
+          "description": "After selecting a file, component shows image preview"
+        },
+        {
+          "scenario": "shows_error_on_failure",
+          "test_type": "unit",
+          "description": "When API returns error, component displays the error message"
+        }
+      ]
+    }
+  ],
+  "test_strategy": {
+    "unit_tests": "Component tests with mocked API. Image resize with test fixtures.",
+    "integration_tests": "API endpoint tests with real file uploads against test server.",
+    "e2e_tests": "Full upload flow via Playwright (deferred to QA)"
+  },
+  "architecture_notes": "Use existing file upload middleware pattern from src/server/middleware/upload.ts. Image resize is a separate service for testability. UI follows existing component patterns with React Hook Form.",
+  "sizing": {
+    "total_units": 3,
+    "parallel_tracks": 2,
+    "recommended_devs": 2,
+    "estimated_complexity": "medium"
+  }
+}
