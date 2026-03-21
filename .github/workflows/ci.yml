@@ -7,11 +7,9 @@ on:
     branches: [main]
 
 jobs:
-  lint-and-test:
+  l1-service:
+    name: L1 Pre-Processing Service
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.12"]
 
     defaults:
       run:
@@ -20,10 +18,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
           cache: pip
           cache-dependency-path: services/l1_preprocessing/pyproject.toml
 
@@ -34,7 +32,47 @@ jobs:
         run: ruff check .
 
       - name: Type check with mypy
-        run: mypy main.py adapters/
+        run: mypy main.py models.py config.py analyst.py pipeline.py adapters/
 
       - name: Run tests
         run: pytest tests/ -v --tb=short
+
+  l3-service:
+    name: L3 PR Review Service
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: services/l3_pr_review
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/l3_pr_review/pyproject.toml
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Lint with ruff
+        run: ruff check .
+
+      - name: Type check with mypy
+        run: mypy main.py event_classifier.py spawner.py
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  shell-tests:
+    name: Shell Script Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run inject-runtime tests
+        run: bash tests/test_inject_runtime.sh

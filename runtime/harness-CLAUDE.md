@@ -142,6 +142,14 @@ When communicating results (for Phase 2 multi-teammate support), use this struct
 | Build/lint errors you can't fix | Log the errors, open draft PR with `needs-human` label |
 | Codebase too large to understand | Focus on the specific files mentioned in the ticket |
 
+## Structured Logging
+
+All teammates MUST write structured logs. See `/.harness/` for the logging protocol.
+
+- Append JSON Lines to `/.harness/logs/pipeline.jsonl` for every phase transition, decision, and escalation
+- Write human-readable output to `/.harness/logs/session.log`
+- Include timestamps, ticket ID, phase, teammate role, and event type in every log entry
+
 ## Constraints
 
 - **Do not** modify files outside the ticket's scope
