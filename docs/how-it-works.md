@@ -38,11 +38,25 @@
 
 ## Layer 2: Agent Team Execution
 
-7. **Team Lead starts** — reads `/.harness/ticket.json` and `CLAUDE.md`. Creates the feature branch `ai/<ticket-id>`. Then orchestrates three sub-agents:
+7. **Team Lead starts** — reads `.harness/ticket.json` and `CLAUDE.md`. Creates the feature branch `ai/<ticket-id>`. Checks `size_assessment.estimated_units` to select the pipeline:
 
-8. **Developer sub-agent** — spawned via the `Agent` tool. Reads the ticket, explores the codebase (reads 3-5 similar files for patterns), implements the changes, writes tests for every acceptance criterion, runs the full test suite. Self-corrects up to 3 times if tests fail. Commits only when all tests pass. If a Figma design spec is present, follows the design tokens and component mappings.
+### Simple Pipeline (1 unit)
 
-9. **Code Reviewer sub-agent** — spawned next. Runs `git diff main...HEAD` to read the changes. Evaluates for:
+8. **Developer sub-agent** — spawned via the `Agent` tool. Reads the ticket, explores the codebase, implements the changes, writes tests, runs the full test suite. Self-corrects up to 3 times if tests fail. Commits only when all tests pass.
+
+### Full Pipeline (2+ units)
+
+8a. **Planner sub-agent** — decomposes the ticket into atomic implementation units with a dependency graph. Each unit lists affected files, test criteria, and dependencies. Two parallel units must not touch the same file.
+
+8b. **Plan Reviewer sub-agent** — validates the plan: no parallel file conflicts, all AC covered, valid DAG, descriptions specific enough to implement. Max 2 correction cycles.
+
+8c. **Parallel Developer sub-agents** — independent units spawn simultaneously (multiple `Agent` calls in one message, each with `isolation: "worktree"`). Each dev gets its own git worktree and creates branch `ai/<ticket-id>/unit-N`. Units with dependencies wait for their prerequisites. Failed units transitively block dependents but don't halt independent units.
+
+8d. **Merge Coordinator sub-agent** — merges unit branches into `ai/<ticket-id>` in topological order (dependencies first). Runs tests after each merge. If conflicts: routes to the owning dev. Squash fallback after 2 failed attempts. Cleans up unit branches after merge.
+
+### Both Pipelines Continue With:
+
+9. **Code Reviewer sub-agent** — reviews the diff on the merged branch. Evaluates for:
    - Correctness against acceptance criteria
    - Security issues (hardcoded secrets, injection vectors, auth gaps)
    - Style compliance with project conventions
