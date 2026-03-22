@@ -135,4 +135,27 @@ fi
 echo "[spawn] Session ended with exit code: $EXIT_CODE"
 echo "[spawn] Logs at: $WORKTREE_DIR/.harness/logs/session.log"
 
+# --- Step 5: Notify L1 of completion ---
+
+# Extract ticket ID from the ticket JSON
+TICKET_ID=$(python3 -c "import json; print(json.load(open('$WORKTREE_DIR/.harness/ticket.json'))['id'])" 2>/dev/null || echo "unknown")
+
+# Extract PR URL from pipeline log if available
+PR_URL=$(grep -o '"pr_url": *"[^"]*"' "$WORKTREE_DIR/.harness/logs/pipeline.jsonl" 2>/dev/null | tail -1 | grep -o 'https://[^"]*' || echo "")
+
+# Determine status
+if [[ $EXIT_CODE -eq 0 ]] && [[ -n "$PR_URL" ]]; then
+    STATUS="complete"
+elif [[ $EXIT_CODE -eq 0 ]]; then
+    STATUS="partial"
+else
+    STATUS="escalated"
+fi
+
+echo "[spawn] Notifying L1: ticket=$TICKET_ID status=$STATUS pr=$PR_URL"
+curl -s -X POST "http://localhost:8000/api/agent-complete" \
+    -H "Content-Type: application/json" \
+    -d "{\"ticket_id\": \"$TICKET_ID\", \"status\": \"$STATUS\", \"pr_url\": \"$PR_URL\", \"branch\": \"$BRANCH_NAME\"}" \
+    2>/dev/null || echo "[spawn] WARNING: Could not notify L1 (service may not be running)"
+
 exit $EXIT_CODE

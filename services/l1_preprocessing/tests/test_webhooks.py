@@ -155,6 +155,59 @@ async def test_manual_process_ticket_validation_error() -> None:
         assert response.status_code == 422
 
 
+# --- Agent Completion Callback ---
+
+
+async def test_agent_complete_updates_jira() -> None:
+    completion = {
+        "ticket_id": "SCRUM-1",
+        "status": "complete",
+        "pr_url": "https://github.com/org/repo/pull/1",
+        "branch": "ai/SCRUM-1",
+    }
+    with patch.object(main, "_get_jira_adapter") as mock_get:
+        mock_adapter = AsyncMock()
+        mock_get.return_value = mock_adapter
+        async with await _make_client() as client:
+            response = await client.post("/api/agent-complete", json=completion)
+        assert response.status_code == 200
+        mock_adapter.write_comment.assert_called_once()
+        mock_adapter.transition_status.assert_called_once_with("SCRUM-1", "Done")
+
+
+async def test_agent_complete_partial_adds_label() -> None:
+    completion = {
+        "ticket_id": "SCRUM-2",
+        "status": "partial",
+        "pr_url": "https://github.com/org/repo/pull/2",
+        "branch": "ai/SCRUM-2",
+    }
+    with patch.object(main, "_get_jira_adapter") as mock_get:
+        mock_adapter = AsyncMock()
+        mock_get.return_value = mock_adapter
+        async with await _make_client() as client:
+            response = await client.post("/api/agent-complete", json=completion)
+        assert response.status_code == 200
+        mock_adapter.add_label.assert_called_once_with("SCRUM-2", "partial-implementation")
+        mock_adapter.transition_status.assert_not_called()
+
+
+async def test_agent_complete_escalated_adds_label() -> None:
+    completion = {
+        "ticket_id": "SCRUM-3",
+        "status": "escalated",
+        "pr_url": "",
+        "branch": "ai/SCRUM-3",
+    }
+    with patch.object(main, "_get_jira_adapter") as mock_get:
+        mock_adapter = AsyncMock()
+        mock_get.return_value = mock_adapter
+        async with await _make_client() as client:
+            response = await client.post("/api/agent-complete", json=completion)
+        assert response.status_code == 200
+        mock_adapter.add_label.assert_called_once_with("SCRUM-3", "needs-human")
+
+
 # --- Jira Webhook: malformed payloads ---
 
 

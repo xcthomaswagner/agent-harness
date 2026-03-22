@@ -7,8 +7,10 @@ import hmac
 import json
 from typing import Any
 
+import httpx
 import structlog
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from pydantic import BaseModel
 
 from adapters.ado_adapter import AdoAdapter
 from adapters.jira_adapter import JiraAdapter
@@ -157,3 +159,77 @@ async def manual_process_ticket(
     )
     background_tasks.add_task(_process_ticket, ticket)
     return {"status": "accepted", "ticket_id": ticket.id}
+
+
+@app.post("/webhooks/github", status_code=202)
+async def github_webhook_proxy(request: Request) -> dict[str, str]:
+    """Proxy GitHub webhooks to the L3 PR Review Service.
+
+    Since ngrok free tier only supports one tunnel, GitHub webhooks arrive
+    at L1 (port 8000) and are forwarded to L3 (port 8001).
+    """
+    body = await request.body()
+    headers = dict(request.headers)
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                "http://localhost:8001/webhooks/github",
+                content=body,
+                headers={
+                    k: v for k, v in headers.items()
+                    if k.lower() in (
+                        "content-type", "x-github-event",
+                        "x-hub-signature-256", "x-github-delivery",
+                    )
+                },
+                timeout=30.0,
+            )
+            result: dict[str, str] = response.json()
+            return result
+        except httpx.ConnectError:
+            logger.warning("l3_service_unavailable")
+            return {"status": "l3_unavailable"}
+
+
+class CompletionPayload(BaseModel):
+    """Payload sent by the spawn script when an agent finishes."""
+
+    ticket_id: str
+    source: str = "jira"
+    status: str  # "complete", "partial", "escalated"
+    pr_url: str = ""
+    branch: str = ""
+
+
+@app.post("/api/agent-complete", status_code=200)
+async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
+    """Called by the spawn script when the agent finishes.
+
+    Updates the Jira/ADO ticket with the PR link and transitions to Done.
+    """
+    log = logger.bind(ticket_id=payload.ticket_id, status=payload.status)
+    log.info("agent_completion_received", pr_url=payload.pr_url)
+
+    adapter = _get_jira_adapter()
+
+    try:
+        if payload.pr_url:
+            comment = (
+                f"*AI Pipeline — Complete*\n\n"
+                f"PR: {payload.pr_url}\n"
+                f"Branch: {payload.branch}\n"
+                f"Status: {payload.status}"
+            )
+            await adapter.write_comment(payload.ticket_id, comment)
+
+        if payload.status == "complete":
+            await adapter.transition_status(payload.ticket_id, "Done")
+            log.info("ticket_transitioned_to_done")
+        elif payload.status in ("partial", "escalated"):
+            label = "needs-human" if payload.status == "escalated" else "partial-implementation"
+            await adapter.add_label(payload.ticket_id, label)
+    except Exception:
+        log.exception("completion_update_failed")
+
+    return {"status": "ok", "ticket_id": payload.ticket_id}

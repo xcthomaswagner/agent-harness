@@ -14,6 +14,10 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from event_classifier import EventType, classify_event
 from spawner import SessionSpawner
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 logger = structlog.get_logger()
 
 WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
