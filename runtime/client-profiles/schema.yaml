@@ -1,0 +1,40 @@
+# Client Profile Schema
+# Copy this file and fill in your client-specific values.
+# Save as: runtime/client-profiles/<client-name>.yaml
+
+client: "Client Name"
+platform_profile: ""  # sitecore | salesforce | (empty for generic)
+
+ticket_source:
+  type: "jira"  # jira | ado
+  instance: "https://client.atlassian.net"
+  project_key: "PROJ"
+  ai_label: "ai-implement"           # Label that triggers the pipeline
+  quick_label: "ai-quick"            # Label for single-agent quick mode
+  clarification_status: "Needs Info" # Status set when analyst needs more info
+  done_status: "Done"                # Status set on PR creation
+  custom_fields:
+    acceptance_criteria: "customfield_10429"
+    story_points: "customfield_10040"
+
+source_control:
+  type: "github"  # github | azure-repos
+  org: "client-org"
+  repo: "client-repo"
+  default_branch: "main"
+  branch_prefix: "ai/"               # AI-created branches prefixed for visibility
+  pr_reviewers: []                    # GitHub usernames to auto-assign as reviewers
+
+ci_pipeline:
+  test_command: "npm test"
+  lint_command: "npm run lint"
+  build_command: "npm run build"
+  e2e_command: ""                     # Empty = skip E2E
+
+test_framework:
+  unit: "jest"              # jest | pytest | nunit | xunit
+  integration: ""           # supertest | pytest | (empty = skip)
+  e2e: ""                   # playwright | cypress | (empty = skip)
+
+client_repo:
+  local_path: ""            # Local path to the client repo for spawning agents

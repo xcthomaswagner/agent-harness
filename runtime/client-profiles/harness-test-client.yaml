@@ -1,0 +1,39 @@
+# Client Profile: Harness Test Client
+# Synthetic Next.js project used for E2E testing of the harness pipeline.
+
+client: "Harness Test Client"
+platform_profile: ""  # Generic (no Sitecore/Salesforce)
+
+ticket_source:
+  type: "jira"
+  instance: "https://xcentium-team-zehw5w7x.atlassian.net"
+  project_key: "SCRUM"
+  ai_label: "ai-implement"
+  quick_label: "ai-quick"
+  clarification_status: "Needs Info"
+  done_status: "Done"
+  custom_fields:
+    acceptance_criteria: "customfield_10429"
+    story_points: "customfield_10040"
+
+source_control:
+  type: "github"
+  org: "xcthomaswagner"
+  repo: "harness-test-client"
+  default_branch: "main"
+  branch_prefix: "ai/"
+  pr_reviewers: []
+
+ci_pipeline:
+  test_command: "npm test"
+  lint_command: ""
+  build_command: ""
+  e2e_command: ""
+
+test_framework:
+  unit: "jest"
+  integration: ""
+  e2e: ""
+
+client_repo:
+  local_path: "/Users/thomaswagner/Desktop/Projects.nosync/harness-test-client"

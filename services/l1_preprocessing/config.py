@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     # L2 Dispatch
     default_client_repo: str = ""  # Path to the client repo for spawn-team.sh
 
+    # Queue (optional — falls back to in-process background tasks if empty)
+    redis_url: str = ""  # e.g., redis://localhost:6379/0
+
+    # Composio (optional — falls back to custom spawn script if false)
+    use_composio: bool = False
+    composio_project: str = ""  # Project name in agent-orchestrator.yaml
+
     # Service
     log_level: str = "INFO"
 

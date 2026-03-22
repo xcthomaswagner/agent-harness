@@ -58,6 +58,24 @@ def _get_pipeline() -> Pipeline:
 # --- Pipeline processing (background) ---
 
 
+def _enqueue_or_background(
+    ticket: TicketPayload, background_tasks: BackgroundTasks
+) -> str:
+    """Try to enqueue via Redis, fall back to FastAPI BackgroundTasks.
+
+    Returns "queued" or "background".
+    """
+    from queue_worker import enqueue_ticket
+
+    job_id = enqueue_ticket(ticket)
+    if job_id:
+        logger.info("ticket_queued", ticket_id=ticket.id, job_id=job_id)
+        return "queued"
+
+    background_tasks.add_task(_process_ticket, ticket)
+    return "background"
+
+
 async def _process_ticket(ticket: TicketPayload) -> None:
     """Process a normalized ticket through the L1 pipeline.
 
@@ -120,8 +138,8 @@ async def jira_webhook(
 
     logger.info("jira_webhook_received", ticket_id=ticket.id, ticket_type=ticket.ticket_type)
 
-    background_tasks.add_task(_process_ticket, ticket)
-    return {"status": "accepted", "ticket_id": ticket.id}
+    dispatch = _enqueue_or_background(ticket, background_tasks)
+    return {"status": "accepted", "ticket_id": ticket.id, "dispatch": dispatch}
 
 
 @app.post("/webhooks/ado", status_code=202)
@@ -141,8 +159,8 @@ async def ado_webhook(
 
     logger.info("ado_webhook_received", ticket_id=ticket.id, ticket_type=ticket.ticket_type)
 
-    background_tasks.add_task(_process_ticket, ticket)
-    return {"status": "accepted", "ticket_id": ticket.id}
+    dispatch = _enqueue_or_background(ticket, background_tasks)
+    return {"status": "accepted", "ticket_id": ticket.id, "dispatch": dispatch}
 
 
 @app.post("/api/process-ticket", status_code=202)
@@ -157,8 +175,8 @@ async def manual_process_ticket(
     logger.info(
         "manual_ticket_submitted", ticket_id=ticket.id, ticket_type=ticket.ticket_type
     )
-    background_tasks.add_task(_process_ticket, ticket)
-    return {"status": "accepted", "ticket_id": ticket.id}
+    dispatch = _enqueue_or_background(ticket, background_tasks)
+    return {"status": "accepted", "ticket_id": ticket.id, "dispatch": dispatch}
 
 
 @app.post("/webhooks/github", status_code=202)
