@@ -67,12 +67,17 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v --tb=short
 
-  shell-tests:
-    name: Shell Script Tests
+  script-tests:
+    name: Script Tests
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Run inject-runtime tests
-        run: bash tests/test_inject_runtime.sh
+        run: python3 tests/test_inject_runtime.py

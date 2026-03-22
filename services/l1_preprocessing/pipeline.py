@@ -9,6 +9,7 @@ This module connects the ticket analyst to the downstream actions:
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,7 @@ from models import (
 logger = structlog.get_logger()
 
 HARNESS_ROOT = Path(__file__).resolve().parents[2]
-SPAWN_SCRIPT = HARNESS_ROOT / "scripts" / "spawn-team.sh"
+SPAWN_SCRIPT = HARNESS_ROOT / "scripts" / "spawn_team.py"
 
 
 class Pipeline:
@@ -319,7 +320,7 @@ class Pipeline:
 
         branch_name = f"ai/{enriched.id}"
         cmd = [
-            str(SPAWN_SCRIPT),
+            sys.executable, str(SPAWN_SCRIPT),
             "--client-repo", client_repo,
             "--ticket-json", str(ticket_path),
             "--branch-name", branch_name,
