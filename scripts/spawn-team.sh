@@ -108,7 +108,7 @@ PROMPT="You are the team lead. Read the enriched ticket at /.harness/ticket.json
 cd "$WORKTREE_DIR"
 
 # Launch and capture output
-if claude -p "$PROMPT" 2>&1 | tee ".harness/logs/session.log"; then
+if claude -p "$PROMPT" --dangerously-skip-permissions 2>&1 | tee ".harness/logs/session.log"; then
     EXIT_CODE=0
 else
     EXIT_CODE=$?
