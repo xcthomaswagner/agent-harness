@@ -98,7 +98,9 @@ async def _process_ticket(ticket: TicketPayload) -> None:
     try:
         result = await _get_pipeline().process(ticket)
         log.info("processing_ticket_completed", **result)
-        append_trace(ticket.id, trace_id, "pipeline", "processing_completed", **result)
+        # Remove ticket_id from result to avoid collision with positional arg
+        trace_data = {k: v for k, v in result.items() if k != "ticket_id"}
+        append_trace(ticket.id, trace_id, "pipeline", "processing_completed", **trace_data)
     except Exception:
         log.exception("processing_ticket_failed")
 
