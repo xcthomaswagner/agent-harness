@@ -16,7 +16,10 @@ import structlog
 
 from adapters.jira_adapter import JiraAdapter
 from analyst import TicketAnalyst
+from client_profile import ClientProfile, load_profile
 from config import Settings
+from conflict_detector import ConflictDetector
+from figma_extractor import FigmaExtractor, detect_figma_links
 from models import (
     DecompositionPlan,
     EnrichedTicket,
@@ -39,10 +42,16 @@ class Pipeline:
         settings: Settings,
         analyst: TicketAnalyst | None = None,
         jira_adapter: JiraAdapter | None = None,
+        conflict_detector: ConflictDetector | None = None,
+        figma_extractor: FigmaExtractor | None = None,
     ) -> None:
         self._settings = settings
         self._analyst = analyst or TicketAnalyst(settings=settings)
         self._jira_adapter = jira_adapter or JiraAdapter(settings=settings)
+        self._conflict_detector = conflict_detector or ConflictDetector()
+        self._figma_extractor = figma_extractor or FigmaExtractor(
+            api_token=settings.figma_api_token
+        )
 
     def _get_adapter(
         self, ticket: EnrichedTicket | InfoRequest | DecompositionPlan
@@ -82,16 +91,56 @@ class Pipeline:
             raise TypeError(f"Expected DecompositionPlan, got {type(output).__name__}")
         return await self._handle_decomposition(output, log)
 
+    def _load_client_profile(self, ticket: TicketPayload) -> ClientProfile | None:
+        """Load the client profile for this ticket's project."""
+        profile_name = self._settings.default_client_profile
+        if not profile_name:
+            return None
+        profile = load_profile(profile_name)
+        if profile:
+            log = logger.bind(ticket_id=ticket.id)
+            log.info("client_profile_loaded", profile=profile_name)
+        return profile
+
     async def _handle_enriched(
         self, enriched: EnrichedTicket, log: Any
     ) -> dict[str, Any]:
         """Handle an enriched ticket — write back to Jira and trigger L2."""
         adapter = self._get_adapter(enriched)
+        profile = self._load_client_profile(enriched)
+
+        # Check for conflicts with in-progress tickets
+        conflicts = self._conflict_detector.check_conflicts(
+            enriched.id, [f.name for f in (enriched.test_scenarios or [])]
+        )
+        if conflicts and enriched.callback:
+            warning = self._conflict_detector.format_warning(enriched.id, conflicts)
+            await adapter.write_comment(enriched.id, warning)
+            log.warning("conflict_warning_posted", conflicts=len(conflicts))
+
+        # Extract Figma design spec if Figma link found in ticket
+        if not enriched.figma_design_spec:
+            all_text = f"{enriched.description} {' '.join(enriched.acceptance_criteria)}"
+            figma_links = detect_figma_links(all_text)
+            if figma_links:
+                spec = await self._figma_extractor.extract(figma_links[0]["url"])
+                if spec:
+                    enriched.figma_design_spec = spec
+                    log.info("figma_design_extracted", components=len(spec.components))
+
+        # Auto-detect platform profile from client profile
+        if not enriched.platform_profile and profile and profile.platform_profile:
+            enriched.platform_profile = profile.platform_profile
+            log.info("platform_profile_set", profile=profile.platform_profile)
+
+        # Determine done status from client profile
+        done_status = profile.done_status if profile else "In Progress"
 
         # Transition to "In Progress"
         if enriched.callback:
             try:
-                await adapter.transition_status(enriched.id, "In Progress")
+                target_status = "In Progress" if done_status == "Done" else done_status
+                await adapter.transition_status(enriched.id, target_status)
                 log.info("ticket_transitioned_to_in_progress")
             except Exception:
                 log.warning("status_transition_failed", target="In Progress")
@@ -117,9 +166,24 @@ class Pipeline:
         if "ai-quick" in enriched.labels:
             pipeline_mode = "quick"
 
+        # Register as active ticket for conflict detection
+        affected_files = []
+        if enriched.size_assessment:
+            affected_files = [enriched.title]  # Placeholder — real file list comes from plan
+        self._conflict_detector.register(
+            enriched.id, enriched.title, affected_files, f"ai/{enriched.id}"
+        )
+
+        # Use client profile repo path if available
+        client_repo = (
+            (profile.client_repo_path if profile else "")
+            or self._settings.default_client_repo
+        )
+
         # Trigger L2 (spawn Agent Team)
         spawn_result = await self._trigger_l2(
-            enriched, ticket_path, log, pipeline_mode=pipeline_mode
+            enriched, ticket_path, log,
+            pipeline_mode=pipeline_mode, client_repo_override=client_repo,
         )
 
         return {
@@ -128,6 +192,8 @@ class Pipeline:
             "generated_ac_count": len(enriched.generated_acceptance_criteria),
             "test_scenario_count": len(enriched.test_scenarios),
             "spawn_triggered": spawn_result,
+            "conflicts": len(conflicts) if conflicts else 0,
+            "figma_extracted": enriched.figma_design_spec is not None,
         }
 
     async def _handle_info_request(
@@ -196,6 +262,7 @@ class Pipeline:
         ticket_path: Path,
         log: Any,
         pipeline_mode: str = "multi",
+        client_repo_override: str = "",
     ) -> bool:
         """Trigger L2 by calling the spawn script or Composio.
 
@@ -208,7 +275,7 @@ class Pipeline:
 
         Returns True if spawn was triggered, False if skipped.
         """
-        client_repo = self._settings.default_client_repo
+        client_repo = client_repo_override or self._settings.default_client_repo
         if not client_repo:
             log.warning(
                 "l2_spawn_skipped",

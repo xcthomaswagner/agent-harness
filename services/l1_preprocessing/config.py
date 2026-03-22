@@ -29,8 +29,12 @@ class Settings(BaseSettings):
     # Webhook
     webhook_secret: str = ""
 
+    # Figma (optional — extraction skipped if empty)
+    figma_api_token: str = ""
+
     # L2 Dispatch
     default_client_repo: str = ""  # Path to the client repo for spawn-team.sh
+    default_client_profile: str = ""  # Client profile name (loads from runtime/client-profiles/)
 
     # Queue (optional — falls back to in-process background tasks if empty)
     redis_url: str = ""  # e.g., redis://localhost:6379/0
