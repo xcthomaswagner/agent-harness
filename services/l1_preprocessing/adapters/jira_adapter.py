@@ -153,7 +153,7 @@ class JiraAdapter:
 
         # Text node — the leaf
         if node_type == "text":
-            return node.get("text", "")
+            return str(node.get("text", ""))
 
         # Hard break
         if node_type == "hardBreak":
@@ -173,7 +173,7 @@ class JiraAdapter:
         if node_type in ("bulletList", "orderedList"):
             return joined + "\n"
         if node_type == "heading":
-            level = node.get("attrs", {}).get("level", 1)
+            level = int(node.get("attrs", {}).get("level", 1))
             return "#" * level + " " + joined + "\n"
 
         return joined

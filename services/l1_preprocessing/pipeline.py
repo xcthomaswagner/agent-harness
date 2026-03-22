@@ -44,6 +44,16 @@ class Pipeline:
         self._analyst = analyst or TicketAnalyst(settings=settings)
         self._jira_adapter = jira_adapter or JiraAdapter(settings=settings)
 
+    def _get_adapter(
+        self, ticket: EnrichedTicket | InfoRequest | DecompositionPlan
+    ) -> JiraAdapter:
+        """Return the appropriate adapter for write-back operations.
+
+        Currently only Jira is supported. ADO adapter will be added when
+        the pipeline routes ADO tickets through here.
+        """
+        return self._jira_adapter
+
     async def process(self, ticket: TicketPayload) -> dict[str, Any]:
         """Run a ticket through the full L1 pipeline.
 
@@ -76,6 +86,16 @@ class Pipeline:
         self, enriched: EnrichedTicket, log: Any
     ) -> dict[str, Any]:
         """Handle an enriched ticket — write back to Jira and trigger L2."""
+        adapter = self._get_adapter(enriched)
+
+        # Transition to "In Progress"
+        if enriched.callback:
+            try:
+                await adapter.transition_status(enriched.id, "In Progress")
+                log.info("ticket_transitioned_to_in_progress")
+            except Exception:
+                log.warning("status_transition_failed", target="In Progress")
+
         # Write generated AC back to Jira
         if enriched.callback and enriched.generated_acceptance_criteria:
             ac_text = "\n".join(
@@ -86,14 +106,21 @@ class Pipeline:
                 f"\n\n*Edge Cases:*\n"
                 + "\n".join(f"- {ec}" for ec in enriched.edge_cases)
             )
-            await self._jira_adapter.write_comment(enriched.id, comment)
+            await adapter.write_comment(enriched.id, comment)
             log.info("enrichment_written_to_jira")
 
         # Write enriched ticket to temp file for spawn script
         ticket_path = self._write_ticket_json(enriched)
 
+        # Determine pipeline mode from labels
+        pipeline_mode = "multi"
+        if "ai-quick" in enriched.labels:
+            pipeline_mode = "quick"
+
         # Trigger L2 (spawn Agent Team)
-        spawn_result = await self._trigger_l2(enriched, ticket_path, log)
+        spawn_result = await self._trigger_l2(
+            enriched, ticket_path, log, pipeline_mode=pipeline_mode
+        )
 
         return {
             "status": "enriched",
@@ -164,17 +191,20 @@ class Pipeline:
             return Path(tmp.name)
 
     async def _trigger_l2(
-        self, enriched: EnrichedTicket, ticket_path: Path, log: Any
+        self,
+        enriched: EnrichedTicket,
+        ticket_path: Path,
+        log: Any,
+        pipeline_mode: str = "multi",
     ) -> bool:
         """Trigger L2 by calling the spawn script.
 
-        In Phase 1, this is a direct subprocess call. In Phase 4, this will
-        be replaced by a queue-based dispatch.
+        Args:
+            pipeline_mode: "multi" (default) for full review/QA pipeline,
+                          "quick" for single-agent fast mode.
 
-        Returns True if spawn was triggered, False if skipped (no client repo configured).
+        Returns True if spawn was triggered, False if skipped.
         """
-        # TODO: Get client repo path from client profile config
-        # For now, check if a default client repo is configured
         client_repo = self._settings.default_client_repo
         if not client_repo:
             log.warning(
@@ -194,11 +224,16 @@ class Pipeline:
         if enriched.platform_profile:
             cmd.extend(["--platform-profile", enriched.platform_profile])
 
-        log.info("l2_spawn_triggered", branch=branch_name, client_repo=client_repo)
+        if pipeline_mode == "quick":
+            cmd.extend(["--mode", "quick"])
 
-        # Spawn in background — don't block the L1 service.
-        # Use DEVNULL (not PIPE) because we never read the output; PIPE would
-        # cause the child to block once its OS pipe buffer fills.
+        log.info(
+            "l2_spawn_triggered",
+            branch=branch_name,
+            client_repo=client_repo,
+            pipeline_mode=pipeline_mode,
+        )
+
         subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
