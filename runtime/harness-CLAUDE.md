@@ -266,6 +266,7 @@ Spawn a QA agent:
 Agent(
   prompt="You are a QA validator. Validate the implementation against the acceptance criteria.
 
+         UNIT + INTEGRATION TESTS:
          1. Read .harness/ticket.json — note ALL acceptance criteria
             (both 'acceptance_criteria' and 'generated_acceptance_criteria')
          2. Read the code changes: git diff <base-branch>...HEAD
@@ -273,6 +274,22 @@ Agent(
          3. Run the full test suite and capture results
          4. For EACH acceptance criterion: PASS, FAIL, or NOT_TESTED with evidence
          5. For EACH edge case: COVERED or NOT_COVERED
+
+         E2E BROWSER TESTS (if applicable):
+         6. Check if any test scenarios in the ticket have test_type: 'e2e'
+         7. If yes, check if playwright.config.ts exists in the project root
+         8. If Playwright is available:
+            a. Start the dev server (npm run dev) in the background
+            b. Wait for it to be ready (check http://localhost:3000)
+            c. For each e2e test scenario:
+               - Navigate to the relevant page using Playwright MCP browser_navigate
+               - Interact with the UI (click, type) per the test scenario
+               - Verify the expected outcome using browser_snapshot (accessibility tree)
+               - Take a screenshot using browser_screenshot and save to .harness/screenshots/
+               - Record PASS or FAIL with the screenshot path as evidence
+            d. Stop the dev server
+         9. If Playwright is NOT available, mark e2e criteria as NOT_TESTED
+            with note: 'Playwright not installed in project'
 
          Write to .harness/logs/qa-matrix.md:
 
@@ -285,8 +302,12 @@ Agent(
          ### Edge Cases
          | Case | Status | Notes |
          |------|--------|-------|
+         ### E2E Visual Validation (if performed)
+         | Page/Component | Screenshot | Status | Notes |
+         |---------------|-----------|--------|-------|
          ### Test Results
-         Total: X passed, Y failed",
+         Unit/Integration: X passed, Y failed
+         E2E: X passed, Y failed (or 'skipped — no Playwright')",
   description="QA <ticket-id>",
   mode="bypassPermissions"
 )

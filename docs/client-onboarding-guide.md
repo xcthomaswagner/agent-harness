@@ -69,6 +69,61 @@ The client repo should have a `CLAUDE.md` at its root describing:
 
 This file is critical — the agent reads it before writing any code.
 
+## Step 4b: Set Up E2E Testing (Optional)
+
+If the client project has UI components and you want the QA agent to validate them visually:
+
+### Install Playwright
+```bash
+cd <client-repo>
+npm install -D @playwright/test
+npx playwright install chromium
+```
+
+### Add Playwright Config
+Create `playwright.config.ts` at the project root:
+```typescript
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  testDir: "./e2e",
+  timeout: 30000,
+  use: {
+    baseURL: "http://localhost:3000",  // adjust to your dev server port
+    headless: true,
+    screenshot: "only-on-failure",
+  },
+  webServer: {
+    command: "npm run dev",  // adjust to your dev server command
+    port: 3000,
+    reuseExistingServer: true,
+  },
+});
+```
+
+### Add Test Script
+In `package.json`:
+```json
+{
+  "scripts": {
+    "test:e2e": "npx playwright test"
+  }
+}
+```
+
+### Create E2E Directory
+```bash
+mkdir e2e
+```
+
+The QA agent will automatically detect `playwright.config.ts` and use Playwright MCP to:
+- Start the dev server
+- Navigate the app and interact with UI elements
+- Take screenshots as evidence
+- Validate acceptance criteria that have `test_type: "e2e"`
+
+If Playwright is not installed, the QA agent skips E2E and marks those criteria as NOT_TESTED.
+
 ## Step 5: Set Up Jira Automation
 
 See [jira-automation-setup.md](jira-automation-setup.md) for detailed instructions.
