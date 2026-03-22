@@ -17,6 +17,8 @@ from adapters.jira_adapter import JiraAdapter
 from config import settings
 from models import TicketPayload
 from pipeline import Pipeline
+from trace_dashboard import router as trace_router
+from tracer import append_trace, consolidate_worktree_logs, generate_trace_id
 
 logger = structlog.get_logger()
 
@@ -25,6 +27,7 @@ app = FastAPI(
     description="Receives Jira/ADO webhooks, enriches tickets, dispatches to Agent Teams.",
     version="0.1.0",
 )
+app.include_router(trace_router)
 
 _jira_adapter: JiraAdapter | None = None
 _ado_adapter: AdoAdapter | None = None
@@ -88,10 +91,14 @@ async def _process_ticket(ticket: TicketPayload) -> None:
     """
     log = logger.bind(ticket_id=ticket.id, source=ticket.source)
     log.info("processing_ticket_started")
+    trace_id = generate_trace_id()
+    append_trace(ticket.id, trace_id, "pipeline", "processing_started",
+                 ticket_type=ticket.ticket_type, source=ticket.source)
 
     try:
         result = await _get_pipeline().process(ticket)
         log.info("processing_ticket_completed", **result)
+        append_trace(ticket.id, trace_id, "pipeline", "processing_completed", **result)
     except Exception:
         log.exception("processing_ticket_failed")
 
@@ -135,8 +142,11 @@ async def jira_webhook(
         raise HTTPException(status_code=422, detail=f"Invalid JSON body: {exc}") from exc
 
     ticket = _get_jira_adapter().normalize(payload)
+    trace_id = generate_trace_id()
 
     logger.info("jira_webhook_received", ticket_id=ticket.id, ticket_type=ticket.ticket_type)
+    append_trace(ticket.id, trace_id, "webhook", "jira_webhook_received",
+                 ticket_type=ticket.ticket_type, source="jira")
 
     dispatch = _enqueue_or_background(ticket, background_tasks)
     return {"status": "accepted", "ticket_id": ticket.id, "dispatch": dispatch}
@@ -237,6 +247,15 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
     """
     log = logger.bind(ticket_id=payload.ticket_id, status=payload.status)
     log.info("agent_completion_received", pr_url=payload.pr_url)
+
+    # Trace: record completion and consolidate worktree logs
+    trace_id = generate_trace_id()
+    append_trace(payload.ticket_id, trace_id, "completion", "agent_finished",
+                 status=payload.status, pr_url=payload.pr_url, branch=payload.branch)
+
+    # Consolidate worktree artifacts into the persistent trace
+    worktree_path = f"{settings.default_client_repo}/../worktrees/{payload.branch}"
+    consolidate_worktree_logs(payload.ticket_id, trace_id, worktree_path)
 
     adapter = _get_jira_adapter()
 

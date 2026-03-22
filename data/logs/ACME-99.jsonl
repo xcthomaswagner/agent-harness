@@ -1,0 +1,2 @@
+{"trace_id": "34807c0d3830", "ticket_id": "ACME-99", "timestamp": "2026-03-22T16:31:46.154903+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "bug", "source": "jira"}
+{"trace_id": "88083795b16a", "ticket_id": "ACME-99", "timestamp": "2026-03-22T16:31:46.155337+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "bug", "source": "jira"}

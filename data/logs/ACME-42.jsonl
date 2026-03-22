@@ -1,0 +1,9 @@
+{"trace_id": "b97f8a239ba4", "ticket_id": "ACME-42", "timestamp": "2026-03-22T16:31:15.782789+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "story", "source": "jira"}
+{"trace_id": "a76e79c7ee41", "ticket_id": "ACME-42", "timestamp": "2026-03-22T16:31:15.820050+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "7943db4e8366", "ticket_id": "ACME-42", "timestamp": "2026-03-22T16:32:07.207453+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "story", "source": "jira"}
+{"trace_id": "facf487a6fba", "ticket_id": "ACME-42", "timestamp": "2026-03-22T16:32:07.207792+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "f483ad2a0f0c", "ticket_id": "ACME-42", "timestamp": "2026-03-22T16:32:07.227067+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "story", "source": "jira"}
+{"trace_id": "00cfb15dc683", "ticket_id": "ACME-42", "timestamp": "2026-03-22T16:32:07.227269+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "68dc8a8b2e44", "ticket_id": "ACME-42", "timestamp": "2026-03-22T16:32:52.069145+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "story", "source": "jira"}
+{"trace_id": "65e68f336957", "ticket_id": "ACME-42", "timestamp": "2026-03-22T16:32:52.076123+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "story", "source": "jira"}
+{"trace_id": "ab8b34d1d9c7", "ticket_id": "ACME-42", "timestamp": "2026-03-22T16:32:52.076275+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}

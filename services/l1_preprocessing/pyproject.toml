@@ -51,6 +51,10 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
 # N999: directory name "l1-preprocessing" has a hyphen (not a library, just a service)
+
+[tool.ruff.lint.per-file-ignores]
+# trace_dashboard.py has inline HTML with long lines — not worth splitting
+"trace_dashboard.py" = ["E501"]
 ignore = ["N999"]
 
 [tool.mypy]

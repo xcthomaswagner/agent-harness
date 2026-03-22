@@ -1,0 +1,1 @@
+{"trace_id": "264a061f8f8a", "ticket_id": "TEST-1", "timestamp": "2026-03-22T16:32:47.116894+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
