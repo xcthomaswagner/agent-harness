@@ -125,6 +125,10 @@ fi
 
 cd "$WORKTREE_DIR"
 
+# Strip ANTHROPIC_API_KEY so Claude Code uses the Max subscription auth
+# instead of billing per-token against the API key
+unset ANTHROPIC_API_KEY
+
 # Launch and capture output
 if claude -p "$PROMPT" --dangerously-skip-permissions 2>&1 | tee ".harness/logs/session.log"; then
     EXIT_CODE=0
