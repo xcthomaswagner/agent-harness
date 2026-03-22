@@ -9,7 +9,7 @@ This guide walks through setting up the Agentic Developer Harness for a new clie
 - A git repository on GitHub (the client's codebase)
 - A Jira Cloud project
 - Claude Max subscription (flat-rate unlimited)
-- Node.js 20+ and Python 3.12+ on the machine running the harness
+- Python 3.12+ on the machine running the harness
 
 ## Step 1: Clone the Harness
 
@@ -26,11 +26,6 @@ cd services/l1_preprocessing
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-```
-
-### Composio (Node)
-```bash
-npm install -g @composio/ao
 ```
 
 ### Claude Code CLI

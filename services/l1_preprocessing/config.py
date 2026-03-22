@@ -39,10 +39,6 @@ class Settings(BaseSettings):
     # Queue (optional — falls back to in-process background tasks if empty)
     redis_url: str = ""  # e.g., redis://localhost:6379/0
 
-    # Composio (optional — falls back to custom spawn script if false)
-    use_composio: bool = False
-    composio_project: str = ""  # Project name in agent-orchestrator.yaml
-
     # Service
     log_level: str = "INFO"
 

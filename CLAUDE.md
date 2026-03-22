@@ -19,8 +19,8 @@ See `docs/Agentic_Developer_Harness_Architecture_Plan_V2.md` for the full archit
 
 - **Services (L1, L3):** Python 3.12+, FastAPI, Pydantic, httpx, structlog, Anthropic SDK
 - **Skills & Agents:** Markdown files (Claude Code skill format)
-- **Execution Layer:** Composio Agent Orchestrator (TypeScript, MIT)
-- **Scripts:** Bash (spawn, inject, cleanup)
+- **Execution Layer:** Custom Bash scripts (spawn-team, inject-runtime, cleanup-worktree)
+- **Scripts:** Bash (spawn, inject, cleanup, start-services, load-test)
 - **CI:** GitHub Actions (ruff, mypy, pytest)
 - **Testing:** pytest (unit/integration), pytest-asyncio for async FastAPI tests
 

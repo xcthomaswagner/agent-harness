@@ -301,10 +301,7 @@ class Pipeline:
         pipeline_mode: str = "multi",
         client_repo_override: str = "",
     ) -> bool:
-        """Trigger L2 by calling the spawn script or Composio.
-
-        Tries Composio (`ao spawn`) first if configured. Falls back to the
-        custom spawn script.
+        """Trigger L2 by calling the spawn script.
 
         Args:
             pipeline_mode: "multi" (default) for full review/QA pipeline,
@@ -321,68 +318,6 @@ class Pipeline:
             return False
 
         branch_name = f"ai/{enriched.id}"
-
-        # Try Composio first
-        if self._settings.use_composio:
-            return self._spawn_via_composio(
-                enriched, ticket_path, branch_name, pipeline_mode, log
-            )
-
-        # Fall back to custom spawn script
-        return self._spawn_via_script(
-            enriched, ticket_path, branch_name, pipeline_mode, client_repo, log
-        )
-
-    def _spawn_via_composio(
-        self,
-        enriched: EnrichedTicket,
-        ticket_path: Path,
-        branch_name: str,
-        pipeline_mode: str,
-        log: Any,
-    ) -> bool:
-        """Spawn via Composio Agent Orchestrator (`ao spawn`).
-
-        Composio handles worktree creation, session management, and the dashboard.
-        We still need to inject runtime files via the postCreate hook in
-        agent-orchestrator.yaml.
-        """
-        cmd = [
-            "ao", "spawn", enriched.id,
-            "--project", self._settings.composio_project or "default",
-        ]
-
-        log.info(
-            "l2_composio_spawn",
-            branch=branch_name,
-            pipeline_mode=pipeline_mode,
-        )
-
-        try:
-            subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            return True
-        except FileNotFoundError:
-            log.warning("composio_not_found_falling_back_to_script")
-            return self._spawn_via_script(
-                enriched, ticket_path, branch_name, pipeline_mode,
-                self._settings.default_client_repo, log,
-            )
-
-    def _spawn_via_script(
-        self,
-        enriched: EnrichedTicket,
-        ticket_path: Path,
-        branch_name: str,
-        pipeline_mode: str,
-        client_repo: str,
-        log: Any,
-    ) -> bool:
-        """Spawn via custom spawn-team.sh script."""
         cmd = [
             str(SPAWN_SCRIPT),
             "--client-repo", client_repo,
@@ -397,7 +332,7 @@ class Pipeline:
             cmd.extend(["--mode", "quick"])
 
         log.info(
-            "l2_script_spawn",
+            "l2_spawn_triggered",
             branch=branch_name,
             client_repo=client_repo,
             pipeline_mode=pipeline_mode,
