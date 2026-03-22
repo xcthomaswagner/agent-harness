@@ -128,10 +128,18 @@ class Pipeline:
                     enriched.figma_design_spec = spec
                     log.info("figma_design_extracted", components=len(spec.components))
 
-        # Auto-detect platform profile from client profile
-        if not enriched.platform_profile and profile and profile.platform_profile:
-            enriched.platform_profile = profile.platform_profile
-            log.info("platform_profile_set", profile=profile.platform_profile)
+        # Auto-detect platform profile
+        if not enriched.platform_profile:
+            # From client profile first
+            if profile and profile.platform_profile:
+                enriched.platform_profile = profile.platform_profile
+                log.info("platform_profile_from_config", profile=profile.platform_profile)
+            else:
+                # Auto-detect from repo files
+                detected = self._detect_platform_from_repo()
+                if detected:
+                    enriched.platform_profile = detected
+                    log.info("platform_profile_auto_detected", profile=detected)
 
         # Determine done status from client profile
         done_status = profile.done_status if profile else "In Progress"
@@ -244,6 +252,35 @@ class Pipeline:
             "ticket_id": decomp.ticket_id,
             "sub_ticket_count": len(decomp.sub_tickets),
         }
+
+    def _detect_platform_from_repo(self) -> str:
+        """Auto-detect platform from repo files."""
+        repo_path = Path(self._settings.default_client_repo)
+        if not repo_path.exists():
+            return ""
+
+        # Sitecore
+        if (repo_path / "sitecore.json").exists():
+            return "sitecore"
+        pkg_json = repo_path / "package.json"
+        if pkg_json.exists():
+            try:
+                import json
+
+                pkg = json.loads(pkg_json.read_text())
+                deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+                if any(k.startswith("@sitecore-jss") for k in deps):
+                    return "sitecore"
+            except Exception:
+                pass
+
+        # Salesforce
+        if (repo_path / "sfdx-project.json").exists():
+            return "salesforce"
+        if (repo_path / "force-app").is_dir():
+            return "salesforce"
+
+        return ""
 
     @staticmethod
     def _write_ticket_json(enriched: EnrichedTicket) -> Path:

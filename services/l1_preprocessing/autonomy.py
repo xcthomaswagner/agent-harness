@@ -54,6 +54,8 @@ class PROutcome:
         ai_issues_found: int = 0,
         defect_escaped: bool = False,
         merged: bool = False,
+        time_to_pr_seconds: int = 0,
+        escalated: bool = False,
     ) -> None:
         self.ticket_id = ticket_id
         self.pr_url = pr_url
@@ -64,6 +66,8 @@ class PROutcome:
         self.ai_issues_found = ai_issues_found
         self.defect_escaped = defect_escaped
         self.merged = merged
+        self.time_to_pr_seconds = time_to_pr_seconds
+        self.escalated = escalated
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +80,8 @@ class PROutcome:
             "ai_issues_found": self.ai_issues_found,
             "defect_escaped": self.defect_escaped,
             "merged": self.merged,
+            "time_to_pr_seconds": self.time_to_pr_seconds,
+            "escalated": self.escalated,
         }
 
     @classmethod
@@ -90,6 +96,8 @@ class PROutcome:
             ai_issues_found=int(data.get("ai_issues_found", 0)),
             defect_escaped=bool(data.get("defect_escaped", False)),
             merged=bool(data.get("merged", False)),
+            time_to_pr_seconds=int(data.get("time_to_pr_seconds", 0)),
+            escalated=bool(data.get("escalated", False)),
         )
 
 
@@ -164,6 +172,24 @@ class AutonomyEngine:
         # Determine recommended mode
         mode = self._recommend_mode(first_pass_rate, defect_rate, catch_rate, total)
 
+        # Time-to-PR metrics
+        pr_times = [o.time_to_pr_seconds for o in windowed if o.time_to_pr_seconds > 0]
+        avg_time_to_pr = round(sum(pr_times) / len(pr_times)) if pr_times else 0
+
+        # By ticket type
+        type_times: dict[str, list[int]] = {}
+        for o in windowed:
+            if o.time_to_pr_seconds > 0:
+                type_times.setdefault(o.ticket_type, []).append(o.time_to_pr_seconds)
+        avg_by_type = {
+            t: round(sum(times) / len(times))
+            for t, times in type_times.items()
+        }
+
+        # Escalation rate
+        escalated = sum(1 for o in windowed if o.escalated)
+        escalation_rate = round(escalated / total, 3) if total > 0 else 0.0
+
         return {
             "window_days": window_days,
             "sample_size": total,
@@ -172,6 +198,9 @@ class AutonomyEngine:
             "defect_escape_rate": round(defect_rate, 3),
             "self_review_catch_rate": round(min(catch_rate, 1.0), 3),
             "recommended_mode": mode,
+            "avg_time_to_pr_seconds": avg_time_to_pr,
+            "avg_time_to_pr_by_type": avg_by_type,
+            "escalation_rate": escalation_rate,
         }
 
     @staticmethod

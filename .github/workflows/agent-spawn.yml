@@ -1,0 +1,93 @@
+# Agent Spawn via GitHub Actions
+# Alternative L2 trigger that provides sandbox isolation for client codebases.
+# Triggered by L1 via workflow_dispatch with the enriched ticket as input.
+
+name: Spawn Agent Team
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticket_id:
+        description: 'Ticket ID (e.g., SCRUM-5)'
+        required: true
+        type: string
+      ticket_json:
+        description: 'Enriched ticket JSON (base64 encoded)'
+        required: true
+        type: string
+      pipeline_mode:
+        description: 'Pipeline mode'
+        required: false
+        default: 'multi'
+        type: choice
+        options:
+          - multi
+          - quick
+      platform_profile:
+        description: 'Platform profile (sitecore, salesforce, or empty)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  agent-team:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout client repo
+        uses: actions/checkout@v4
+
+      - name: Checkout harness
+        uses: actions/checkout@v4
+        with:
+          repository: xcthomaswagner/agent-harness
+          path: .harness-repo
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Decode enriched ticket
+        run: |
+          echo "${{ inputs.ticket_json }}" | base64 -d > /tmp/ticket.json
+
+      - name: Inject harness runtime
+        run: |
+          bash .harness-repo/scripts/inject-runtime.sh \
+            --target-dir . \
+            ${{ inputs.platform_profile && format('--platform-profile {0}', inputs.platform_profile) || '' }}
+
+      - name: Write ticket to harness directory
+        run: cp /tmp/ticket.json .harness/ticket.json
+
+      - name: Create feature branch
+        run: |
+          git checkout -b ai/${{ inputs.ticket_id }}
+
+      - name: Run Agent Team
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ "${{ inputs.pipeline_mode }}" = "quick" ]; then
+            PROMPT="You are the team lead in QUICK mode. Read the enriched ticket at .harness/ticket.json. Implement the changes yourself. Write tests, run them, commit, push, and open a draft PR."
+          else
+            PROMPT="You are the team lead. Read the enriched ticket at .harness/ticket.json and execute the pipeline per the Agentic Harness Pipeline Instructions in CLAUDE.md."
+          fi
+          claude -p "$PROMPT" --dangerously-skip-permissions 2>&1 | tee .harness/logs/session.log
+
+      - name: Push branch
+        run: |
+          git push -u origin ai/${{ inputs.ticket_id }} || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-logs-${{ inputs.ticket_id }}
+          path: .harness/logs/

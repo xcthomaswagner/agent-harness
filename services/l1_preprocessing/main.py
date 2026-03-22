@@ -210,6 +210,14 @@ async def github_webhook_proxy(request: Request) -> dict[str, str]:
             return {"status": "l3_unavailable"}
 
 
+class FailedUnit(BaseModel):
+    """A blocked/failed implementation unit."""
+
+    unit_id: str = ""
+    description: str = ""
+    failure_reason: str = ""
+
+
 class CompletionPayload(BaseModel):
     """Payload sent by the spawn script when an agent finishes."""
 
@@ -218,6 +226,7 @@ class CompletionPayload(BaseModel):
     status: str  # "complete", "partial", "escalated"
     pr_url: str = ""
     branch: str = ""
+    failed_units: list[FailedUnit] = []
 
 
 @app.post("/api/agent-complete", status_code=200)
@@ -247,6 +256,23 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
         elif payload.status in ("partial", "escalated"):
             label = "needs-human" if payload.status == "escalated" else "partial-implementation"
             await adapter.add_label(payload.ticket_id, label)
+
+            # Auto-file failed units as Jira sub-tasks
+            for unit in payload.failed_units:
+                sub_comment = (
+                    f"*AI Pipeline — Failed Unit: {unit.unit_id}*\n\n"
+                    f"*Description:* {unit.description}\n"
+                    f"*Failure:* {unit.failure_reason}\n\n"
+                    f"This unit needs manual implementation or investigation."
+                )
+                await adapter.write_comment(payload.ticket_id, sub_comment)
+                log.info("failed_unit_reported", unit_id=unit.unit_id)
+
+        # Unregister from conflict detection
+        from conflict_detector import ConflictDetector
+
+        ConflictDetector().unregister(payload.ticket_id)
+
     except Exception:
         log.exception("completion_update_failed")
 

@@ -70,14 +70,62 @@ async def _handle_pr_opened(payload: dict[str, Any]) -> None:
     )
 
 
+async def _fetch_ci_logs(repo: str, run_id: int) -> str:
+    """Fetch CI failure logs from GitHub Actions API."""
+    import httpx
+
+    gh_token = os.getenv("GITHUB_TOKEN", "")
+    if not gh_token or not run_id:
+        return ""
+
+    try:
+        async with httpx.AsyncClient() as client:
+            # Get failed jobs
+            resp = await client.get(
+                f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs",
+                headers={
+                    "Authorization": f"Bearer {gh_token}",
+                    "Accept": "application/vnd.github.v3+json",
+                },
+                timeout=15.0,
+            )
+            if resp.status_code != 200:
+                return f"Failed to fetch jobs: HTTP {resp.status_code}"
+
+            jobs = resp.json().get("jobs", [])
+            failed_jobs = [j for j in jobs if j.get("conclusion") == "failure"]
+
+            logs: list[str] = []
+            for job in failed_jobs[:3]:  # Limit to 3 failed jobs
+                job_name = job.get("name", "unknown")
+                steps = job.get("steps", [])
+                failed_steps = [
+                    s for s in steps if s.get("conclusion") == "failure"
+                ]
+                for step in failed_steps:
+                    logs.append(
+                        f"Job: {job_name} | Step: {step.get('name', '?')} "
+                        f"| Status: {step.get('conclusion', '?')}"
+                    )
+
+            return "\n".join(logs) if logs else "CI failed but no step details available"
+    except Exception as exc:
+        logger.warning("ci_log_fetch_failed", error=str(exc))
+        return f"Failed to fetch CI logs: {exc}"
+
+
 async def _handle_ci_failed(payload: dict[str, Any]) -> None:
-    """Handle CI failure — spawn fix agent."""
+    """Handle CI failure — fetch logs and spawn fix agent."""
     check = payload.get("check_suite", payload.get("check_run", {}))
     pr_numbers = [
         pr.get("number", 0) for pr in check.get("pull_requests", [])
     ]
     branch = check.get("head_branch", "")
     conclusion = check.get("conclusion", "")
+    repo = (
+        check.get("repository", {}).get("full_name", "")
+        or payload.get("repository", {}).get("full_name", "")
+    )
 
     if not pr_numbers:
         logger.debug("ci_failure_no_pr", branch=branch)
@@ -86,14 +134,19 @@ async def _handle_ci_failed(payload: dict[str, Any]) -> None:
     log = logger.bind(pr_numbers=pr_numbers, branch=branch)
     log.info("handling_ci_failure")
 
-    # TODO: Fetch actual failure logs from GitHub Actions API
-    failure_summary = f"CI {conclusion} on branch {branch}"
+    # Fetch actual failure logs from GitHub Actions
+    run_id = check.get("id", 0)
+    failure_logs = await _fetch_ci_logs(repo, run_id)
+    if not failure_logs:
+        failure_logs = f"CI {conclusion} on branch {branch}. Check the Actions tab for details."
+
+    log.info("ci_logs_fetched", log_length=len(failure_logs))
 
     for pr_number in pr_numbers:
         _get_spawner().spawn_ci_fix(
             pr_number=pr_number,
             branch=branch,
-            failure_logs=failure_summary,
+            failure_logs=failure_logs,
         )
 
 
