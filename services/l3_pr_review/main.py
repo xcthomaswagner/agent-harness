@@ -9,12 +9,11 @@ import os
 from typing import Any
 
 import structlog
+from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 
 from event_classifier import EventType, classify_event
 from spawner import SessionSpawner
-
-from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -154,11 +153,75 @@ async def _handle_review_changes_requested(payload: dict[str, Any]) -> None:
     )
 
 
+async def _handle_review_approved(payload: dict[str, Any]) -> None:
+    """Handle PR approval — check if auto-merge is appropriate."""
+    pr = payload.get("pull_request", {})
+    pr_number = pr.get("number", 0)
+    branch = pr.get("head", {}).get("ref", "")
+    reviewer = payload.get("review", {}).get("user", {}).get("login", "unknown")
+    repo = pr.get("base", {}).get("repo", {}).get("full_name", "")
+
+    log = logger.bind(pr_number=pr_number, reviewer=reviewer)
+    log.info("handling_review_approved")
+
+    # Extract ticket type from branch name or PR labels
+    labels = [label.get("name", "") for label in pr.get("labels", [])]
+    ticket_type = "story"  # Default
+    for label in labels:
+        if label in ("bug", "chore", "config", "dependency", "docs"):
+            ticket_type = label
+            break
+
+    # Notify L1 of the approval for autonomy tracking
+    try:
+        import httpx
+
+        await httpx.AsyncClient().post(
+            "http://localhost:8000/api/agent-complete",
+            json={
+                "ticket_id": branch.replace("ai/", ""),
+                "status": "complete",
+                "pr_url": pr.get("html_url", ""),
+                "branch": branch,
+            },
+            timeout=10.0,
+        )
+    except Exception:
+        log.warning("l1_notification_failed")
+
+    # TODO: Check autonomy.should_auto_merge() and merge if appropriate
+    # For now, just log the approval
+    log.info(
+        "pr_approved",
+        ticket_type=ticket_type,
+        branch=branch,
+        repo=repo,
+    )
+
+
+async def _handle_ci_passed(payload: dict[str, Any]) -> None:
+    """Handle CI passing — check if PR is approved and ready for auto-merge."""
+    check = payload.get("check_suite", payload.get("check_run", {}))
+    pr_numbers = [pr.get("number", 0) for pr in check.get("pull_requests", [])]
+    branch = check.get("head_branch", "")
+
+    if not pr_numbers:
+        return
+
+    log = logger.bind(pr_numbers=pr_numbers, branch=branch)
+    log.info("ci_passed", branch=branch)
+
+    # TODO: If PR is already approved and autonomy allows, trigger auto-merge
+    # This requires checking the PR's review state via GitHub API
+
+
 # Route map
 _HANDLERS: dict[EventType, Any] = {
     EventType.PR_OPENED: _handle_pr_opened,
     EventType.PR_READY_FOR_REVIEW: _handle_pr_opened,
     EventType.CI_FAILED: _handle_ci_failed,
+    EventType.CI_PASSED: _handle_ci_passed,
+    EventType.REVIEW_APPROVED: _handle_review_approved,
     EventType.REVIEW_COMMENT: _handle_review_comment,
     EventType.REVIEW_CHANGES_REQUESTED: _handle_review_changes_requested,
 }
