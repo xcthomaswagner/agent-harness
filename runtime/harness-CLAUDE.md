@@ -291,6 +291,32 @@ Agent(
          9. If Playwright is NOT available, mark e2e criteria as NOT_TESTED
             with note: 'Playwright not installed in project'
 
+         FIGMA DESIGN COMPLIANCE (if figma_design_spec is present in the ticket):
+         10. Read the figma_design_spec from .harness/ticket.json
+         11. During E2E browser validation (or in a separate pass if no e2e scenarios),
+             start the dev server and navigate to the relevant pages
+         12. For each page/component, use Playwright MCP to verify structural compliance:
+
+             COLOR TOKENS: Use browser_execute to read computed CSS colors on key elements.
+             Compare against figma_design_spec.color_tokens.
+             Example: document.defaultView.getComputedStyle(element).backgroundColor
+             Record: expected color from Figma vs actual rendered color. PASS if they match.
+
+             TYPOGRAPHY: Use browser_execute to read computed font-family, font-size,
+             font-weight on headings, body text, and labels.
+             Compare against figma_design_spec.typography.
+             Record: expected font spec vs actual computed values.
+
+             COMPONENTS: Use browser_snapshot (accessibility tree) to verify all components
+             listed in figma_design_spec.components are present in the rendered page.
+             Record: each expected component and whether it was found.
+
+             LAYOUT: Use browser_execute to read element bounding rects and flex/grid
+             properties. Compare against figma_design_spec.layout_patterns.
+             Record: expected layout direction vs actual.
+
+         13. If figma_design_spec is NOT present, skip this section entirely.
+
          Write to .harness/logs/qa-matrix.md:
 
          ## QA Matrix — <ticket-id>
@@ -305,9 +331,17 @@ Agent(
          ### E2E Visual Validation (if performed)
          | Page/Component | Screenshot | Status | Notes |
          |---------------|-----------|--------|-------|
+         ### Figma Design Compliance (if design spec present)
+         | Check | Expected (Figma) | Actual (Rendered) | Status |
+         |-------|-----------------|-------------------|--------|
+         | Primary color | #1B2A4A | #1B2A4A | PASS |
+         | Heading font | Inter 24px Bold | Inter 24px 700 | PASS |
+         | Component: Button | Present | Found (role=button) | PASS |
+         | Layout: Header | horizontal | flex-direction: row | PASS |
          ### Test Results
          Unit/Integration: X passed, Y failed
-         E2E: X passed, Y failed (or 'skipped — no Playwright')",
+         E2E: X passed, Y failed (or 'skipped — no Playwright')
+         Design Compliance: X/Y checks passed (or 'skipped — no Figma spec')",
   description="QA <ticket-id>",
   mode="bypassPermissions"
 )
