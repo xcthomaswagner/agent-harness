@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
+import subprocess
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -189,6 +192,82 @@ async def manual_process_ticket(
     )
     dispatch = _enqueue_or_background(ticket, background_tasks)
     return {"status": "accepted", "ticket_id": ticket.id, "dispatch": dispatch}
+
+
+class RetestPayload(BaseModel):
+    """Payload for re-running specific pipeline phases on an existing branch."""
+
+    ticket_id: str
+    phase: str = "qa"  # "qa", "e2e", "review"
+    branch: str = ""  # defaults to ai/<ticket-id>
+
+
+@app.post("/api/retest", status_code=202)
+async def retest(payload: RetestPayload, background_tasks: BackgroundTasks) -> dict[str, str]:
+    """Re-run a specific phase on an existing branch.
+
+    Usage:
+        curl -X POST localhost:8000/api/retest -H 'Content-Type: application/json' \
+            -d '{"ticket_id": "SCRUM-8", "phase": "e2e"}'
+
+    Phases:
+        - qa: full QA validation (unit + integration + e2e)
+        - e2e: E2E browser tests only
+        - review: code review only
+    """
+    branch = payload.branch or f"ai/{payload.ticket_id}"
+    client_repo = settings.default_client_repo
+    if not client_repo:
+        return {"status": "error", "detail": "No default_client_repo configured"}
+
+    worktree_dir = f"{client_repo}/../worktrees/{branch}"
+
+    log = logger.bind(ticket_id=payload.ticket_id, phase=payload.phase)
+    log.info("retest_requested", branch=branch)
+
+    phase_prompts = {
+        "qa": (
+            f"You are a QA validator. The code is already implemented on branch {branch}. "
+            f"Read the enriched ticket at .harness/ticket.json. "
+            f"Run the full test suite. If playwright.config.ts exists, also run E2E tests "
+            f"by starting the dev server and using Playwright MCP. "
+            f"Write your QA matrix to .harness/logs/qa-matrix.md. "
+            f"If any tests were previously skipped, try to run them now and explain "
+            f"any failures with exact error messages and remediation steps."
+        ),
+        "e2e": (
+            f"You are a QA validator focused on E2E tests only. "
+            f"The code is already implemented on branch {branch}. "
+            f"Kill any process on port 3000 first: lsof -ti:3000 | xargs kill 2>/dev/null. "
+            f"Start the dev server. Run E2E tests using Playwright MCP: "
+            f"navigate pages, interact with UI, take screenshots, validate acceptance criteria. "
+            f"Write results to .harness/logs/qa-e2e-retest.md. "
+            f"If tests fail, include the exact error, what you tried, and how to fix."
+        ),
+        "review": (
+            f"You are a code reviewer. The code is already on branch {branch}. "
+            f"Run git diff main...HEAD and review for correctness, security, style, "
+            f"and test coverage. Write your review to .harness/logs/code-review-retest.md."
+        ),
+    }
+
+    prompt = phase_prompts.get(payload.phase, phase_prompts["qa"])
+
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions"]
+
+    def run_retest() -> None:
+        try:
+            log_file = Path(worktree_dir) / ".harness" / "logs" / f"retest-{payload.phase}.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            with log_file.open("w") as f:
+                subprocess.run(cmd, cwd=worktree_dir, env=env, stdout=f, stderr=subprocess.STDOUT)
+            log.info("retest_complete", log_file=str(log_file))
+        except Exception:
+            log.exception("retest_failed")
+
+    background_tasks.add_task(run_retest)
+    return {"status": "accepted", "ticket_id": payload.ticket_id, "phase": payload.phase}
 
 
 @app.post("/webhooks/github", status_code=202)

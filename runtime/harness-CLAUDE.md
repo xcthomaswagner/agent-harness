@@ -290,6 +290,14 @@ Agent(
             d. Stop the dev server
          9. If Playwright is NOT available, mark e2e criteria as NOT_TESTED
             with note: 'Playwright not installed in project'
+         10. If E2E tests FAIL or are SKIPPED for any reason, include ALL of:
+            - The exact error message or reason
+            - What command was run and what it returned
+            - What port/process conflicted (if port conflict)
+            - How to reproduce or fix: e.g., "kill process on port 3000:
+              lsof -ti:3000 | xargs kill, then re-run npm run test:e2e"
+            - Mark each skipped test individually in the QA matrix with
+              the specific reason, not a blanket "E2E NOT_TESTED"
 
          FIGMA DESIGN COMPLIANCE (if figma_design_spec is present in the ticket):
          10. Read the figma_design_spec from .harness/ticket.json
