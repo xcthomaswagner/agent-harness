@@ -110,6 +110,24 @@
 | `ai-implement` | Multi-agent | Dev + Reviewer + QA | ~6-10 min | Default. Full quality pipeline. |
 | `ai-quick` | Single-agent | Dev only | ~3-4 min | Low-risk changes, typo fixes, config. |
 
+## Re-running Skipped or Failed Tests
+
+If the QA matrix shows tests as NOT_TESTED or FAIL (e.g., E2E skipped due to port conflict), the developer can re-run just that phase:
+
+```bash
+# Re-run E2E tests only
+curl -X POST localhost:8000/api/retest -H 'Content-Type: application/json' \
+  -d '{"ticket_id": "SCRUM-8", "phase": "e2e"}'
+
+# Re-run full QA
+curl -X POST localhost:8000/api/retest -d '{"ticket_id": "SCRUM-8", "phase": "qa"}'
+
+# Re-run code review
+curl -X POST localhost:8000/api/retest -d '{"ticket_id": "SCRUM-8", "phase": "review"}'
+```
+
+Results are written to `.harness/logs/retest-{phase}.log` in the ticket's worktree. The worktree must still exist.
+
 ## What the Human Sees
 
 1. A Jira comment appears within ~30 seconds with generated acceptance criteria and edge cases

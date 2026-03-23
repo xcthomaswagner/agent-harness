@@ -54,6 +54,46 @@ cat <client-repo>/../worktrees/ai/<ticket-id>/.harness/logs/qa-matrix.md
 ### ngrok Dashboard
 Open `http://localhost:4040` to see incoming webhooks and their responses.
 
+## Re-running Tests on Existing PRs
+
+If tests were skipped or failed (e.g., port conflict during E2E), you can re-run specific phases without re-running the full pipeline.
+
+### Re-run E2E tests only
+```bash
+curl -X POST http://localhost:8000/api/retest \
+  -H 'Content-Type: application/json' \
+  -d '{"ticket_id": "SCRUM-8", "phase": "e2e"}'
+```
+This kills any process on port 3000 first, starts the dev server, and runs E2E tests via Playwright MCP. Results are written to `.harness/logs/retest-e2e.log` in the ticket's worktree.
+
+### Re-run full QA (unit + integration + E2E)
+```bash
+curl -X POST http://localhost:8000/api/retest \
+  -H 'Content-Type: application/json' \
+  -d '{"ticket_id": "SCRUM-8", "phase": "qa"}'
+```
+
+### Re-run code review only
+```bash
+curl -X POST http://localhost:8000/api/retest \
+  -H 'Content-Type: application/json' \
+  -d '{"ticket_id": "SCRUM-8", "phase": "review"}'
+```
+
+### Check retest results
+```bash
+# View the retest log
+cat <client-repo>/../worktrees/ai/<ticket-id>/.harness/logs/retest-e2e.log
+
+# Or check the trace dashboard
+open http://localhost:8000/traces/<ticket-id>
+```
+
+### Notes
+- The worktree must still exist (not cleaned up) for retest to work
+- Retest runs on the existing branch — no new commits are created unless the agent fixes something
+- If you need to retest after the worktree was cleaned up, use `ai-implement` label to re-trigger the full pipeline
+
 ## Troubleshooting
 
 ### Webhook not reaching L1
