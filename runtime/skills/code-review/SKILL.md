@@ -32,6 +32,7 @@ Before reviewing the diff:
 - Is the import ordering correct per project standards?
 - Are there unnecessary comments, dead code, or debugging artifacts?
 - Does the code match existing patterns in the codebase?
+- Are dev-only packages (`ts-node`, `ts-jest`, `@types/*`, test frameworks) in `devDependencies`, not `dependencies`? Check `package.json` if it was modified.
 
 ### Step 4: Review for Security
 

@@ -54,11 +54,14 @@ Check how many teammates are available:
 5. Track unit status: `pending`, `in_progress`, `complete`, `blocked`
 6. **BLOCKED units do not halt others** — successful units continue independently
 
-### Phase 4: Code Review
+### Phase 4: Code Review + Validation
 1. Send each completed unit's diff to the **Code Reviewer** teammate
 2. Reviewer returns: approved or change_requests
-3. Route change_requests back to the owning developer
-4. Max 2 correction cycles per unit. Unresolved → `needs-review` label.
+3. If change_requests → send findings to the **Judge** teammate for validation
+4. Judge scores each finding (0-100). Only findings scoring 80+ pass through.
+5. If no findings pass validation → unit is approved (skip developer correction)
+6. Route validated findings to the owning **Developer** for fixes
+7. Max 2 correction cycles per unit. Unresolved → `needs-review` label.
 
 ### Phase 5: QA Validation
 1. Send all approved units to the **QA** teammate
@@ -93,6 +96,7 @@ If you are the only agent (no teammates available):
 | Plan rejected 3× | Escalate with plan + issues |
 | Dev unit blocked after 3 tries | Mark BLOCKED, continue others |
 | Code review unresolved 2× | Flag for human, continue others |
+| Judge rejects all findings | Unit approved — Code Reviewer had false positives |
 | QA >50% AC fail | Circuit breaker → escalate all |
 | Merge conflicts unresolved 2× | Squash fallback, then `needs-human-merge` label |
 

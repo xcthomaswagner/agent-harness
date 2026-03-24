@@ -45,3 +45,14 @@
 | `style` | Convention violations, naming, formatting |
 | `coverage` | Missing tests, untested edge cases |
 | `performance` | Unnecessary computation, N+1 queries, memory leaks |
+
+## Judge Validation
+
+Code review findings are validated by the **Judge** agent before reaching the developer.
+The Judge scores each finding 0-100 and only passes findings scoring 80+.
+
+To help the Judge validate your findings:
+- Always include the exact file path and line number
+- Include the specific code snippet that's problematic
+- Explain WHY it's a problem, not just WHAT the problem is
+- If referencing a convention, cite the specific CLAUDE.md rule
