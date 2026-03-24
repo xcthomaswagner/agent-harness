@@ -123,6 +123,27 @@ The harness supports two ways to provide design context on a ticket:
 
 Both methods can be used together on the same ticket. No additional configuration is needed for image attachments — they work out of the box with Jira credentials.
 
+## Agents
+
+| Agent | Model | Triggered by | What it does |
+|-------|-------|-------------|-------------|
+| **Ticket Analyst** | Opus (API) | Webhook → L1 pipeline | Enriches ticket: generates AC, test scenarios, edge cases, size assessment. Only agent billed per-token (~$0.10/ticket). |
+| **Team Lead** | Opus (Max) | `spawn_team.py` | Orchestrates the pipeline: reads ticket, spawns sub-agents, logs phases, creates PR. Never writes code itself. |
+| **Planner** | Opus (Max) | Team Lead (full pipeline, 2+ units) | Decomposes ticket into implementation units with dependency graph. |
+| **Plan Reviewer** | Sonnet (Max) | Team Lead, after planner | Validates plan: no file conflicts, all AC covered, valid DAG. |
+| **Developer** | Opus (Max) | Team Lead | Implements code + tests. One per unit (full pipeline) or one total (simple pipeline). |
+| **Merge Coordinator** | Sonnet (Max) | Team Lead (full pipeline only) | Merges unit branches in topological order, runs tests after each. |
+| **Code Reviewer** | Sonnet (Max) | Team Lead, after implementation | Reviews diff for correctness, security, style, coverage. Read-only. |
+| **Judge** | Sonnet (Max) | Team Lead, only on `CHANGES_NEEDED` | Validates reviewer findings (score 0-100). Filters false positives. Security at 60+, others at 80+. |
+| **QA** | Sonnet (Max) | Team Lead, after review passes | Validates every AC as PASS/FAIL. Runs tests, E2E, design compliance. |
+| **PR Reviewer** | Opus (Max) | GitHub webhook: PR opened/pushed | Architecture-level review posted as PR comment. |
+| **CI Fixer** | Sonnet (Max) | GitHub webhook: CI failed | Reads failure logs, fixes issue, pushes. Max 3 attempts. |
+| **Comment Responder** | Sonnet (Max) | GitHub webhook: human PR comment | Explains code or applies fix based on comment. |
+
+**Quick mode** (`ai-quick` label): Team Lead handles everything itself — no sub-agents. Faster (~5 min) but less thorough.
+
+**Cost**: Only the Ticket Analyst uses the Anthropic API (~$0.10-0.15/ticket). All other agents run on the Claude Max subscription (flat rate).
+
 ## Optional: Platform Profiles
 
 If your project uses Sitecore or Salesforce, the agents automatically detect the platform from repo files (`sitecore.json`, `sfdx-project.json`) and load platform-specific coding standards, security checks, and test patterns.
