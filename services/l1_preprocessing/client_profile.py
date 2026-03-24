@@ -74,7 +74,10 @@ def load_profile(name: str, profiles_dir: Path | None = None) -> ClientProfile |
         logger.warning("client_profile_not_found", name=name, path=str(path))
         return None
 
-    data: dict[str, Any] = yaml.safe_load(path.read_text())
+    data = yaml.safe_load(path.read_text())
+    if not isinstance(data, dict):
+        logger.warning("client_profile_invalid", name=name, reason="YAML is not a dict")
+        return None
     logger.info("client_profile_loaded", name=name, client=data.get("client", ""))
     return ClientProfile(data, name)
 

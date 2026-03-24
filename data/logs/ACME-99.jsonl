@@ -22,3 +22,5 @@
 {"trace_id": "5573378da4cb", "ticket_id": "ACME-99", "timestamp": "2026-03-24T15:38:55.545612+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "bug", "source": "jira"}
 {"trace_id": "6b26af234495", "ticket_id": "ACME-99", "timestamp": "2026-03-24T16:12:46.344154+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "bug", "source": "jira"}
 {"trace_id": "6a6261015f74", "ticket_id": "ACME-99", "timestamp": "2026-03-24T16:12:46.344518+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "bug", "source": "jira"}
+{"trace_id": "d8844077e732", "ticket_id": "ACME-99", "timestamp": "2026-03-24T16:51:31.651360+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "bug", "source": "jira"}
+{"trace_id": "0127bdb974c9", "ticket_id": "ACME-99", "timestamp": "2026-03-24T16:51:31.651705+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "bug", "source": "jira"}
