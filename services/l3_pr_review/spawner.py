@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
@@ -120,15 +121,20 @@ class SessionSpawner:
         if not cwd:
             log.warning("no_repo_path_for_session", hint="Set CLIENT_REPO_PATH env var")
 
-        # Strip ANTHROPIC_API_KEY so Claude Code uses Max subscription
-        env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+        # Strip secrets from agent environment
+        _secret_vars = {
+            "ANTHROPIC_API_KEY", "JIRA_API_TOKEN", "ADO_PAT",
+            "GITHUB_WEBHOOK_SECRET", "FIGMA_API_TOKEN", "WEBHOOK_SECRET",
+        }
+        env = {k: v for k, v in os.environ.items() if k not in _secret_vars}
 
-        # Log output to file instead of discarding
-        log_file = LOGS_DIR / f"pr-{pr_number}-{session_type}.log"
+        # Log output to file (with timestamp to avoid overwrites)
+        ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        log_file = LOGS_DIR / f"pr-{pr_number}-{session_type}-{ts}.log"
 
         try:
             with log_file.open("w") as f:
-                subprocess.Popen(
+                proc = subprocess.Popen(
                     cmd,
                     cwd=cwd or None,
                     stdout=f,
@@ -136,7 +142,16 @@ class SessionSpawner:
                     env=env,
                     start_new_session=True,
                 )
-            log.info("session_spawned", log_file=str(log_file))
+
+            # Track PID for monitoring and cleanup
+            pid_file = LOGS_DIR / f"pr-{pr_number}-{session_type}.pid"
+            pid_file.write_text(str(proc.pid))
+
+            log.info(
+                "session_spawned",
+                pid=proc.pid,
+                log_file=str(log_file),
+            )
             return True
         except FileNotFoundError:
             log.error("claude_cli_not_found")

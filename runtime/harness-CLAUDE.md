@@ -132,7 +132,7 @@ Agent(
 )
 ```
 
-If corrections needed, the reviewer writes the corrected plan. Read the final approved plan. Max 2 review cycles, then escalate.
+**Plan versioning:** The Planner writes `plan-v1.json`. If the Reviewer requests corrections, the Reviewer writes the corrected plan to `plan-v2.json` (never overwriting v1). If a second review is needed, the Reviewer writes `plan-v3.json`. The Team Lead always reads the highest-numbered version. Max 2 review cycles, then escalate.
 
 Log: `{"phase": "plan_review", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Plan approved", "version": N}`
 
@@ -187,6 +187,8 @@ Log per unit: `{"phase": "implementation", "ticket_id": "<id>", "timestamp": "<I
 
 Log when all units are resolved: `{"phase": "implementation", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "All units resolved", "units_complete": N, "units_blocked": M, "units_failed": F}`
 
+**If any units are blocked or failed:** Document the blocked/failed units in `.harness/logs/blocked-units.md` with the dependency that caused the block and the error message. This will be included in the PR body under a "Blocked Units" section.
+
 ### Step 5: Merge Coordination
 
 After all units are resolved, merge the completed unit branches into `ai/<ticket-id>`. Skip blocked/failed units. If no units completed, escalate.
@@ -208,7 +210,7 @@ Agent(
          4. If red: git merge --abort, report the conflict and which files conflicted
 
          After all merges, run the full test suite one final time.
-         Then clean up worktree branches: git branch -d ai/<ticket-id>/unit-N for each merged branch.
+         Do NOT attempt to delete unit branches — the Team Lead handles cleanup.
          Write results to .harness/logs/merge-report.md.",
   description="Merge <ticket-id>",
   mode="bypassPermissions"
@@ -419,9 +421,9 @@ Agent(
 
 Read `.harness/logs/qa-matrix.md`.
 
-**If failures found:** Spawn a developer to fix, re-run QA. Max 2 cycles.
+**If failures found (AC or design compliance):** Spawn a developer to fix, re-run QA. Max 2 cycles. Design compliance failures are treated the same as functional failures — the developer must fix them.
 
-**Circuit breaker:** If >50% of AC fail, do NOT route individual failures. Escalate the entire ticket.
+**Circuit breaker:** If >50% of the **original acceptance criteria** (from `acceptance_criteria` + `generated_acceptance_criteria` in the ticket) fail, do NOT route individual failures. Escalate the entire ticket. Edge cases and design compliance checks do NOT count toward this threshold.
 
 Log: `{"phase": "qa_validation", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "QA complete", "overall": "PASS|FAIL", "criteria_passed": N, "criteria_total": M}`
 
@@ -509,9 +511,14 @@ Do NOT estimate, hardcode, or invent timestamps. Each log entry's timestamp must
 When this document says "escalate," take all of these steps:
 
 1. Log the escalation: `{"phase": "<current_phase>", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Escalated", "reason": "<description>"}`
-2. Write a summary to `.harness/logs/escalation.md` including: what was attempted, why it failed, and what a human should look at
-3. If a PR branch exists with partial work, push it and open a draft PR with the `needs-human` label and the escalation reason in the body
-4. Stop the pipeline -- do not continue to subsequent phases
+2. Write a summary to `.harness/logs/escalation.md` including:
+   - What phase failed
+   - What was attempted and how many times
+   - The specific error or reason
+   - What a human should investigate
+   - How to resume: "Fix the issue described above, then re-trigger the ticket with `ai-implement`"
+3. **Always push partial work** — even if incomplete, push the branch and open a draft PR with the `needs-human` label. Include the escalation reason in the PR body. Partial code is more useful than no code.
+4. Stop the pipeline — do not continue to subsequent phases
 
 ## Constraints
 
@@ -521,3 +528,4 @@ When this document says "escalate," take all of these steps:
 - **Do not** push to the default branch — always use `ai/<ticket-id>`
 - **Do not** commit harness files (`.claude/skills/`, `.claude/agents/`, `.harness/`)
 - **Do** log every phase transition to `.harness/logs/pipeline.jsonl`
+- **If test commands fail** (`npm test`, `pytest`, etc. return "command not found"): check `package.json` scripts or the project's CLAUDE.md for the correct test command. If no tests are configured, mark as "No test framework configured — manual validation required" in the QA matrix

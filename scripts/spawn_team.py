@@ -135,10 +135,12 @@ def main() -> None:
         if local_path and Path(local_path).exists():
             attachments_dir.mkdir(parents=True, exist_ok=True)
             dest = attachments_dir / Path(local_path).name
-            shutil.copy2(local_path, dest)
-            # Update the attachment's local_path to point to the worktree copy
-            att["local_path"] = str(dest)
-            copied_count += 1
+            try:
+                shutil.copy2(local_path, dest)
+                att["local_path"] = str(dest)
+                copied_count += 1
+            except (OSError, shutil.Error) as e:
+                print(f"[spawn] WARNING: Failed to copy {local_path}: {e}")
     if copied_count:
         # Re-write ticket.json with updated local_paths
         with (worktree_dir / ".harness" / "ticket.json").open("w") as f:
@@ -264,24 +266,30 @@ def main() -> None:
     else:
         status = "escalated"
 
+    l1_url = os.environ.get("L1_SERVICE_URL", "http://localhost:8000")
+    completion_data = {
+        "ticket_id": ticket_id,
+        "status": status,
+        "pr_url": pr_url,
+        "branch": branch_name,
+    }
+
     print(f"[spawn] Notifying L1: ticket={ticket_id} status={status} pr={pr_url}")
     try:
         import urllib.request
 
-        data = json.dumps({
-            "ticket_id": ticket_id,
-            "status": status,
-            "pr_url": pr_url,
-            "branch": branch_name,
-        }).encode()
+        data = json.dumps(completion_data).encode()
         req = urllib.request.Request(
-            "http://localhost:8000/api/agent-complete",
+            f"{l1_url}/api/agent-complete",
             data=data,
             headers={"Content-Type": "application/json"},
         )
         urllib.request.urlopen(req, timeout=10)
     except Exception:
-        print("[spawn] WARNING: Could not notify L1 (service may not be running)")
+        # Write to file so L1 can pick it up later on restart/poll
+        backlog = worktree_dir / ".harness" / "completion-pending.json"
+        backlog.write_text(json.dumps(completion_data, indent=2))
+        print(f"[spawn] WARNING: Could not notify L1 — saved to {backlog}")
 
     sys.exit(exit_code)
 

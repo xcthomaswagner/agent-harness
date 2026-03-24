@@ -25,6 +25,11 @@ BOT_USERNAME = os.getenv("BOT_GITHUB_USERNAME", "github-actions[bot]")
 # This catches bot-loops even when the agent uses the same GitHub user as the human.
 BOT_COMMENT_MARKER = "<!-- xcagent -->"
 
+# Dedup: track recently processed GitHub delivery IDs to prevent double-processing
+# on webhook retries or race conditions. Bounded to prevent memory growth.
+_processed_deliveries: set[str] = set()
+_MAX_DELIVERY_CACHE = 500
+
 app = FastAPI(
     title="Agentic Harness L3 PR Review",
     description="Receives GitHub PR webhooks, classifies events, spawns review/fix sessions.",
@@ -311,6 +316,7 @@ async def github_webhook(
     background_tasks: BackgroundTasks,
     x_hub_signature_256: str | None = Header(default=None, alias="x-hub-signature-256"),
     x_github_event: str | None = Header(default=None, alias="x-github-event"),
+    x_github_delivery: str | None = Header(default=None, alias="x-github-delivery"),
 ) -> dict[str, str]:
     """Receive GitHub webhooks for PR events."""
     body = await request.body()
@@ -327,6 +333,20 @@ async def github_webhook(
     if not hmac.compare_digest(expected, x_hub_signature_256):
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
+    # Dedup: skip if this delivery was already processed (webhook retry)
+    delivery_id = x_github_delivery or ""
+    if delivery_id and delivery_id in _processed_deliveries:
+        logger.debug("duplicate_delivery_skipped", delivery_id=delivery_id)
+        return {"status": "skipped", "reason": "duplicate delivery"}
+    if delivery_id:
+        _processed_deliveries.add(delivery_id)
+        # Bound the cache to prevent memory growth
+        if len(_processed_deliveries) > _MAX_DELIVERY_CACHE:
+            # Remove oldest entries (set is unordered, but this is fine for dedup)
+            excess = len(_processed_deliveries) - _MAX_DELIVERY_CACHE
+            for _ in range(excess):
+                _processed_deliveries.pop()
+
     try:
         payload: dict[str, Any] = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -337,7 +357,12 @@ async def github_webhook(
     }
 
     event_type = classify_event(headers, payload)
-    logger.info("github_webhook_received", event_type=event_type, github_event=x_github_event)
+    logger.info(
+        "github_webhook_received",
+        event_type=event_type,
+        github_event=x_github_event,
+        delivery_id=delivery_id,
+    )
 
     if event_type == EventType.IGNORED:
         return {"status": "ignored", "event_type": event_type}

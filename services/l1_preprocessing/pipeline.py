@@ -58,6 +58,7 @@ class Pipeline:
         self._figma_extractor = figma_extractor or FigmaExtractor(
             api_token=settings.figma_api_token
         )
+        self._temp_dirs: list[str] = []  # Track for cleanup after spawn
 
     def _get_adapter(
         self, ticket: EnrichedTicket | InfoRequest | DecompositionPlan
@@ -122,6 +123,7 @@ class Pipeline:
         log.info("downloading_image_attachments", count=len(image_attachments))
 
         dest_dir = tempfile.mkdtemp(prefix=f"attachments-{ticket.id}-")
+        self._temp_dirs.append(dest_dir)
         adapter = self._jira_adapter  # TODO: route by ticket.source for ADO
         updated = await adapter.download_image_attachments(ticket.attachments, dest_dir)
         ticket.attachments = updated
@@ -162,6 +164,7 @@ class Pipeline:
                 figma_img_dir = tempfile.mkdtemp(
                     prefix=f"figma-{enriched.id}-"
                 )
+                self._temp_dirs.append(figma_img_dir)
                 spec = await self._figma_extractor.extract(
                     figma_links[0]["url"],
                     image_dest_dir=figma_img_dir,
@@ -247,6 +250,9 @@ class Pipeline:
             enriched, ticket_path, log,
             pipeline_mode=pipeline_mode, client_repo_override=client_repo,
         )
+
+        # Clean up temp directories (images already copied to worktree by spawn)
+        self._cleanup_temp_dirs(log)
 
         return {
             "status": "enriched",
@@ -335,6 +341,17 @@ class Pipeline:
             return "salesforce"
 
         return ""
+
+    def _cleanup_temp_dirs(self, log: Any) -> None:
+        """Remove temporary directories created during processing."""
+        import shutil
+
+        for d in self._temp_dirs:
+            try:
+                shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                log.warning("temp_dir_cleanup_failed", path=d)
+        self._temp_dirs.clear()
 
     @staticmethod
     def _write_ticket_json(enriched: EnrichedTicket) -> Path:

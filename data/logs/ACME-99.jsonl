@@ -16,3 +16,7 @@
 {"trace_id": "34b2856b2b91", "ticket_id": "ACME-99", "timestamp": "2026-03-24T01:18:33.582843+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "bug", "source": "jira"}
 {"trace_id": "0ec0bb92b0a9", "ticket_id": "ACME-99", "timestamp": "2026-03-24T02:42:06.417556+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "bug", "source": "jira"}
 {"trace_id": "352d1793213b", "ticket_id": "ACME-99", "timestamp": "2026-03-24T02:42:06.418075+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "bug", "source": "jira"}
+{"trace_id": "5d6558c624e3", "ticket_id": "ACME-99", "timestamp": "2026-03-24T15:22:28.009642+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "bug", "source": "jira"}
+{"trace_id": "61556b715a7f", "ticket_id": "ACME-99", "timestamp": "2026-03-24T15:22:28.012580+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "bug", "source": "jira"}
+{"trace_id": "071713503edc", "ticket_id": "ACME-99", "timestamp": "2026-03-24T15:38:55.545277+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "bug", "source": "jira"}
+{"trace_id": "5573378da4cb", "ticket_id": "ACME-99", "timestamp": "2026-03-24T15:38:55.545612+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "bug", "source": "jira"}

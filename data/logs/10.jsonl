@@ -14,3 +14,7 @@
 {"trace_id": "22834d7bc385", "ticket_id": "10", "timestamp": "2026-03-24T01:19:38.797314+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 2}
 {"trace_id": "bfc90a840a3a", "ticket_id": "10", "timestamp": "2026-03-24T02:43:08.694963+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
 {"trace_id": "bfc90a840a3a", "ticket_id": "10", "timestamp": "2026-03-24T02:43:20.657468+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 2}
+{"trace_id": "506cda50fd12", "ticket_id": "10", "timestamp": "2026-03-24T15:23:20.454006+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
+{"trace_id": "506cda50fd12", "ticket_id": "10", "timestamp": "2026-03-24T15:23:30.167231+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 2}
+{"trace_id": "23c304f62c81", "ticket_id": "10", "timestamp": "2026-03-24T15:39:47.559608+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
+{"trace_id": "23c304f62c81", "ticket_id": "10", "timestamp": "2026-03-24T15:39:54.296340+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}

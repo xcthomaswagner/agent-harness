@@ -66,6 +66,7 @@ class Attachment(BaseModel):
     url: str
     content_type: str = ""
     local_path: str = ""  # Set after download; absolute path to local file
+    download_failed: bool = False  # True if download was attempted but failed
 
     @property
     def is_design_image(self) -> bool:

@@ -42,6 +42,9 @@ def classify_event(headers: dict[str, str], payload: dict[str, Any]) -> EventTyp
             return EventType.PR_OPENED
         if action == "ready_for_review":
             return EventType.PR_READY_FOR_REVIEW
+        if action == "synchronize":
+            # New commits pushed to an open PR — triggers re-review
+            return EventType.PR_OPENED
         return EventType.IGNORED
 
     # Check suite / check run events (CI)
@@ -64,6 +67,9 @@ def classify_event(headers: dict[str, str], payload: dict[str, Any]) -> EventTyp
             return EventType.REVIEW_CHANGES_REQUESTED
         if state == "commented":
             return EventType.REVIEW_COMMENT
+        if state == "dismissed":
+            logger.info("review_dismissed", pr=payload.get("pull_request", {}).get("number"))
+            return EventType.IGNORED  # Log but don't act — human decision
         return EventType.IGNORED
 
     # Issue comment on a PR (only new comments, not edits or deletions)

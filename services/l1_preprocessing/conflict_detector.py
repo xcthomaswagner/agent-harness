@@ -70,9 +70,11 @@ class ConflictDetector:
             return []
 
     def _save_active(self, tickets: list[ActiveTicket]) -> None:
-        """Save active tickets to storage."""
+        """Save active tickets to storage using atomic write (rename)."""
         data = [t.to_dict() for t in tickets]
-        self._path.write_text(json.dumps(data, indent=2))
+        tmp_path = self._path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(data, indent=2))
+        tmp_path.rename(self._path)  # Atomic on POSIX
 
     def register(
         self, ticket_id: str, title: str, affected_files: list[str], branch: str = ""

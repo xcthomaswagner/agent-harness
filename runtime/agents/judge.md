@@ -47,12 +47,14 @@ Score each finding 0–100:
 
 | Score Range | Meaning |
 |-------------|---------|
-| 0–30 | False positive — not a real issue |
+| 0–30 | False positive — not a real issue, or out of scope for this ticket |
 | 31–60 | Plausible but uncertain — not worth a correction cycle |
 | 61–80 | Likely real but debatable — borderline |
 | 81–100 | Confirmed real, fix is safe — pass to developer |
 
-**Only findings scoring 80+ are passed through.**
+**Threshold:** Only findings scoring **80+** are passed through.
+
+**Exception — security findings:** Any finding categorized as `security` that scores **60+** MUST be passed through. Security issues have higher blast radius and should not be filtered by the standard threshold. When in doubt on a security finding, pass it through.
 
 ## Output Format
 

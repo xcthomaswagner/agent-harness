@@ -370,7 +370,7 @@ class JiraAdapter:
 
         except httpx.HTTPError as exc:
             log.error("attachment_download_failed", error=str(exc))
-            return attachment
+            return attachment.model_copy(update={"download_failed": True})
 
     async def download_image_attachments(
         self, attachments: list[Attachment], dest_dir: str
