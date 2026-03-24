@@ -12,6 +12,7 @@ import pytest
 from analyst import TicketAnalyst, _safe_enum
 from config import Settings
 from models import (
+    Attachment,
     DecompositionPlan,
     EnrichedTicket,
     InfoRequest,
@@ -528,3 +529,157 @@ class TestRouteOutputInvalidEnums:
         result = analyst._route_output(sample_ticket, parsed, MagicMock())
         assert isinstance(result, DecompositionPlan)
         assert result.sub_tickets[0].ticket_type == TicketType.TASK
+
+
+# --- Image attachment handling ---
+
+
+class TestImageBlocks:
+    def test_no_images_returns_string(self, analyst: TicketAnalyst) -> None:
+        ticket = TicketPayload(
+            source=TicketSource.JIRA,
+            id="IMG-1",
+            ticket_type=TicketType.STORY,
+            title="No images",
+        )
+        result = analyst._build_user_prompt(ticket)
+        assert isinstance(result, str)
+
+    def test_image_without_local_path_returns_string(self, analyst: TicketAnalyst) -> None:
+        ticket = TicketPayload(
+            source=TicketSource.JIRA,
+            id="IMG-2",
+            ticket_type=TicketType.STORY,
+            title="Image without download",
+            attachments=[
+                Attachment(
+                    filename="mockup.png",
+                    url="https://jira/att/1",
+                    content_type="image/png",
+                    local_path="",  # not downloaded
+                )
+            ],
+        )
+        result = analyst._build_user_prompt(ticket)
+        assert isinstance(result, str)
+
+    def test_image_with_local_path_returns_content_blocks(
+        self, analyst: TicketAnalyst, tmp_path: Path
+    ) -> None:
+        # Create a small fake image file
+        img_file = tmp_path / "design.png"
+        img_file.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 10)
+
+        ticket = TicketPayload(
+            source=TicketSource.JIRA,
+            id="IMG-3",
+            ticket_type=TicketType.STORY,
+            title="With design image",
+            attachments=[
+                Attachment(
+                    filename="design.png",
+                    url="https://jira/att/1",
+                    content_type="image/png",
+                    local_path=str(img_file),
+                )
+            ],
+        )
+        result = analyst._build_user_prompt(ticket)
+
+        assert isinstance(result, list)
+        # First block is the text prompt
+        assert result[0]["type"] == "text"
+        assert "IMG-3" in result[0]["text"]
+        # Second block is the image
+        assert result[1]["type"] == "image"
+        assert result[1]["source"]["type"] == "base64"
+        assert result[1]["source"]["media_type"] == "image/png"
+        assert len(result[1]["source"]["data"]) > 0
+        # Third block is instruction to incorporate design
+        assert result[2]["type"] == "text"
+        assert "design images" in result[2]["text"].lower()
+
+    def test_mixed_attachments_only_includes_images(
+        self, analyst: TicketAnalyst, tmp_path: Path
+    ) -> None:
+        img_file = tmp_path / "ui.png"
+        img_file.write_bytes(b"\x89PNG" + b"\x00" * 10)
+
+        ticket = TicketPayload(
+            source=TicketSource.JIRA,
+            id="IMG-4",
+            ticket_type=TicketType.STORY,
+            title="Mixed attachments",
+            attachments=[
+                Attachment(
+                    filename="ui.png",
+                    url="https://jira/att/1",
+                    content_type="image/png",
+                    local_path=str(img_file),
+                ),
+                Attachment(
+                    filename="spec.pdf",
+                    url="https://jira/att/2",
+                    content_type="application/pdf",
+                    local_path="",
+                ),
+            ],
+        )
+        result = analyst._build_user_prompt(ticket)
+
+        assert isinstance(result, list)
+        image_blocks = [b for b in result if b["type"] == "image"]
+        assert len(image_blocks) == 1
+
+    def test_missing_local_file_skipped(
+        self, analyst: TicketAnalyst
+    ) -> None:
+        ticket = TicketPayload(
+            source=TicketSource.JIRA,
+            id="IMG-5",
+            ticket_type=TicketType.STORY,
+            title="Missing file",
+            attachments=[
+                Attachment(
+                    filename="gone.png",
+                    url="https://jira/att/1",
+                    content_type="image/png",
+                    local_path="/nonexistent/path/gone.png",
+                )
+            ],
+        )
+        result = analyst._build_user_prompt(ticket)
+        # No valid images found, should fall back to string
+        assert isinstance(result, str)
+
+    def test_multiple_images(
+        self, analyst: TicketAnalyst, tmp_path: Path
+    ) -> None:
+        img1 = tmp_path / "desktop.png"
+        img1.write_bytes(b"\x89PNG" + b"\x00" * 10)
+        img2 = tmp_path / "mobile.jpg"
+        img2.write_bytes(b"\xff\xd8\xff" + b"\x00" * 10)
+
+        ticket = TicketPayload(
+            source=TicketSource.JIRA,
+            id="IMG-6",
+            ticket_type=TicketType.STORY,
+            title="Multiple designs",
+            attachments=[
+                Attachment(
+                    filename="desktop.png", url="https://jira/att/1",
+                    content_type="image/png", local_path=str(img1),
+                ),
+                Attachment(
+                    filename="mobile.jpg", url="https://jira/att/2",
+                    content_type="image/jpeg", local_path=str(img2),
+                ),
+            ],
+        )
+        result = analyst._build_user_prompt(ticket)
+
+        assert isinstance(result, list)
+        image_blocks = [b for b in result if b["type"] == "image"]
+        assert len(image_blocks) == 2
+        assert image_blocks[0]["source"]["media_type"] == "image/png"
+        assert image_blocks[1]["source"]["media_type"] == "image/jpeg"

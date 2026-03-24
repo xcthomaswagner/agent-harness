@@ -113,6 +113,16 @@ npx playwright install chromium
 
 The QA agent automatically detects Playwright and runs browser validation.
 
+## Optional: Design Inputs
+
+The harness supports two ways to provide design context on a ticket:
+
+**Attach an image** — upload a PNG, JPEG, GIF, or WebP mockup directly to the Jira ticket (max 5 MB per file). The pipeline downloads it, sends it to the analyst via the Claude vision API, and copies it into the worktree so the developer agents can reference it during implementation.
+
+**Paste a Figma URL** — include a Figma link in the ticket description or acceptance criteria (e.g., `https://www.figma.com/file/abc123/MyDesign?node-id=1:2`). The pipeline calls the Figma REST API to extract components, colors, typography, and layout patterns. Requires `FIGMA_API_TOKEN` in `.env`.
+
+Both methods can be used together on the same ticket. No additional configuration is needed for image attachments — they work out of the box with Jira credentials.
+
 ## Optional: Platform Profiles
 
 If your project uses Sitecore or Salesforce, the agents automatically detect the platform from repo files (`sitecore.json`, `sfdx-project.json`) and load platform-specific coding standards, security checks, and test patterns.
@@ -126,9 +136,3 @@ If your project uses Sitecore or Salesforce, the agents automatically detect the
 | Tests failing | Check `.harness/logs/session.log` in the worktree |
 | Port conflict | `lsof -ti:8000 \| xargs kill` then restart |
 
-## Full Documentation
-
-- [How it works](how-it-works.md) — end-to-end pipeline explanation
-- [Client onboarding](client-onboarding-guide.md) — detailed setup with all options
-- [Operational runbook](operational-runbook.md) — monitoring, troubleshooting, maintenance
-- [Jira automation setup](jira-automation-setup.md) — step-by-step with screenshots

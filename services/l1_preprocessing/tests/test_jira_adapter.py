@@ -1,17 +1,17 @@
-"""Tests for the Jira adapter — normalization and write-back operations."""
+"""Tests for the Jira adapter — normalization, write-back, and attachment download."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
 from adapters.jira_adapter import JiraAdapter
 from config import Settings
-from models import TicketSource, TicketType
+from models import Attachment, TicketSource, TicketType
 
 FIXTURES = Path(__file__).resolve().parents[3] / "tests" / "fixtures"
 
@@ -319,3 +319,211 @@ class TestWriteBack:
         mock_client.put.assert_called_once()
         call_args = mock_client.put.call_args
         assert call_args[1]["json"] == {"update": {"labels": [{"add": "needs-splitting"}]}}
+
+
+# --- Attachment download ---
+
+
+class TestUploadAttachment:
+    async def test_uploads_file(
+        self, adapter: JiraAdapter, mock_client: AsyncMock, tmp_path: Path
+    ) -> None:
+        img = tmp_path / "screenshot.png"
+        img.write_bytes(b"\x89PNG" + b"\x00" * 50)
+
+        # Mock the upload client context
+        with patch("adapters.jira_adapter.httpx.AsyncClient") as mock_cls:
+            upload_client = AsyncMock()
+            dummy_req = httpx.Request("POST", "https://test")
+            upload_client.post.return_value = httpx.Response(
+                200, json=[{"id": "1"}], request=dummy_req,
+            )
+            mock_ctx = AsyncMock()
+            mock_ctx.__aenter__.return_value = upload_client
+            mock_ctx.__aexit__.return_value = None
+            mock_cls.return_value = mock_ctx
+
+            await adapter.upload_attachment("ACME-42", str(img))
+
+            upload_client.post.assert_called_once()
+            call_args = upload_client.post.call_args
+            assert "/attachments" in call_args[0][0]
+            assert "file" in call_args[1]["files"]
+
+    async def test_skips_missing_file(
+        self, adapter: JiraAdapter
+    ) -> None:
+        # Should not raise, just log warning
+        await adapter.upload_attachment("ACME-42", "/nonexistent/file.png")
+
+    async def test_custom_filename(
+        self, adapter: JiraAdapter, tmp_path: Path
+    ) -> None:
+        img = tmp_path / "raw.png"
+        img.write_bytes(b"\x89PNG" + b"\x00" * 10)
+
+        with patch("adapters.jira_adapter.httpx.AsyncClient") as mock_cls:
+            upload_client = AsyncMock()
+            dummy_req = httpx.Request("POST", "https://test")
+            upload_client.post.return_value = httpx.Response(
+                200, json=[{"id": "1"}], request=dummy_req,
+            )
+            mock_ctx = AsyncMock()
+            mock_ctx.__aenter__.return_value = upload_client
+            mock_ctx.__aexit__.return_value = None
+            mock_cls.return_value = mock_ctx
+
+            await adapter.upload_attachment(
+                "ACME-42", str(img), filename="ACME-42-implementation.png"
+            )
+
+            call_args = upload_client.post.call_args
+            file_tuple = call_args[1]["files"]["file"]
+            assert file_tuple[0] == "ACME-42-implementation.png"
+
+
+class TestDownloadAttachment:
+    @pytest.fixture
+    def stream_client(self) -> AsyncMock:
+        """Mock httpx client with streaming support."""
+        client = AsyncMock(spec=httpx.AsyncClient)
+        dummy_request = httpx.Request("GET", "https://test")
+        ok_response = httpx.Response(200, json={}, request=dummy_request)
+        client.post.return_value = ok_response
+        client.put.return_value = ok_response
+        client.get.return_value = httpx.Response(
+            200,
+            json={"transitions": []},
+            request=dummy_request,
+        )
+        return client
+
+    @pytest.fixture
+    def stream_adapter(self, settings: Settings, stream_client: AsyncMock) -> JiraAdapter:
+        return JiraAdapter(settings=settings, client=stream_client)
+
+    def _setup_stream(
+        self, client: AsyncMock, data: bytes, content_length: str | None = None
+    ) -> None:
+        """Configure the mock client to stream given data."""
+        stream_ctx = AsyncMock()
+        stream_response = AsyncMock()
+        headers = {}
+        if content_length is not None:
+            headers["content-length"] = content_length
+        stream_response.headers = headers
+        stream_response.raise_for_status = AsyncMock()
+
+        async def aiter_bytes():
+            yield data
+
+        stream_response.aiter_bytes = aiter_bytes
+        stream_ctx.__aenter__.return_value = stream_response
+        stream_ctx.__aexit__.return_value = None
+        client.stream.return_value = stream_ctx
+
+    async def test_downloads_image(
+        self, stream_adapter: JiraAdapter, stream_client: AsyncMock, tmp_path: Path
+    ) -> None:
+        image_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+        self._setup_stream(stream_client, image_bytes, str(len(image_bytes)))
+
+        att = Attachment(
+            filename="mockup.png",
+            url="https://acme.atlassian.net/secure/attachment/123/mockup.png",
+            content_type="image/png",
+        )
+        result = await stream_adapter.download_attachment(att, str(tmp_path))
+
+        assert result.local_path != ""
+        assert Path(result.local_path).exists()
+        assert Path(result.local_path).read_bytes() == image_bytes
+
+    async def test_skips_empty_url(
+        self, stream_adapter: JiraAdapter, tmp_path: Path
+    ) -> None:
+        att = Attachment(filename="empty.png", url="", content_type="image/png")
+        result = await stream_adapter.download_attachment(att, str(tmp_path))
+        assert result.local_path == ""
+
+    async def test_skips_too_large_content_length(
+        self, stream_adapter: JiraAdapter, stream_client: AsyncMock, tmp_path: Path
+    ) -> None:
+        self._setup_stream(stream_client, b"x", str(10 * 1024 * 1024))
+
+        att = Attachment(
+            filename="huge.png",
+            url="https://acme.atlassian.net/secure/attachment/999/huge.png",
+            content_type="image/png",
+        )
+        result = await stream_adapter.download_attachment(att, str(tmp_path))
+        assert result.local_path == ""
+
+    async def test_skips_too_large_streaming(
+        self, stream_adapter: JiraAdapter, stream_client: AsyncMock, tmp_path: Path
+    ) -> None:
+        # No content-length header, but data exceeds limit during streaming
+        big_data = b"\x00" * (6 * 1024 * 1024)
+        self._setup_stream(stream_client, big_data, None)
+
+        att = Attachment(
+            filename="big.png",
+            url="https://acme.atlassian.net/secure/attachment/999/big.png",
+            content_type="image/png",
+        )
+        result = await stream_adapter.download_attachment(att, str(tmp_path))
+        assert result.local_path == ""
+
+    async def test_handles_http_error(
+        self, stream_adapter: JiraAdapter, stream_client: AsyncMock, tmp_path: Path
+    ) -> None:
+        stream_ctx = AsyncMock()
+        stream_ctx.__aenter__.side_effect = httpx.HTTPError("connection failed")
+        stream_ctx.__aexit__.return_value = None
+        stream_client.stream.return_value = stream_ctx
+
+        att = Attachment(
+            filename="fail.png",
+            url="https://acme.atlassian.net/secure/attachment/404/fail.png",
+            content_type="image/png",
+        )
+        result = await stream_adapter.download_attachment(att, str(tmp_path))
+        assert result.local_path == ""
+
+
+class TestDownloadImageAttachments:
+    async def test_downloads_only_images(self, settings: Settings, tmp_path: Path) -> None:
+        client = AsyncMock(spec=httpx.AsyncClient)
+
+        # Set up stream for image downloads
+        image_bytes = b"\x89PNG" + b"\x00" * 50
+        stream_ctx = AsyncMock()
+        stream_response = AsyncMock()
+        stream_response.headers = {"content-length": str(len(image_bytes))}
+        stream_response.raise_for_status = AsyncMock()
+
+        async def aiter_bytes():
+            yield image_bytes
+
+        stream_response.aiter_bytes = aiter_bytes
+        stream_ctx.__aenter__.return_value = stream_response
+        stream_ctx.__aexit__.return_value = None
+        client.stream.return_value = stream_ctx
+
+        adapter = JiraAdapter(settings=settings, client=client)
+
+        attachments = [
+            Attachment(filename="design.png", url="https://jira/att/1", content_type="image/png"),
+            Attachment(
+                filename="spec.pdf", url="https://jira/att/2",
+                content_type="application/pdf",
+            ),
+            Attachment(filename="photo.jpg", url="https://jira/att/3", content_type="image/jpeg"),
+        ]
+
+        result = await adapter.download_image_attachments(attachments, str(tmp_path))
+
+        assert len(result) == 3
+        assert result[0].local_path != ""  # PNG downloaded
+        assert result[1].local_path == ""  # PDF skipped
+        assert result[2].local_path != ""  # JPEG downloaded

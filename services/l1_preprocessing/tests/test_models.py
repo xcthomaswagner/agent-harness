@@ -314,6 +314,44 @@ class TestSubTicketSpec:
 # --- Enum validation ---
 
 
+class TestAttachmentProperties:
+    def test_is_design_image_png(self) -> None:
+        att = Attachment(filename="mock.png", url="https://x", content_type="image/png")
+        assert att.is_design_image is True
+
+    def test_is_design_image_jpeg(self) -> None:
+        att = Attachment(filename="mock.jpg", url="https://x", content_type="image/jpeg")
+        assert att.is_design_image is True
+
+    def test_is_design_image_webp(self) -> None:
+        att = Attachment(filename="mock.webp", url="https://x", content_type="image/webp")
+        assert att.is_design_image is True
+
+    def test_is_design_image_gif(self) -> None:
+        att = Attachment(filename="mock.gif", url="https://x", content_type="image/gif")
+        assert att.is_design_image is True
+
+    def test_is_not_design_image_pdf(self) -> None:
+        att = Attachment(filename="doc.pdf", url="https://x", content_type="application/pdf")
+        assert att.is_design_image is False
+
+    def test_is_not_design_image_empty(self) -> None:
+        att = Attachment(filename="file.bin", url="https://x", content_type="")
+        assert att.is_design_image is False
+
+    def test_local_path_default_empty(self) -> None:
+        att = Attachment(filename="f.png", url="https://x", content_type="image/png")
+        assert att.local_path == ""
+
+    def test_local_path_round_trip(self) -> None:
+        att = Attachment(
+            filename="f.png", url="https://x",
+            content_type="image/png", local_path="/tmp/f.png",
+        )
+        restored = Attachment.model_validate_json(att.model_dump_json())
+        assert restored.local_path == "/tmp/f.png"
+
+
 class TestEnumValidation:
     def test_invalid_source_rejected(self) -> None:
         with pytest.raises(ValidationError):

@@ -10,6 +10,8 @@ import structlog
 
 from config import Settings
 from models import (
+    IMAGE_CONTENT_TYPES,
+    MAX_IMAGE_ATTACHMENT_BYTES,
     Attachment,
     CallbackConfig,
     LinkedItem,
@@ -265,3 +267,120 @@ class JiraAdapter:
         response = await self._client.put(url, json=body)
         response.raise_for_status()
         logger.info("jira_label_added", ticket_id=ticket_id, label=label)
+
+    # --- Attachment upload ---
+
+    async def upload_attachment(
+        self, ticket_id: str, file_path: str, filename: str = "",
+    ) -> None:
+        """Upload a file as an attachment to a Jira ticket.
+
+        Uses the Jira REST API multipart upload endpoint.
+        """
+        from pathlib import Path
+
+        path = Path(file_path)
+        if not path.exists():
+            logger.warning(
+                "upload_attachment_skipped",
+                ticket_id=ticket_id,
+                reason="file not found",
+                path=file_path,
+            )
+            return
+
+        name = filename or path.name
+        url = f"/rest/api/3/issue/{ticket_id}/attachments"
+        content = path.read_bytes()
+
+        # Jira requires X-Atlassian-Token: no-check for attachment uploads.
+        # We need a separate request without the default Content-Type:
+        # application/json header, so httpx can set the multipart boundary.
+        upload_headers = {
+            k: v
+            for k, v in self._client.headers.items()
+            if k.lower() != "content-type"
+        }
+        upload_headers["X-Atlassian-Token"] = "no-check"
+
+        async with httpx.AsyncClient(
+            base_url=str(self._client.base_url),
+            headers=upload_headers,
+            timeout=60.0,
+        ) as upload_client:
+            response = await upload_client.post(
+                url, files={"file": (name, content)},
+            )
+        response.raise_for_status()
+        logger.info(
+            "jira_attachment_uploaded",
+            ticket_id=ticket_id,
+            filename=name,
+            size=len(content),
+        )
+
+    # --- Attachment download ---
+
+    async def download_attachment(
+        self, attachment: Attachment, dest_dir: str
+    ) -> Attachment:
+        """Download an attachment from Jira, returning updated Attachment with local_path.
+
+        Skips if the file is too large (>5 MB) or the download fails.
+        Returns the original attachment unchanged on failure.
+        """
+        from pathlib import Path
+
+        log = logger.bind(filename=attachment.filename, url=attachment.url)
+
+        if not attachment.url:
+            log.warning("attachment_download_skipped", reason="empty url")
+            return attachment
+
+        dest = Path(dest_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        file_path = dest / attachment.filename
+
+        try:
+            async with self._client.stream("GET", attachment.url) as response:
+                response.raise_for_status()
+
+                # Check Content-Length before downloading full body
+                content_length = response.headers.get("content-length")
+                if content_length and int(content_length) > MAX_IMAGE_ATTACHMENT_BYTES:
+                    log.warning(
+                        "attachment_too_large",
+                        size=content_length,
+                        limit=MAX_IMAGE_ATTACHMENT_BYTES,
+                    )
+                    return attachment
+
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > MAX_IMAGE_ATTACHMENT_BYTES:
+                        log.warning("attachment_too_large_streaming", size=total)
+                        return attachment
+                    chunks.append(chunk)
+
+            file_path.write_bytes(b"".join(chunks))
+            log.info("attachment_downloaded", path=str(file_path), size=total)
+            return attachment.model_copy(update={"local_path": str(file_path)})
+
+        except httpx.HTTPError as exc:
+            log.error("attachment_download_failed", error=str(exc))
+            return attachment
+
+    async def download_image_attachments(
+        self, attachments: list[Attachment], dest_dir: str
+    ) -> list[Attachment]:
+        """Download all image attachments, returning updated list with local_paths set."""
+        result: list[Attachment] = []
+        for att in attachments:
+            if att.content_type.lower() in IMAGE_CONTENT_TYPES:
+                updated = await self.download_attachment(att, dest_dir)
+                result.append(updated)
+            else:
+                result.append(att)
+        return result

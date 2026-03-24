@@ -7,7 +7,7 @@
 
 ## Layer 1: Pre-Processing (L1)
 
-3. **Webhook received** — `main.py` at `/webhooks/jira` validates the signature and normalizes the Jira payload into a `TicketPayload` using the Jira adapter. The adapter handles ADF (Atlassian Document Format) conversion so rich text descriptions come out as clean plain text.
+3. **Webhook received** — `main.py` at `/webhooks/jira` validates the signature and normalizes the Jira payload into a `TicketPayload` using the Jira adapter. The adapter handles ADF (Atlassian Document Format) conversion so rich text descriptions come out as clean plain text. An idempotency guard prevents duplicate processing if the same ticket is already in the pipeline (Jira automation can fire multiple webhooks).
 
 4. **Ticket Analyst** — `analyst.py` makes a direct Anthropic API call (Claude Opus) with the ticket content. The system prompt is composed from the `/ticket-analyst` skill files — SKILL.md + the rubric for the ticket type (story/bug/task) + templates. The analyst evaluates completeness and produces one of three outputs:
 
@@ -15,7 +15,12 @@
    - **Info Request** — posts targeted questions as a Jira comment, sets status to "Needs Clarification". Pipeline stops until the human responds.
    - **Decomposition** — ticket is too large for a single agent team. Adds `needs-splitting` label and comments with suggested sub-tickets for the PM to create.
 
-5. **Pipeline routing** — `pipeline.py` handles the enriched ticket:
+5. **Design extraction** — before the analyst runs, the pipeline downloads any image attachments on the ticket (PNG, JPEG, GIF, WebP up to 5 MB each). Downloaded images are sent to the analyst as vision content blocks so it can interpret mockups and wireframes visually. Both approaches work and can be combined:
+
+   - **Attached images** — upload a design screenshot or mockup directly to the Jira ticket. The pipeline downloads it, sends it to the analyst via the Anthropic vision API, and copies it into the worktree at `.harness/attachments/` so L2 agents can read it too.
+   - **Figma URLs** — paste a Figma link in the ticket description or acceptance criteria. The pipeline calls the Figma REST API to extract components, colors, typography, layout patterns, and interactive states into a structured `DesignSpec`.
+
+6. **Pipeline routing** — `pipeline.py` handles the enriched ticket:
    - Checks for file scope conflicts with other in-progress tickets
    - Extracts Figma design spec if a Figma URL is found in the ticket
    - Sets the platform profile (Sitecore/Salesforce) from client config or auto-detection
@@ -26,7 +31,7 @@
 
 ## The Bridge: Spawn Script
 
-6. **`spawn-team.sh`** creates an isolated workspace:
+7. **`spawn-team.sh`** creates an isolated workspace:
    - Creates a git worktree from the client repo (separate copy on its own branch `ai/TICKET-ID`)
    - Runs `inject-runtime.sh` which copies the 7 skills and agent definitions into the worktree's `.claude/skills/` and `.claude/agents/`
    - Appends the pipeline instructions (`harness-CLAUDE.md`) to the client's `CLAUDE.md` — client conventions first (priority), harness instructions second
@@ -63,11 +68,23 @@
    - Test coverage completeness
    - Logic errors and bugs
 
-   Writes findings to `/.harness/logs/code-review.md` with a verdict: APPROVED or CHANGES_NEEDED. If critical issues are found, the team lead spawns the developer again to fix them, then re-reviews. Maximum 2 review-fix cycles.
+   Writes findings to `/.harness/logs/code-review.md` with a verdict: APPROVED or CHANGES_NEEDED.
 
-10. **QA sub-agent** — spawned last. Reads the enriched ticket's acceptance criteria (both original and generated). Reads the code changes. Runs the full test suite. For EACH acceptance criterion, determines PASS, FAIL, or NOT_TESTED with specific evidence (which test covers it, or why it fails). For EACH edge case, determines COVERED or NOT_COVERED. Writes the QA matrix to `/.harness/logs/qa-matrix.md`. If failures are found, routes back to the developer for fixes. Maximum 2 QA-fix cycles. **Circuit breaker:** if >50% of acceptance criteria fail, the QA agent halts the pipeline and escalates the entire ticket with a diagnostic summary instead of routing individual failures.
+10. **Judge sub-agent** (only if CHANGES_NEEDED) — validates each reviewer finding before it reaches the developer. For each issue the reviewer flagged, the Judge:
+   - Reads the actual code with 20+ lines of context
+   - Checks if it's real, reachable, and the suggested fix is correct
+   - Runs `git blame` to reject findings on pre-existing (unchanged) code
+   - Scores each finding 0–100: only issues scoring 80+ pass through
 
-11. **PR creation** — after code review and QA are both complete, the team lead pushes the branch and opens a draft PR via `gh pr create`. The PR body includes:
+   Writes verdict to `/.harness/logs/judge-verdict.md`. This prevents false positives from consuming limited correction cycles. If all issues are rejected, the pipeline skips the developer fix and proceeds to QA.
+
+   If validated issues remain, the team lead spawns the developer to fix only the validated issues, then re-reviews. Maximum 2 review-fix cycles.
+
+11. **QA sub-agent** — spawned last. Reads the enriched ticket's acceptance criteria (both original and generated). Reads the code changes. Runs the full test suite. For EACH acceptance criterion, determines PASS, FAIL, or NOT_TESTED with specific evidence (which test covers it, or why it fails). For EACH edge case, determines COVERED or NOT_COVERED. Writes the QA matrix to `/.harness/logs/qa-matrix.md`. If failures are found, routes back to the developer for fixes. Maximum 2 QA-fix cycles. **Circuit breaker:** if >50% of acceptance criteria fail, the QA agent halts the pipeline and escalates the entire ticket with a diagnostic summary instead of routing individual failures.
+
+12. **Final screenshot** — if the implementation has a visual UI, the team lead starts the dev server, navigates to the main page, and captures a screenshot saved as `/.harness/screenshots/final.png`. This screenshot is uploaded to the Jira ticket as visual proof during the completion callback.
+
+13. **PR creation** — after code review and QA are both complete, the team lead pushes the branch and opens a draft PR via `gh pr create`. The PR body includes:
     - Summary of changes
     - Link to the Jira ticket
     - Code review verdict and any warnings
@@ -77,7 +94,8 @@
 
     Every phase transition is logged to `/.harness/logs/pipeline.jsonl` as structured JSON Lines.
 
-12. **Completion callback** — when the agent session ends, the spawn script reads the pipeline log, extracts the PR URL and status, and POSTs to L1's `/api/agent-complete` endpoint. L1 then:
+14. **Completion callback** — when the agent session ends, the spawn script reads the pipeline log, extracts the PR URL and status, and POSTs to L1's `/api/agent-complete` endpoint. L1 then:
+    - Uploads the final screenshot to Jira (if `/.harness/screenshots/final.png` exists)
     - Posts a completion comment to Jira with the PR link
     - Transitions the ticket to "Done"
     - Unregisters the ticket from conflict detection
@@ -86,17 +104,17 @@
 
 ## Layer 3: PR Review & Feedback (L3)
 
-13. **GitHub webhook fires** when the draft PR is opened. L1 proxies the webhook to L3 (running on port 8001) via the `/webhooks/github` proxy endpoint.
+15. **GitHub webhook fires** when the draft PR is opened. L1 proxies the webhook to L3 (running on port 8001) via the `/webhooks/github` proxy endpoint.
 
-14. **Event classification** — `event_classifier.py` classifies the GitHub webhook into one of 8 event types: PR opened, PR ready for review, CI failed, CI passed, review approved, review changes requested, review comment, or ignored.
+16. **Event classification** — `event_classifier.py` classifies the GitHub webhook into one of 8 event types: PR opened, PR ready for review, CI failed, CI passed, review approved, review changes requested, review comment, or ignored.
 
-15. **PR opened** → L3 spawns a Claude Opus headless session with the `/pr-review` skill for architecture-level review. This catches cross-cutting concerns that individual code review might miss: naming consistency across files, API contract alignment, security flow integrity, dependency risks.
+17. **PR opened** → L3 spawns a Claude Opus headless session with the `/pr-review` skill for architecture-level review. This catches cross-cutting concerns that individual code review might miss: naming consistency across files, API contract alignment, security flow integrity, dependency risks.
 
-16. **CI failure** → L3 fetches the actual failure logs from the GitHub Actions API (failed jobs and steps), then spawns a Claude Sonnet session to fix the issue and push to the same branch. Maximum 3 fix attempts.
+18. **CI failure** → L3 fetches the actual failure logs from the GitHub Actions API (failed jobs and steps), then spawns a Claude Sonnet session to fix the issue and push to the same branch. Maximum 3 fix attempts.
 
-17. **Human review comment** → L3 spawns a session to respond. For questions: reads the relevant code and posts an explanation. For change requests: applies the fix, pushes, and confirms. Bot self-loop prevention ensures the harness doesn't respond to its own comments.
+19. **Human review comment** → L3 spawns a session to respond. For questions: reads the relevant code and posts an explanation. For change requests: applies the fix, pushes, and confirms. Bot self-loop prevention ensures the harness doesn't respond to its own comments.
 
-18. **Review approved** → L3 notifies L1 for autonomy tracking. The graduated autonomy engine tracks:
+20. **Review approved** → L3 notifies L1 for autonomy tracking. The graduated autonomy engine tracks:
     - First-pass acceptance rate (target >90%)
     - Defect escape rate (target <5%)
     - Self-review catch rate (target >85%)
@@ -148,10 +166,17 @@ After the agent finishes, the worktree contains:
 /.harness/
   ticket.json           # The enriched ticket from L1
   pipeline-mode         # "multi" or "quick"
+  .agent.lock           # Lock file preventing duplicate agent spawns
+  attachments/          # Design images downloaded from the ticket (if any)
+    mockup.png
+    figma-FORM.png      # Rendered Figma frames (if Figma URL in ticket)
+  screenshots/
+    final.png           # Curated screenshot uploaded to Jira as visual proof
   logs/
     pipeline.jsonl      # Structured phase-by-phase log (JSON Lines)
     session.log         # Human-readable summary
     code-review.md      # Code reviewer's findings and verdict
+    judge-verdict.md    # Judge's validation of reviewer findings (if triggered)
     qa-matrix.md        # QA pass/fail matrix per acceptance criterion
 ```
 
@@ -162,8 +187,8 @@ Jira (ai-implement label)
   │
   ▼ webhook
 L1 Service (port 8000)
-  ├── Jira Adapter (normalize payload)
-  ├── Ticket Analyst (Claude Opus API → enrich)
+  ├── Jira Adapter (normalize payload + download image attachments)
+  ├── Ticket Analyst (Claude Opus API → enrich, with vision for attached images)
   ├── Conflict Detector (check overlap)
   ├── Figma Extractor (if Figma URL found)
   ├── Pipeline Router (enriched → L2, info_request → Jira, decomposition → PM)
@@ -174,7 +199,9 @@ Git Worktree (isolated branch)
   ├── claude -p (team lead)
   │     ├── Agent: Developer (implement + test + commit)
   │     ├── Agent: Code Reviewer (review diff → code-review.md)
-  │     └── Agent: QA (validate AC → qa-matrix.md)
+  │     ├── Agent: Judge (validate findings → judge-verdict.md, if CHANGES_NEEDED)
+  │     ├── Agent: QA (validate AC → qa-matrix.md)
+  │     └── Screenshot (final.png → uploaded to Jira)
   ├── git push + gh pr create
   │
   ▼ completion callback

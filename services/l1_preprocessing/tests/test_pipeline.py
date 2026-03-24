@@ -10,6 +10,7 @@ import pytest
 
 from config import Settings
 from models import (
+    Attachment,
     CallbackConfig,
     DecompositionPlan,
     EnrichedTicket,
@@ -457,3 +458,75 @@ class TestWriteTicketJson:
             assert "PIPE-10" in path.name
         finally:
             path.unlink()
+
+
+# --- Image attachment download ---
+
+
+class TestImageAttachmentDownload:
+    async def test_downloads_images_before_analyst(
+        self,
+        settings: Settings,
+        mock_analyst: AsyncMock,
+        mock_jira: AsyncMock,
+        sample_ticket: TicketPayload,
+    ) -> None:
+        """Pipeline downloads image attachments before calling analyst."""
+        sample_ticket.attachments = [
+            Attachment(
+                filename="design.png",
+                url="https://jira/att/1",
+                content_type="image/png",
+            )
+        ]
+
+        # Mock download_image_attachments to set local_path
+        async def fake_download(attachments, dest_dir):
+            return [
+                att.model_copy(update={"local_path": f"{dest_dir}/{att.filename}"})
+                for att in attachments
+            ]
+
+        mock_jira.download_image_attachments = AsyncMock(side_effect=fake_download)
+
+        enriched = EnrichedTicket(
+            **sample_ticket.model_dump(),
+            generated_acceptance_criteria=["AC"],
+            size_assessment=SizeAssessment(
+                classification=SizeClassification.SMALL,
+                estimated_units=1,
+                recommended_dev_count=1,
+            ),
+        )
+        mock_analyst.analyze.return_value = enriched
+
+        pipe = Pipeline(
+            settings=settings, analyst=mock_analyst, jira_adapter=mock_jira
+        )
+        result = await pipe.process(sample_ticket)
+
+        assert result["status"] == "enriched"
+        mock_jira.download_image_attachments.assert_called_once()
+
+    async def test_skips_download_when_no_images(
+        self,
+        pipeline: Pipeline,
+        mock_analyst: AsyncMock,
+        mock_jira: AsyncMock,
+        sample_ticket: TicketPayload,
+    ) -> None:
+        """Pipeline skips download when no image attachments."""
+        enriched = EnrichedTicket(
+            **sample_ticket.model_dump(),
+            size_assessment=SizeAssessment(
+                classification=SizeClassification.SMALL,
+                estimated_units=1,
+                recommended_dev_count=1,
+            ),
+        )
+        mock_analyst.analyze.return_value = enriched
+
+        await pipeline.process(sample_ticket)
+
+        # download_image_attachments should not be called
+        mock_jira.download_image_attachments.assert_not_called()

@@ -49,12 +49,28 @@ class TestType(StrEnum):
 # --- Supporting Models ---
 
 
+IMAGE_CONTENT_TYPES = frozenset({
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+})
+
+MAX_IMAGE_ATTACHMENT_BYTES = 5 * 1024 * 1024  # 5 MB
+
+
 class Attachment(BaseModel):
     """A file attachment on a ticket."""
 
     filename: str
     url: str
     content_type: str = ""
+    local_path: str = ""  # Set after download; absolute path to local file
+
+    @property
+    def is_design_image(self) -> bool:
+        """True if this attachment is a supported image type."""
+        return self.content_type.lower() in IMAGE_CONTENT_TYPES
 
 
 class LinkedItem(BaseModel):
@@ -104,6 +120,10 @@ class DesignSpec(BaseModel):
     typography: dict[str, str] = Field(default_factory=dict)
     interactive_states: list[str] = Field(default_factory=list)
     responsive_breakpoints: list[str] = Field(default_factory=list)
+    rendered_frames: list[str] = Field(
+        default_factory=list,
+        description="Local paths to rendered PNG images of Figma frames",
+    )
     raw_extraction: str = ""  # Full extraction text for agent context
 
 

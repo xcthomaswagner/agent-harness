@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,11 @@ from analyst import TicketAnalyst
 from client_profile import ClientProfile, load_profile
 from config import Settings
 from conflict_detector import ConflictDetector
-from figma_extractor import FigmaExtractor, detect_figma_links
+from figma_extractor import (
+    FigmaExtractor,
+    detect_figma_links,
+    rendered_frames_to_attachments,
+)
 from models import (
     DecompositionPlan,
     EnrichedTicket,
@@ -72,6 +77,9 @@ class Pipeline:
         log = logger.bind(ticket_id=ticket.id, source=ticket.source)
         log.info("pipeline_started")
 
+        # Step 0: Download image attachments so analyst can see them
+        ticket = await self._download_image_attachments(ticket, log)
+
         # Step 1: Run analyst
         output = await self._analyst.analyze(ticket)
         output_type = classify_analyst_output(output)
@@ -103,6 +111,29 @@ class Pipeline:
             log.info("client_profile_loaded", profile=profile_name)
         return profile
 
+    async def _download_image_attachments(
+        self, ticket: TicketPayload, log: Any
+    ) -> TicketPayload:
+        """Download image attachments from the ticket source so the analyst can see them."""
+        image_attachments = [a for a in ticket.attachments if a.is_design_image]
+        if not image_attachments:
+            return ticket
+
+        log.info("downloading_image_attachments", count=len(image_attachments))
+
+        dest_dir = tempfile.mkdtemp(prefix=f"attachments-{ticket.id}-")
+        adapter = self._jira_adapter  # TODO: route by ticket.source for ADO
+        updated = await adapter.download_image_attachments(ticket.attachments, dest_dir)
+        ticket.attachments = updated
+
+        downloaded = sum(1 for a in updated if a.local_path)
+        log.info(
+            "image_attachments_downloaded",
+            downloaded=downloaded,
+            total=len(image_attachments),
+        )
+        return ticket
+
     async def _handle_enriched(
         self, enriched: EnrichedTicket, log: Any
     ) -> dict[str, Any]:
@@ -121,13 +152,35 @@ class Pipeline:
 
         # Extract Figma design spec if Figma link found in ticket
         if not enriched.figma_design_spec:
-            all_text = f"{enriched.description} {' '.join(enriched.acceptance_criteria)}"
+            all_text = (
+                f"{enriched.description} "
+                f"{' '.join(enriched.acceptance_criteria)}"
+            )
             figma_links = detect_figma_links(all_text)
             if figma_links:
-                spec = await self._figma_extractor.extract(figma_links[0]["url"])
+                # Create a temp dir for rendered frame images
+                figma_img_dir = tempfile.mkdtemp(
+                    prefix=f"figma-{enriched.id}-"
+                )
+                spec = await self._figma_extractor.extract(
+                    figma_links[0]["url"],
+                    image_dest_dir=figma_img_dir,
+                )
                 if spec:
                     enriched.figma_design_spec = spec
-                    log.info("figma_design_extracted", components=len(spec.components))
+                    log.info(
+                        "figma_design_extracted",
+                        components=len(spec.components),
+                        rendered=len(spec.rendered_frames),
+                    )
+                    # Add rendered frames as image attachments
+                    frame_atts = rendered_frames_to_attachments(spec)
+                    if frame_atts:
+                        enriched.attachments.extend(frame_atts)
+                        log.info(
+                            "figma_frames_added_as_attachments",
+                            count=len(frame_atts),
+                        )
 
         # Auto-detect platform profile
         if not enriched.platform_profile:
