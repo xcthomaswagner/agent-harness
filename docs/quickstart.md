@@ -140,7 +140,7 @@ Both methods can be used together on the same ticket. No additional configuratio
 | **CI Fixer** | Sonnet (Max) | GitHub webhook: CI failed | Reads failure logs, fixes issue, pushes. Max 3 attempts. |
 | **Comment Responder** | Sonnet (Max) | GitHub webhook: human PR comment | Explains code or applies fix based on comment. |
 
-**Quick mode** (`ai-quick` label): Team Lead handles everything itself — no sub-agents. Faster (~5 min) but less thorough.
+**Quick mode** (`ai-quick` label): Team Lead handles everything itself — no sub-agents spawned. Faster (~5 min). Still includes an adversarial self-review (the agent switches roles and reviews its own diff as a skeptical external reviewer) and generates a full QA matrix.
 
 **Cost**: Only the Ticket Analyst uses the Anthropic API (~$0.10-0.15/ticket). All other agents run on the Claude Max subscription (flat rate).
 
