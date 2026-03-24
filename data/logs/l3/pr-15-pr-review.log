@@ -1,0 +1,5 @@
+Review posted to PR #15. 
+
+**Verdict: APPROVED WITH NOTES** — the code is clean and well-tested. Two minor notes flagged:
+1. `GET /api/audit-log` has no auth guard (fine for test client, not for production)
+2. No test for the 500 path when `ADMIN_TOKEN` env var is unset (hard to test due to top-level const, so understandable)

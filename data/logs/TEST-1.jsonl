@@ -1,1 +1,16 @@
 {"trace_id": "264a061f8f8a", "ticket_id": "TEST-1", "timestamp": "2026-03-22T16:32:47.116894+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "bb852f62feac", "ticket_id": "TEST-1", "timestamp": "2026-03-22T17:17:51.595213+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "ddc971df7026", "ticket_id": "TEST-1", "timestamp": "2026-03-23T00:00:45.007577+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "ddc971df7026", "ticket_id": "TEST-1", "timestamp": "2026-03-23T00:00:58.423613+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "a5f02e92a6d1", "ticket_id": "TEST-1", "timestamp": "2026-03-23T02:18:41.798112+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "a5f02e92a6d1", "ticket_id": "TEST-1", "timestamp": "2026-03-23T02:18:48.568133+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "3739e1d21525", "ticket_id": "TEST-1", "timestamp": "2026-03-23T12:19:21.451493+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "3739e1d21525", "ticket_id": "TEST-1", "timestamp": "2026-03-23T12:19:27.536450+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "326967c6c711", "ticket_id": "TEST-1", "timestamp": "2026-03-23T22:03:40.646456+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "326967c6c711", "ticket_id": "TEST-1", "timestamp": "2026-03-23T22:03:53.743881+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 4}
+{"trace_id": "675e24062a7e", "ticket_id": "TEST-1", "timestamp": "2026-03-23T22:55:40.171117+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "675e24062a7e", "ticket_id": "TEST-1", "timestamp": "2026-03-23T22:55:45.280189+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "8157752de02e", "ticket_id": "TEST-1", "timestamp": "2026-03-24T01:19:38.804892+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "8157752de02e", "ticket_id": "TEST-1", "timestamp": "2026-03-24T01:19:44.434997+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "5c6ba19ae3af", "ticket_id": "TEST-1", "timestamp": "2026-03-24T02:43:20.664489+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "5c6ba19ae3af", "ticket_id": "TEST-1", "timestamp": "2026-03-24T02:43:26.698340+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
