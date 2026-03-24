@@ -193,6 +193,7 @@ class TestConsolidateWorktreeLogs:
         with patch("tracer.LOGS_DIR", trace_dir):
             consolidate_worktree_logs("C-3", "trace-ghi", str(wt))
             entries = read_trace("C-3")
+        assert any(e["event"] == "qa_matrix_artifact" for e in entries)
 
     def test_handles_missing_worktree(self, trace_dir: Path) -> None:
         """Should not crash if worktree path doesn't exist."""
