@@ -158,6 +158,49 @@ Results are written to `.harness/logs/retest-{phase}.log` in the ticket's worktr
 4. The ticket moves to "Done"
 5. They review one PR that has already been planned, implemented, reviewed, and QA-validated
 
+## Observability
+
+The harness uses a two-tier observability model inspired by OpenTelemetry:
+
+### Trace (the sequence)
+
+`pipeline.jsonl` is a JSON Lines file written **only by the Team Lead**. Each line is a phase transition with a real timestamp, ticket ID, and outcome. This is the top-level audit trail — read this first to understand what happened and when.
+
+```json
+{"phase": "ticket_read", "ticket_id": "SCRUM-16", "timestamp": "2026-03-24T13:06:49Z", "event": "Pipeline started, quick mode"}
+{"phase": "implementation", "ticket_id": "SCRUM-16", "timestamp": "2026-03-24T13:09:49Z", "event": "Implementation complete", "commit": "c924401"}
+{"phase": "code_review", "ticket_id": "SCRUM-16", "timestamp": "2026-03-24T13:09:49Z", "event": "Review complete", "verdict": "APPROVED", "issues": 4}
+```
+
+### Span Details (the depth)
+
+Each sub-agent writes its own detail file. These are the rich output attached to each trace phase:
+
+| File | Written by | What's in it |
+|------|-----------|-------------|
+| `code-review.md` | Code Reviewer | Verdict, issues list, summary |
+| `judge-verdict.md` | Judge | Validated/rejected issues with scores |
+| `qa-matrix.md` | QA | Pass/fail per AC, edge cases, test results |
+| `merge-report.md` | Merge Coordinator | Per-unit merge status, conflicts |
+| `plan-review.md` | Plan Reviewer | Corrections, approval notes |
+| `blocked-units.md` | Team Lead | Why units were blocked, dependency chain |
+| `escalation.md` | Team Lead | What failed, how to resume |
+| `session.log` | Team Lead | Human-readable summary at end |
+
+### Key rule
+
+Sub-agents **never** write to `pipeline.jsonl`. They write their own files. The Team Lead reads those files and logs the phase summary to the trace.
+
+### Viewing traces
+
+- **Trace dashboard**: `http://localhost:8000/traces` — list of all tickets processed
+- **Ticket detail**: `http://localhost:8000/traces/SCRUM-16` — timeline view of one ticket
+- **Raw files**: Browse `.harness/logs/` in the worktree for full detail
+
+### Future: Langfuse/Jaeger integration
+
+The file-based approach maps directly to OpenTelemetry spans. When Docker is configured, traces can be exported to Langfuse or Jaeger for visualization, search, and alerting. Each `pipeline.jsonl` entry becomes a parent span; each detail file becomes an attached span event.
+
 ## What's in the Worktree
 
 After the agent finishes, the worktree contains:

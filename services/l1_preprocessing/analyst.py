@@ -198,30 +198,80 @@ class TicketAnalyst:
         self, ticket: TicketPayload
     ) -> EnrichedTicket | InfoRequest | DecompositionPlan:
         """Analyze a ticket and produce an enriched output, info request, or decomposition plan."""
+        import asyncio
+
         log = logger.bind(ticket_id=ticket.id, ticket_type=ticket.ticket_type)
         log.info("analyst_started")
 
         system_prompt = self._build_system_prompt(ticket.ticket_type)
         user_content = self._build_user_prompt(ticket)
 
-        try:
-            response = await self._client.messages.create(
-                model="claude-opus-4-20250514",
-                max_tokens=4096,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_content}],  # type: ignore[typeddict-item]
-            )
-        except anthropic.APIConnectionError as exc:
-            log.error("analyst_api_connection_error", error=str(exc))
-            raise RuntimeError(f"Analyst API connection failed for {ticket.id}") from exc
-        except anthropic.RateLimitError as exc:
-            log.error("analyst_rate_limited", error=str(exc))
-            raise RuntimeError(f"Analyst API rate limited for {ticket.id}") from exc
-        except anthropic.APIStatusError as exc:
-            log.error("analyst_api_error", status_code=exc.status_code, error=str(exc))
+        max_retries = 3
+        last_exc: Exception | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = await self._client.messages.create(
+                    model="claude-opus-4-20250514",
+                    max_tokens=4096,
+                    system=system_prompt,
+                    messages=[{"role": "user", "content": user_content}],  # type: ignore[typeddict-item]
+                )
+                break  # Success
+            except anthropic.RateLimitError as exc:
+                last_exc = exc
+                wait = 2 ** attempt  # 2s, 4s, 8s
+                log.warning(
+                    "analyst_rate_limited_retrying",
+                    attempt=attempt,
+                    wait=wait,
+                    error=str(exc),
+                )
+                if attempt < max_retries:
+                    await asyncio.sleep(wait)
+                    continue
+                raise RuntimeError(
+                    f"Analyst API rate limited after {max_retries} retries for {ticket.id}"
+                ) from exc
+            except anthropic.APIConnectionError as exc:
+                last_exc = exc
+                wait = 2 ** attempt
+                log.warning(
+                    "analyst_connection_error_retrying",
+                    attempt=attempt,
+                    wait=wait,
+                    error=str(exc),
+                )
+                if attempt < max_retries:
+                    await asyncio.sleep(wait)
+                    continue
+                raise RuntimeError(
+                    f"Analyst API connection failed after {max_retries} retries for {ticket.id}"
+                ) from exc
+            except anthropic.APIStatusError as exc:
+                # Don't retry 4xx errors (bad request, auth) — only 5xx
+                if exc.status_code < 500:
+                    raise RuntimeError(
+                        f"Analyst API error ({exc.status_code}) for {ticket.id}"
+                    ) from exc
+                last_exc = exc
+                wait = 2 ** attempt
+                log.warning(
+                    "analyst_server_error_retrying",
+                    attempt=attempt,
+                    wait=wait,
+                    status_code=exc.status_code,
+                )
+                if attempt < max_retries:
+                    await asyncio.sleep(wait)
+                    continue
+                raise RuntimeError(
+                    f"Analyst API error ({exc.status_code}) "
+                    f"after {max_retries} retries for {ticket.id}"
+                ) from exc
+        else:
             raise RuntimeError(
-                f"Analyst API error ({exc.status_code}) for {ticket.id}"
-            ) from exc
+                f"Analyst failed after {max_retries} retries for {ticket.id}"
+            ) from last_exc
 
         # Extract text content from response
         raw_text = ""

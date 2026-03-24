@@ -93,3 +93,11 @@
 {"trace_id": "d1e34b560361", "ticket_id": "ACME-42", "timestamp": "2026-03-24T15:39:16.504595+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
 {"trace_id": "c9564ec71a12", "ticket_id": "ACME-42", "timestamp": "2026-03-24T15:40:00.883078+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "story", "source": "jira"}
 {"trace_id": "44c8754dd22f", "ticket_id": "ACME-42", "timestamp": "2026-03-24T15:40:00.888959+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "story", "source": "jira"}
+{"trace_id": "0979f0d33a0c", "ticket_id": "ACME-42", "timestamp": "2026-03-24T16:12:12.804452+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "story", "source": "jira"}
+{"trace_id": "4eb7f94324ac", "ticket_id": "ACME-42", "timestamp": "2026-03-24T16:12:12.821256+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "648636252cf5", "ticket_id": "ACME-42", "timestamp": "2026-03-24T16:13:07.172563+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "story", "source": "jira"}
+{"trace_id": "2145df8d298f", "ticket_id": "ACME-42", "timestamp": "2026-03-24T16:13:07.172921+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "93fcaf92b267", "ticket_id": "ACME-42", "timestamp": "2026-03-24T16:13:07.256455+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "story", "source": "jira"}
+{"trace_id": "e75d2264d633", "ticket_id": "ACME-42", "timestamp": "2026-03-24T16:13:07.256751+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "04e7c4282fd2", "ticket_id": "ACME-42", "timestamp": "2026-03-24T16:13:52.401608+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "story", "source": "jira"}
+{"trace_id": "9f5fd862847b", "ticket_id": "ACME-42", "timestamp": "2026-03-24T16:13:52.407275+00:00", "phase": "webhook", "event": "jira_webhook_received", "ticket_type": "story", "source": "jira"}

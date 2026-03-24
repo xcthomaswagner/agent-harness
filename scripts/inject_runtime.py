@@ -46,10 +46,17 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
 
         # Check for naming collision with existing client skills
         if target_skill.exists():
-            print(f"[inject] WARNING: Client skill '{skill_name}' exists — prefixing with 'harness-'")
-            target_skill = skills_dest / f"harness-{skill_name}"
+            # If this is a harness skill (re-injection), clean it first
+            marker = target_skill / ".harness-injected"
+            if marker.exists():
+                shutil.rmtree(target_skill)
+            else:
+                print(f"[inject] WARNING: Client skill '{skill_name}' exists — prefixing with 'harness-'")
+                target_skill = skills_dest / f"harness-{skill_name}"
 
         shutil.copytree(skill_dir, target_skill, dirs_exist_ok=True)
+        # Mark as harness-injected for clean re-injection
+        (target_skill / ".harness-injected").touch()
         print(f"[inject] Skill: {skill_name}")
 
     # --- Step 2: Inject agent definitions ---

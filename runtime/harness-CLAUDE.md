@@ -179,7 +179,15 @@ Example with 3 units where unit-3 depends on unit-1 (but not unit-2):
 - If unit-1 succeeded: spawn unit-3 (it can run in parallel with unit-2 if unit-2 is still going)
 - If unit-1 failed/blocked: mark unit-3 as `blocked` (reason: dependency unit-1 failed)
 
-**Dependency failure propagation:** If a unit fails or is blocked, all units that depend on it (directly or transitively) are also marked `blocked`. Do not spawn them.
+**Dependency failure propagation algorithm:**
+
+When a unit fails or is blocked, propagate transitively:
+1. Mark the unit as `failed` (if it errored) or `blocked` (if a dependency failed)
+2. Find all units that list this unit in their `dependencies` array
+3. Mark each of those as `blocked` with reason: "dependency unit-N failed/blocked"
+4. Repeat step 2-3 for the newly blocked units until no more propagation needed
+
+Example: units 1→2→3 (linear chain). Unit-1 fails → unit-2 blocked (depends on 1) → unit-3 blocked (depends on 2). Unit-4 (independent) continues unaffected.
 
 Track unit status: `complete`, `blocked`, or `failed`. **BLOCKED/FAILED units do not halt independent units.**
 
@@ -365,25 +373,27 @@ Agent(
          10. Read the figma_design_spec from .harness/ticket.json
          11. During E2E browser validation (or in a separate pass if no e2e scenarios),
              start the dev server and navigate to the relevant pages
-         12. For each page/component, use Playwright MCP to verify structural compliance:
+         12. For each page/component, use Playwright MCP to verify structural compliance.
+             If a Playwright tool is unavailable, mark that check as
+             'Skipped — Playwright MCP tool not available' instead of failing.
 
-             COLOR TOKENS: Use browser_execute to read computed CSS colors on key elements.
-             Compare against figma_design_spec.color_tokens.
-             Example: document.defaultView.getComputedStyle(element).backgroundColor
-             Record: expected color from Figma vs actual rendered color. PASS if they match.
+             COLOR TOKENS: Use browser_snapshot to inspect the rendered page.
+             Visually confirm that key element colors match figma_design_spec.color_tokens.
+             If computed style extraction is available, use it. Otherwise compare
+             visually from screenshots.
+             Record: expected color from Figma vs observed. PASS if they match.
 
-             TYPOGRAPHY: Use browser_execute to read computed font-family, font-size,
-             font-weight on headings, body text, and labels.
+             TYPOGRAPHY: Inspect rendered headings, body text, and labels.
              Compare against figma_design_spec.typography.
-             Record: expected font spec vs actual computed values.
+             Record: expected font spec vs observed values.
 
              COMPONENTS: Use browser_snapshot (accessibility tree) to verify all components
              listed in figma_design_spec.components are present in the rendered page.
              Record: each expected component and whether it was found.
 
-             LAYOUT: Use browser_execute to read element bounding rects and flex/grid
-             properties. Compare against figma_design_spec.layout_patterns.
-             Record: expected layout direction vs actual.
+             LAYOUT: Inspect page layout for flex/grid direction, spacing.
+             Compare against figma_design_spec.layout_patterns.
+             Record: expected layout direction vs observed.
 
          13. If figma_design_spec is NOT present in the ticket JSON, write in the
              Design Compliance section: 'Skipped — no Figma design spec provided in ticket.'
@@ -447,7 +457,7 @@ Only after code review and QA are complete:
 git push -u origin ai/<ticket-id>
 ```
 
-Open a draft PR. The body MUST include the review and QA content:
+Open a draft PR. The body MUST include the review and QA content. When pasting content from review/QA files, escape any backticks (`` ` ``) that would break the PR body's markdown:
 
 ```bash
 gh pr create --draft --title "feat(<ticket-id>): <description>" --body "$(cat <<'PRBODY'
@@ -483,9 +493,29 @@ Write final summary to `.harness/logs/session.log` and:
 {"phase": "complete", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Pipeline complete", "pr_url": "<url>", "review_verdict": "APPROVED", "qa_result": "PASS", "pipeline_mode": "simple|full", "units": N}
 ```
 
+## Observability Model
+
+The harness uses a two-tier observability model inspired by OpenTelemetry:
+
+**Trace** (`pipeline.jsonl`) — The ordered sequence of phase transitions for the entire pipeline run. Written ONLY by the **Team Lead**. This is the top-level audit trail.
+
+**Span detail files** — Rich output from each sub-agent, attached to the corresponding trace phase:
+
+| File | Written by | Attached to phase |
+|------|-----------|-------------------|
+| `code-review.md` | Code Reviewer | `code_review` |
+| `judge-verdict.md` | Judge | `judge` |
+| `qa-matrix.md` | QA | `qa_validation` |
+| `merge-report.md` | Merge Coordinator | `merge` |
+| `plan-review.md` | Plan Reviewer | `plan_review` |
+| `blocked-units.md` | Team Lead | `implementation` |
+| `escalation.md` | Team Lead | escalation events |
+
+**Rule: Sub-agents NEVER write to `pipeline.jsonl`.** They write their own detail files. The Team Lead reads those files and logs the phase summary to `pipeline.jsonl`.
+
 ## Structured Logging
 
-Append JSON Lines to `.harness/logs/pipeline.jsonl` for every phase transition.
+The Team Lead appends JSON Lines to `.harness/logs/pipeline.jsonl` for every phase transition.
 
 **Timestamps MUST be real:** For every log entry, generate the timestamp at the moment you write it by running:
 ```bash
