@@ -10,6 +10,9 @@ import structlog
 
 logger = structlog.get_logger()
 
+# Hidden marker appended to all agent-posted comments for bot-loop detection.
+BOT_COMMENT_MARKER = "<!-- xcagent -->"
+
 LOGS_DIR = Path(__file__).resolve().parents[2] / "data" / "logs" / "l3"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -50,7 +53,8 @@ class SessionSpawner:
             f"### Naming & Consistency\n[findings or 'Consistent']\n\n"
             f"### Test Coverage\n[assessment]\n\n"
             f"### Summary\n[one paragraph overall assessment]\n\n"
-            f'---\n🤖 AI Architecture Review by Agentic Developer Harness"\n\n'
+            f"---\nArchitecture Review by XCentium Review Agent\n\n"
+            f'{BOT_COMMENT_MARKER}"\n\n'
             f"IMPORTANT: You MUST post the review using gh pr review. Do not just print it.\n\n"
             f"Ticket context:\n{ticket_context[:1500]}\n\n"
             f"Diff summary:\n{pr_diff[:1500]}"
@@ -69,7 +73,8 @@ class SessionSpawner:
             f"4. Run the tests to verify\n"
             f"5. Commit and push to the same branch: git push origin {branch}\n"
             f"6. Post a comment:\n"
-            f"   gh pr comment {pr_number} --body \"CI fix: [description]\"\n\n"
+            f'   gh pr comment {pr_number} --body "CI fix: [description]\n\n'
+            f'{BOT_COMMENT_MARKER}"\n\n'
             f"Failure logs:\n{failure_logs[:3000]}"
         )
         return self._spawn("ci-fix", prompt, model="sonnet", pr_number=pr_number)
@@ -83,12 +88,14 @@ class SessionSpawner:
             f'"{comment_body[:3000]}"\n\n'
             f"If this is a question:\n"
             f"  - Read the relevant code\n"
-            f'  - Reply: gh pr comment {pr_number} --body "your explanation"\n\n'
+            f'  - Reply: gh pr comment {pr_number} --body "your explanation\n\n'
+            f'{BOT_COMMENT_MARKER}"\n\n'
             f"If this is a change request:\n"
             f"  - Apply the fix\n"
             f"  - Run tests\n"
             f"  - Commit and push\n"
-            f'  - Reply: gh pr comment {pr_number} --body "Fixed: [description]"'
+            f'  - Reply: gh pr comment {pr_number} --body "Fixed: [description]\n\n'
+            f'{BOT_COMMENT_MARKER}"'
         )
         return self._spawn("comment-response", prompt, model="sonnet", pr_number=pr_number)
 

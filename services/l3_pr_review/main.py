@@ -21,6 +21,9 @@ logger = structlog.get_logger()
 
 WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 BOT_USERNAME = os.getenv("BOT_GITHUB_USERNAME", "github-actions[bot]")
+# Hidden marker injected into all agent-posted comments for self-detection.
+# This catches bot-loops even when the agent uses the same GitHub user as the human.
+BOT_COMMENT_MARKER = "<!-- xcagent -->"
 
 app = FastAPI(
     title="Agentic Harness L3 PR Review",
@@ -41,13 +44,27 @@ def _get_spawner() -> SessionSpawner:
 # --- Helpers ---
 
 
-def _is_bot_author(payload: dict[str, Any], user_path: list[str]) -> bool:
-    """Check whether the event author matches the bot's GitHub username."""
+def _is_bot_comment(payload: dict[str, Any], user_path: list[str]) -> bool:
+    """Check whether a comment was posted by the bot.
+
+    Two detection methods (either triggers skip):
+    1. Author's GitHub login matches BOT_USERNAME
+    2. Comment body contains the hidden BOT_COMMENT_MARKER
+    """
+    # Check author login
     obj: Any = payload
     for key in user_path:
         obj = obj.get(key, {})
     login: str = obj.get("login", "") if isinstance(obj, dict) else ""
-    return login == BOT_USERNAME
+    if login == BOT_USERNAME:
+        return True
+
+    # Check comment body for hidden marker
+    body = (
+        payload.get("review", {}).get("body", "")
+        or payload.get("comment", {}).get("body", "")
+    )
+    return BOT_COMMENT_MARKER in body
 
 
 # --- Event handlers ---
@@ -155,7 +172,7 @@ async def _handle_review_comment(payload: dict[str, Any]) -> None:
     # From pull_request_review event
     review = payload.get("review", {})
     if review:
-        if _is_bot_author(payload, ["review", "user"]):
+        if _is_bot_comment(payload, ["review", "user"]):
             logger.debug("ignoring_bot_review_comment")
             return
         pr_number = payload.get("pull_request", {}).get("number", 0)
@@ -163,7 +180,7 @@ async def _handle_review_comment(payload: dict[str, Any]) -> None:
         comment_author = review.get("user", {}).get("login", "unknown")
     else:
         # From issue_comment event
-        if _is_bot_author(payload, ["comment", "user"]):
+        if _is_bot_comment(payload, ["comment", "user"]):
             logger.debug("ignoring_bot_issue_comment")
             return
         issue = payload.get("issue", {})
@@ -187,7 +204,7 @@ async def _handle_review_comment(payload: dict[str, Any]) -> None:
 
 async def _handle_review_changes_requested(payload: dict[str, Any]) -> None:
     """Handle change requests — spawn targeted fix agent."""
-    if _is_bot_author(payload, ["review", "user"]):
+    if _is_bot_comment(payload, ["review", "user"]):
         logger.debug("ignoring_bot_changes_requested")
         return
     review = payload.get("review", {})

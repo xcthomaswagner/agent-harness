@@ -281,6 +281,60 @@ async def test_bot_issue_comment_ignored() -> None:
         assert response.json()["event_type"] == "review_comment"
 
 
+async def test_marker_based_bot_detection() -> None:
+    """Comments containing the bot marker should be ignored even from human users."""
+    payload = {
+        "action": "created",
+        "issue": {"number": 10, "pull_request": {"url": "..."}},
+        "comment": {
+            "body": "Fixed: moved ts-node\n\n<!-- xcagent -->",
+            "user": {"login": "xcthomaswagner"},  # Human user, not bot
+        },
+    }
+
+    with (
+        patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+        patch.object(l3_main, "BOT_COMMENT_MARKER", "<!-- xcagent -->"),
+        patch.object(l3_main, "_get_spawner") as mock_get,
+    ):
+        mock_spawner = MagicMock()
+        mock_get.return_value = mock_spawner
+
+        async with await _make_client() as client:
+            response = await _post_webhook(client, payload, "issue_comment")
+
+        assert response.status_code == 202
+        # Spawner should NOT be called — marker detected
+        assert response.json()["event_type"] == "review_comment"
+
+
+async def test_human_comment_not_blocked() -> None:
+    """Human comments without marker should still trigger response."""
+    payload = {
+        "action": "created",
+        "issue": {"number": 10, "pull_request": {"url": "..."}},
+        "comment": {
+            "body": "Can you explain this change?",
+            "user": {"login": "xcthomaswagner"},
+        },
+    }
+
+    with (
+        patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+        patch.object(l3_main, "BOT_COMMENT_MARKER", "<!-- xcagent -->"),
+        patch.object(l3_main, "BOT_USERNAME", "github-actions[bot]"),
+        patch.object(l3_main, "_get_spawner") as mock_get,
+    ):
+        mock_spawner = MagicMock()
+        mock_get.return_value = mock_spawner
+
+        async with await _make_client() as client:
+            response = await _post_webhook(client, payload, "issue_comment")
+
+        assert response.status_code == 202
+        assert response.json()["event_type"] == "review_comment"
+
+
 # --- Ignored events ---
 
 
