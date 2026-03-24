@@ -247,12 +247,19 @@ Agent(
 
          Evaluate for:
          1. CORRECTNESS: Does the code match the acceptance criteria in .harness/ticket.json?
-         2. SECURITY: Any hardcoded secrets, injection vectors, or auth issues?
+         2. SECURITY: dangerouslySetInnerHTML, hardcoded secrets, injection vectors, auth gaps?
+            Flag ALL uses of dangerouslySetInnerHTML even if the content appears safe.
          3. STYLE: Does the code follow the project conventions in CLAUDE.md?
          4. DEPENDENCIES: If package.json was modified, are dev-only packages
             (ts-node, ts-jest, @types/*, test frameworks) in devDependencies not dependencies?
-         5. TEST COVERAGE: Are all acceptance criteria and edge cases tested?
-         6. BUGS: Logic errors, off-by-one, missing null checks?
+         5. AUTO-GENERATED FILES: Were any auto-generated files committed that should be
+            gitignored (next-env.d.ts, .next/, dist/, coverage/)?
+         6. TEST COVERAGE: Are all acceptance criteria and edge cases tested?
+            Flag any new module/component that has zero test coverage.
+         7. BUGS: Logic errors, off-by-one, missing null checks?
+
+         Do NOT rationalize issues away. Flag them and explain why they are
+         or are not acceptable. Let the Judge decide what to filter.
 
          Write your review to .harness/logs/code-review.md:
 
