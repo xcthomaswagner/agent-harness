@@ -67,24 +67,43 @@ def main() -> None:
     # --- Step 1: Create worktree (handle collisions) ---
     worktree_dir = client_repo.parent / "worktrees" / branch_name
 
-    lock_file = worktree_dir / ".harness" / ".agent.lock" if worktree_dir.exists() else None
+    lock_file = worktree_dir / ".harness" / ".agent.lock"
 
     if worktree_dir.exists():
-        # Check lock file — if it exists and is recent (<30 min), agent is running
-        if lock_file and lock_file.exists():
-            import time as _time
-            age = _time.time() - lock_file.stat().st_mtime
-            if age < 1800:
-                print(f"[spawn] Agent already running for {branch_name} (lock age: {int(age)}s) — skipping")
-                sys.exit(0)
-            else:
-                print(f"[spawn] Stale lock file ({int(age)}s old) — removing")
-                lock_file.unlink()
+        # Check lock file — if it exists and the PID is still alive, agent is running
+        try:
+            if lock_file.exists():
+                lock_content = lock_file.read_text().strip()
+                lock_pid = int(lock_content) if lock_content.isdigit() else 0
+
+                # Check if the PID is still alive
+                pid_alive = False
+                if lock_pid > 0:
+                    try:
+                        os.kill(lock_pid, 0)  # signal 0 = check existence
+                        pid_alive = True
+                    except (ProcessLookupError, PermissionError):
+                        pass
+
+                if pid_alive:
+                    print(f"[spawn] Agent running for {branch_name} (PID {lock_pid}) — skipping")
+                    sys.exit(0)
+                else:
+                    print(f"[spawn] Stale lock (PID {lock_pid} not running) — removing")
+                    lock_file.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            # Lock file unreadable or corrupt — safe to proceed
+            lock_file.unlink(missing_ok=True)
 
         print("[spawn] Worktree exists but no agent running — cleaning up stale worktree")
-        run_git(str(client_repo), "worktree", "remove", str(worktree_dir), "--force", check=False)
-        if worktree_dir.exists():
-            shutil.rmtree(worktree_dir)
+        result = run_git(
+            str(client_repo), "worktree", "remove", str(worktree_dir), "--force", check=False
+        )
+        if result.returncode != 0:
+            print(f"[spawn] WARNING: git worktree remove failed: {result.stderr.strip()}")
+            # Fallback: force remove directory
+            if worktree_dir.exists():
+                shutil.rmtree(worktree_dir)
         run_git(str(client_repo), "worktree", "prune", check=False)
         run_git(str(client_repo), "branch", "-D", branch_name, check=False)
         print("[spawn] Stale worktree cleaned up")
@@ -189,8 +208,19 @@ def main() -> None:
             "and execute the pipeline per the Agentic Harness Pipeline Instructions in CLAUDE.md."
         )
 
-    # Strip ANTHROPIC_API_KEY so Claude Code uses the Max subscription
-    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    # Strip secrets so Claude Code uses the Max subscription and doesn't
+    # leak credentials into agent sessions. Blocklist approach — remove known
+    # secrets while preserving PATH, HOME, and other system vars needed by git/gh.
+    _SECRET_VARS = {
+        "ANTHROPIC_API_KEY",
+        "JIRA_API_TOKEN",
+        "ADO_PAT",
+        "GITHUB_WEBHOOK_SECRET",
+        "FIGMA_API_TOKEN",
+        "WEBHOOK_SECRET",
+        "REDIS_URL",
+    }
+    env = {k: v for k, v in os.environ.items() if k not in _SECRET_VARS}
 
     # Write lock file before launching agent
     agent_lock = worktree_dir / ".harness" / ".agent.lock"

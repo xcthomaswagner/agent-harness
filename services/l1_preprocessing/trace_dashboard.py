@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
@@ -11,13 +13,8 @@ router = APIRouter()
 
 
 def _escape(text: str) -> str:
-    """HTML-escape a string."""
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
+    """HTML-escape a string to prevent XSS."""
+    return html.escape(text, quote=True)
 
 
 @router.get("/traces", response_class=HTMLResponse)

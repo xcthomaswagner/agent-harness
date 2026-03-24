@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,20 @@ app = FastAPI(
     version="0.1.0",
 )
 app.include_router(trace_router)
+
+
+@app.on_event("startup")
+async def _validate_config() -> None:
+    """Warn about missing configuration at startup."""
+    if not settings.webhook_secret:
+        logger.warning(
+            "webhook_secret_not_configured",
+            hint="Webhook signature validation is DISABLED. Set WEBHOOK_SECRET in .env",
+        )
+    if not settings.anthropic_api_key:
+        logger.error("anthropic_api_key_missing", hint="Analyst will fail without API key")
+    if not settings.jira_base_url and not settings.ado_org_url:
+        logger.warning("no_ticket_source_configured", hint="Set JIRA_BASE_URL or ADO_ORG_URL")
 
 _jira_adapter: JiraAdapter | None = None
 _ado_adapter: AdoAdapter | None = None
@@ -181,9 +196,21 @@ async def jira_webhook(
 async def ado_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
+    x_hub_signature: str | None = Header(default=None, alias="x-hub-signature"),
 ) -> dict[str, str]:
     """Receive an Azure DevOps Service Hook webhook and enqueue for processing."""
     body = await request.body()
+
+    # Validate webhook signature if secret is configured
+    if settings.webhook_secret:
+        if not x_hub_signature:
+            raise HTTPException(status_code=401, detail="Missing webhook signature")
+        expected = hmac.new(
+            settings.webhook_secret.encode(), body, hashlib.sha256
+        ).hexdigest()
+        signature = x_hub_signature.removeprefix("sha256=")
+        if not hmac.compare_digest(expected, signature):
+            raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     try:
         payload: dict[str, Any] = json.loads(body)
@@ -214,6 +241,10 @@ async def manual_process_ticket(
     return {"status": "accepted", "ticket_id": ticket.id, "dispatch": dispatch}
 
 
+_TICKET_ID_PATTERN = re.compile(r"^[A-Za-z0-9]+-[0-9]+$")
+_VALID_PHASES = {"qa", "e2e", "review"}
+
+
 class RetestPayload(BaseModel):
     """Payload for re-running specific pipeline phases on an existing branch."""
 
@@ -235,6 +266,17 @@ async def retest(payload: RetestPayload, background_tasks: BackgroundTasks) -> d
         - e2e: E2E browser tests only
         - review: code review only
     """
+    # Input validation — ticket_id used in filesystem paths
+    if not _TICKET_ID_PATTERN.match(payload.ticket_id):
+        raise HTTPException(
+            status_code=400, detail="Invalid ticket_id format (expected: PROJ-123)"
+        )
+    if payload.phase not in _VALID_PHASES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid phase '{payload.phase}'. Must be one of: {_VALID_PHASES}",
+        )
+
     branch = payload.branch or f"ai/{payload.ticket_id}"
     client_repo = settings.default_client_repo
     if not client_repo:
