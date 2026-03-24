@@ -61,6 +61,16 @@ def _get_pipeline() -> Pipeline:
     return _pipeline
 
 
+# --- Idempotency: prevent duplicate processing ---
+
+_active_tickets: set[str] = set()
+
+
+def _is_ticket_active(ticket_id: str) -> bool:
+    """Check if a ticket is already being processed."""
+    return ticket_id in _active_tickets
+
+
 # --- Pipeline processing (background) ---
 
 
@@ -69,15 +79,21 @@ def _enqueue_or_background(
 ) -> str:
     """Try to enqueue via Redis, fall back to FastAPI BackgroundTasks.
 
-    Returns "queued" or "background".
+    Returns "queued", "background", or "duplicate".
     """
+    if _is_ticket_active(ticket.id):
+        logger.info("ticket_duplicate_skipped", ticket_id=ticket.id)
+        return "duplicate"
+
     from queue_worker import enqueue_ticket
 
     job_id = enqueue_ticket(ticket)
     if job_id:
+        _active_tickets.add(ticket.id)
         logger.info("ticket_queued", ticket_id=ticket.id, job_id=job_id)
         return "queued"
 
+    _active_tickets.add(ticket.id)
     background_tasks.add_task(_process_ticket, ticket)
     return "background"
 
@@ -106,6 +122,8 @@ async def _process_ticket(ticket: TicketPayload) -> None:
         append_trace(ticket.id, trace_id, "pipeline", "processing_completed", **trace_data)
     except Exception:
         log.exception("processing_ticket_failed")
+    finally:
+        _active_tickets.discard(ticket.id)
 
 
 # --- Endpoints ---
@@ -154,6 +172,8 @@ async def jira_webhook(
                  ticket_type=ticket.ticket_type, source="jira")
 
     dispatch = _enqueue_or_background(ticket, background_tasks)
+    if dispatch == "duplicate":
+        return {"status": "skipped", "ticket_id": ticket.id, "reason": "already processing"}
     return {"status": "accepted", "ticket_id": ticket.id, "dispatch": dispatch}
 
 
@@ -329,6 +349,9 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
     log = logger.bind(ticket_id=payload.ticket_id, status=payload.status)
     log.info("agent_completion_received", pr_url=payload.pr_url)
 
+    # Clear idempotency guard so ticket can be reprocessed if needed
+    _active_tickets.discard(payload.ticket_id)
+
     # Trace: record completion and consolidate worktree logs
     trace_id = generate_trace_id()
     append_trace(payload.ticket_id, trace_id, "completion", "agent_finished",
@@ -349,6 +372,16 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
                 f"Status: {payload.status}"
             )
             await adapter.write_comment(payload.ticket_id, comment)
+
+        # Upload final screenshot if it exists in the worktree
+        screenshot_path = Path(worktree_path) / ".harness" / "screenshots" / "final.png"
+        if screenshot_path.exists():
+            await adapter.upload_attachment(
+                payload.ticket_id,
+                str(screenshot_path),
+                filename=f"{payload.ticket_id}-implementation.png",
+            )
+            log.info("screenshot_uploaded_to_jira", path=str(screenshot_path))
 
         if payload.status == "complete":
             await adapter.transition_status(payload.ticket_id, "Done")

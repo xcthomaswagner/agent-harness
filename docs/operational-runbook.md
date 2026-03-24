@@ -119,10 +119,19 @@ kill <PID>
 2. Re-auth: `gh auth login`
 3. Verify token scopes: needs `repo` + `read:org`
 
-### Ticket re-triggered but worktree exists
-The spawn script handles this automatically — it kills the existing agent and recreates the worktree. If it doesn't:
+### Duplicate webhooks / agents
+Jira automation can fire multiple webhooks for the same ticket. Two layers of protection:
+
+1. **L1 idempotency guard** — in-memory set tracks active tickets. Second webhook for the same ticket returns `{"status": "skipped", "reason": "already processing"}`. Cleared automatically when the pipeline finishes or `agent-complete` fires.
+2. **Spawn script lock file** — `.harness/.agent.lock` is created before launching the agent. If the lock exists and is less than 30 minutes old, the spawn script exits without starting a new agent. Cleaned up when the session ends.
+
+If duplicates still occur (e.g., L1 was restarted mid-run):
 ```bash
-./scripts/cleanup-worktree.sh --client-repo <path> --branch-name ai/<ticket-id>
+# Find all agents
+ps aux | grep "claude -p" | grep -v grep
+
+# Kill the duplicate (newer PID)
+kill <PID>
 ```
 
 ### Analyst returns error

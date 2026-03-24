@@ -82,9 +82,23 @@ Spawn a planner to decompose the ticket:
 ```
 Agent(
   prompt="You are a planner. Read the enriched ticket at .harness/ticket.json.
+
+         BEFORE PLANNING — read the existing codebase:
+         1. Run: ls -R src/ (or the project's source directory)
+         2. Read package.json (or equivalent) for existing dependencies
+         3. Read any files that relate to the ticket (existing routes, components,
+            data files, test files). If the ticket references existing code, READ IT.
+         4. Note what already exists so you don't create duplicate files.
+
+         DEPENDENCY CHAIN CHECK:
+         After creating your plan, check if ALL units form a linear chain
+         (every unit depends on the previous one, no parallelism possible).
+         If so, add to your plan output:
+         'recommendation': 'simple_pipeline — all units are sequential, no parallelism benefit'
+         The team lead may switch to simple pipeline mode based on this.
+
          Decompose it into atomic implementation units following the /plan-implementation skill
          in .claude/skills/plan-implementation/SKILL.md.
-         Read the codebase to understand existing patterns before planning.
          Output a JSON plan matching the schema in .claude/skills/plan-implementation/PLAN_SCHEMA.md.
          Write the plan to .harness/plans/plan-v1.json.
          Each unit must list affected_files and dependencies.
@@ -95,6 +109,8 @@ Agent(
 ```
 
 Read `.harness/plans/plan-v1.json`. If the planner failed after 2 attempts, escalate.
+
+**Linear chain check:** If the plan includes `"recommendation": "simple_pipeline"`, all units are sequential with no parallelism benefit. Switch to the Simple Pipeline instead — implement all units in sequence within a single developer agent, skipping the overhead of plan review, parallel spawning, and merge coordination.
 
 Log: `{"phase": "planning", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Plan complete", "units": N}`
 
@@ -233,8 +249,10 @@ Agent(
          1. CORRECTNESS: Does the code match the acceptance criteria in .harness/ticket.json?
          2. SECURITY: Any hardcoded secrets, injection vectors, or auth issues?
          3. STYLE: Does the code follow the project conventions in CLAUDE.md?
-         4. TEST COVERAGE: Are all acceptance criteria and edge cases tested?
-         5. BUGS: Logic errors, off-by-one, missing null checks?
+         4. DEPENDENCIES: If package.json was modified, are dev-only packages
+            (ts-node, ts-jest, @types/*, test frameworks) in devDependencies not dependencies?
+         5. TEST COVERAGE: Are all acceptance criteria and edge cases tested?
+         6. BUGS: Logic errors, off-by-one, missing null checks?
 
          Write your review to .harness/logs/code-review.md:
 
@@ -251,10 +269,45 @@ Agent(
 
 Read `.harness/logs/code-review.md`.
 
-**If CHANGES_NEEDED with critical issues:**
-1. Spawn a developer to fix all critical issues
+**If CHANGES_NEEDED with critical issues — run the Judge first:**
+
+Spawn a Judge agent to validate the findings before sending them to a developer:
+
+```
+Agent(
+  prompt="You are the Judge. Read the code review at .harness/logs/code-review.md.
+         For EACH issue found by the reviewer:
+         1. Read the actual code at the referenced file/line with 20+ lines of context
+         2. Evaluate: Is it real? Is the code path reachable? Is the suggested fix correct?
+            Is it pre-existing (git blame — if unchanged in this diff, reject it)?
+         3. Score 0-100: 0-30 false positive, 31-60 uncertain, 61-80 borderline, 81-100 confirmed
+         4. Only issues scoring 80+ should be fixed
+
+         Write to .harness/logs/judge-verdict.md:
+         ## Judge Verdict — <ticket-id>
+         ### Validated Issues (score >= 80, send to developer)
+         | Issue | Score | Verdict |
+         |-------|-------|---------|
+         ### Rejected Issues (score < 80, false positives filtered out)
+         | Issue | Score | Verdict |
+         |-------|-------|---------|
+         ### Summary
+         X of Y issues validated. Rejected issues are false positives or out of scope.",
+  description="Judge <ticket-id>",
+  mode="bypassPermissions"
+)
+```
+
+Read `.harness/logs/judge-verdict.md`.
+
+Log: `{"phase": "judge", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Judge complete", "validated": N, "rejected": M}`
+
+**If validated issues remain (score >= 80):**
+1. Spawn a developer to fix only the validated issues (not rejected ones)
 2. Re-run the code reviewer
 3. Maximum 2 review-fix cycles. After that, proceed with warnings noted.
+
+**If all issues rejected by the Judge:** Skip developer fix, proceed to QA.
 
 Log: `{"phase": "code_review", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Review complete", "verdict": "APPROVED|CHANGES_NEEDED", "issues": N}`
 
@@ -323,7 +376,9 @@ Agent(
              properties. Compare against figma_design_spec.layout_patterns.
              Record: expected layout direction vs actual.
 
-         13. If figma_design_spec is NOT present, skip this section entirely.
+         13. If figma_design_spec is NOT present in the ticket JSON, write in the
+             Design Compliance section: 'Skipped — no Figma design spec provided in ticket.'
+             Do NOT mark individual items as NOT_TESTED without explanation.
 
          Write to .harness/logs/qa-matrix.md:
 
@@ -349,7 +404,7 @@ Agent(
          ### Test Results
          Unit/Integration: X passed, Y failed
          E2E: X passed, Y failed (or 'skipped — no Playwright')
-         Design Compliance: X/Y checks passed (or 'skipped — no Figma spec')",
+         Design Compliance: X/Y checks passed (or 'Skipped — no Figma design spec provided in ticket')",
   description="QA <ticket-id>",
   mode="bypassPermissions"
 )
@@ -362,6 +417,18 @@ Read `.harness/logs/qa-matrix.md`.
 **Circuit breaker:** If >50% of AC fail, do NOT route individual failures. Escalate the entire ticket.
 
 Log: `{"phase": "qa_validation", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "QA complete", "overall": "PASS|FAIL", "criteria_passed": N, "criteria_total": M}`
+
+## Final Screenshot
+
+After QA passes (and before PR creation), if the implementation has a visual UI component:
+
+1. Start the dev server if not already running
+2. Navigate to the main page/feature that was implemented
+3. Take a single curated screenshot that shows the finished result
+4. Save it as `.harness/screenshots/final.png`
+5. Stop the dev server
+
+This screenshot will be automatically uploaded to the Jira ticket as visual proof of the implementation. If the implementation has no visual UI (e.g., backend-only, API, config change), skip this step.
 
 ## PR Creation (shared by both pipelines)
 
@@ -409,6 +476,12 @@ Write final summary to `.harness/logs/session.log` and:
 ## Structured Logging
 
 Append JSON Lines to `.harness/logs/pipeline.jsonl` for every phase transition.
+
+**Timestamps MUST be real:** For every log entry, generate the timestamp at the moment you write it by running:
+```bash
+date -u +%Y-%m-%dT%H:%M:%SZ
+```
+Do NOT estimate, hardcode, or invent timestamps. Each log entry's timestamp must reflect the actual time that phase completed.
 
 ## Failure Handling
 

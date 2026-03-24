@@ -21,7 +21,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -68,31 +67,27 @@ def main() -> None:
     # --- Step 1: Create worktree (handle collisions) ---
     worktree_dir = client_repo.parent / "worktrees" / branch_name
 
+    lock_file = worktree_dir / ".harness" / ".agent.lock" if worktree_dir.exists() else None
+
     if worktree_dir.exists():
-        print("[spawn] Worktree already exists — cleaning up previous run")
+        # Check lock file — if it exists and is recent (<30 min), agent is running
+        if lock_file and lock_file.exists():
+            import time as _time
+            age = _time.time() - lock_file.stat().st_mtime
+            if age < 1800:
+                print(f"[spawn] Agent already running for {branch_name} (lock age: {int(age)}s) — skipping")
+                sys.exit(0)
+            else:
+                print(f"[spawn] Stale lock file ({int(age)}s old) — removing")
+                lock_file.unlink()
 
-        # Kill any running agent for this branch
-        try:
-            result = subprocess.run(
-                ["pgrep", "-f", f"claude.*{branch_name}"],
-                capture_output=True, text=True, check=False,
-            )
-            for pid in result.stdout.strip().split("\n"):
-                if pid:
-                    print(f"[spawn] Killing existing agent (PID: {pid})")
-                    subprocess.run(["kill", pid], check=False)
-            if result.stdout.strip():
-                time.sleep(2)
-        except FileNotFoundError:
-            # pgrep not available (Windows) — skip
-            pass
-
+        print("[spawn] Worktree exists but no agent running — cleaning up stale worktree")
         run_git(str(client_repo), "worktree", "remove", str(worktree_dir), "--force", check=False)
         if worktree_dir.exists():
             shutil.rmtree(worktree_dir)
         run_git(str(client_repo), "worktree", "prune", check=False)
         run_git(str(client_repo), "branch", "-D", branch_name, check=False)
-        print("[spawn] Previous worktree cleaned up")
+        print("[spawn] Stale worktree cleaned up")
 
     print(f"[spawn] Creating worktree at: {worktree_dir}")
     result = run_git(str(client_repo), "worktree", "add", str(worktree_dir), "-b", branch_name, check=False)
@@ -106,10 +101,30 @@ def main() -> None:
 
     subprocess.run(inject_args, check=True)
 
-    # --- Step 3: Write ticket and mode ---
+    # --- Step 3: Write ticket, mode, and copy attachments ---
     shutil.copy2(ticket_json, worktree_dir / ".harness" / "ticket.json")
     (worktree_dir / ".harness" / "pipeline-mode").write_text(pipeline_mode)
     print(f"[spawn] Ticket written to .harness/ticket.json (mode: {pipeline_mode})")
+
+    # Copy downloaded image attachments into the worktree
+    with ticket_json.open() as f:
+        ticket_data = json.load(f)
+    attachments_dir = worktree_dir / ".harness" / "attachments"
+    copied_count = 0
+    for att in ticket_data.get("attachments", []):
+        local_path = att.get("local_path", "")
+        if local_path and Path(local_path).exists():
+            attachments_dir.mkdir(parents=True, exist_ok=True)
+            dest = attachments_dir / Path(local_path).name
+            shutil.copy2(local_path, dest)
+            # Update the attachment's local_path to point to the worktree copy
+            att["local_path"] = str(dest)
+            copied_count += 1
+    if copied_count:
+        # Re-write ticket.json with updated local_paths
+        with (worktree_dir / ".harness" / "ticket.json").open("w") as f:
+            json.dump(ticket_data, f, indent=2)
+        print(f"[spawn] Copied {copied_count} image attachment(s) to .harness/attachments/")
 
     # --- Step 4: Launch Claude Code ---
     print("[spawn] Launching Claude Code session...")
@@ -121,9 +136,39 @@ def main() -> None:
         prompt = (
             "You are the team lead in QUICK mode. Read the enriched ticket at "
             ".harness/ticket.json. Implement the changes yourself (do NOT spawn "
-            "sub-agents). Write tests, run them, commit, push, and open a draft PR. "
-            "Follow the project conventions in CLAUDE.md. Use conventional commits: "
-            "feat(<ticket-id>): <description>. Do not commit .env, secrets, or harness files."
+            "sub-agents). Follow the project conventions in CLAUDE.md. "
+            "If the ticket has design image attachments in .harness/attachments/, "
+            "read them to understand the visual design.\n\n"
+            "STEP 1 — IMPLEMENT: Write code + tests. Run the full test suite. "
+            "Fix failures (up to 3 attempts). Commit: feat(<ticket-id>): <description>. "
+            "Do not commit .env, secrets, or harness files.\n\n"
+            "STEP 2 — SELF-REVIEW: Run git diff main...HEAD. Review your own changes "
+            "for correctness, security (hardcoded secrets, injection, auth gaps), "
+            "style compliance, test coverage, and bugs. Check that dev-only packages "
+            "(ts-node, ts-jest, etc.) are in devDependencies not dependencies. "
+            "Write findings to .harness/logs/code-review.md with format:\n"
+            "## Code Review — <ticket-id>\n"
+            "### Verdict: APPROVED | CHANGES_NEEDED\n"
+            "### Issues Found\n"
+            "- [severity: critical|warning] [category] Description\n"
+            "### Summary\n"
+            "If you find critical issues, fix them and update the review file.\n\n"
+            "STEP 3 — QA MATRIX: For each acceptance criterion in the ticket, "
+            "determine PASS/FAIL/NOT_TESTED with evidence. Write to "
+            ".harness/logs/qa-matrix.md with format:\n"
+            "## QA Matrix — <ticket-id>\n"
+            "### Overall: PASS | FAIL\n"
+            "### Acceptance Criteria\n"
+            "| # | Criterion | Status | Evidence |\n"
+            "If figma_design_spec is NOT present in the ticket, write: "
+            "'Design Compliance: skipped — no Figma design spec provided'\n\n"
+            "STEP 4 — SCREENSHOT: If the implementation has a visual UI, start the "
+            "dev server, navigate to the page, take a browser screenshot, and save "
+            "as .harness/screenshots/final.png. Skip for backend-only work.\n\n"
+            "STEP 5 — PR: Push and open a draft PR. Include the code review verdict "
+            "and QA matrix in the PR body.\n\n"
+            "Log each step to .harness/logs/pipeline.jsonl as JSON Lines. "
+            "Use actual timestamps: run 'date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ' for each entry."
         )
     else:
         prompt = (
@@ -133,6 +178,10 @@ def main() -> None:
 
     # Strip ANTHROPIC_API_KEY so Claude Code uses the Max subscription
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+
+    # Write lock file before launching agent
+    agent_lock = worktree_dir / ".harness" / ".agent.lock"
+    agent_lock.write_text(str(os.getpid()))
 
     session_log = worktree_dir / ".harness" / "logs" / "session.log"
     with session_log.open("w") as log_file:
@@ -145,6 +194,7 @@ def main() -> None:
         )
 
     exit_code = proc.returncode
+    agent_lock.unlink(missing_ok=True)
     print(f"[spawn] Session ended with exit code: {exit_code}")
     print(f"[spawn] Logs at: {session_log}")
 
