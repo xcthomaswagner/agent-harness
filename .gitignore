@@ -47,5 +47,12 @@ htmlcov/
 .ruff_cache/
 .benchmarks/
 
+# Trace data (runtime artifacts, not source code)
+data/logs/
+
+# Binary documents (deliverables, not source)
+*.docx
+*.pptx
+
 # Claude Code memory (project-specific, not committed)
 memory/
