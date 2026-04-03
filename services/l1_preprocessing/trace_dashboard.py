@@ -682,8 +682,8 @@ def _render_board(traces: list[dict], total: int) -> str:
     board = (
         f'<div style="display:flex;gap:16px;align-items:flex-start">'
         f'{_render_board_column("In-Flight", "#EA580C", in_flight, len(in_flight))}'
-        f'{_render_board_column("Completed", "#124D49", completed, len(completed))}'
         f'{_render_board_column("Stuck / Failed", "#DB2626", stuck, len(stuck))}'
+        f'{_render_board_column("Completed", "#124D49", completed, len(completed))}'
         f'</div>'
     )
     if not traces:
