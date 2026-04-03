@@ -257,7 +257,7 @@ function filterTable() {
 
     return f"""<!DOCTYPE html><html><head>
 <title>Traces</title>
-<meta http-equiv="refresh" content="30">
+<meta http-equiv="refresh" content="10">
 <style>{_LANGFUSE_STYLES}
 table {{ width:100%;border-collapse:separate;border-spacing:0;border:1px solid #E2E8F0;border-radius:8px;overflow:hidden }}
 thead th {{ background:#F7F9FB;color:#64748B;font-weight:500;font-size:11.2px;text-align:left;padding:10px 12px;border-bottom:1px solid #E2E8F0;white-space:nowrap }}
@@ -691,7 +691,7 @@ def _render_board(traces: list[dict], total: int) -> str:
 
     return f"""<!DOCTYPE html><html><head>
 <title>Status Board</title>
-<meta http-equiv="refresh" content="30">
+<meta http-equiv="refresh" content="10">
 <style>{_LANGFUSE_STYLES}</style>
 </head><body><div class="page">
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
