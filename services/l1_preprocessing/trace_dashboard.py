@@ -257,41 +257,55 @@ def _render_card(t: dict, card_type: str) -> str:
     )
 
 
+_EMPTY_COLUMN = (
+    '<p style="color:#aaa;text-align:center;margin:20px 0;'
+    'font-size:0.85em">None</p>'
+)
+
+
+def _render_column(
+    title: str, color: str, cards_html: str, count: int,
+) -> str:
+    """Render a single kanban column."""
+    body = cards_html or _EMPTY_COLUMN
+    return (
+        f'<div style="flex:1;min-width:280px;max-width:400px">'
+        f'<div style="padding:8px 12px;background:{color};color:white;'
+        f'border-radius:6px 6px 0 0;font-weight:600;font-size:0.95em;'
+        f'display:flex;justify-content:space-between;align-items:center">'
+        f'<span>{_escape(title)}</span>'
+        f'<span style="background:rgba(255,255,255,0.25);padding:1px 8px;'
+        f'border-radius:10px;font-size:0.85em">{count}</span></div>'
+        f'<div style="background:#f8f8f8;border:1px solid #e0e0e0;'
+        f'border-top:none;border-radius:0 0 6px 6px;padding:8px;'
+        f'min-height:100px;max-height:75vh;overflow-y:auto">'
+        f'{body}'
+        f'</div></div>'
+    )
+
+
 def _render_board(traces: list[dict], total: int) -> str:
-    """Render the status board HTML."""
+    """Render the kanban-style status board HTML."""
     in_flight, completed, stuck = _classify_traces(traces)
 
-    sections = ""
+    in_flight_cards = "".join(_render_card(t, "in_flight") for t in in_flight)
+    completed_cards = "".join(_render_card(t, "completed") for t in completed)
+    stuck_cards = "".join(_render_card(t, "stuck") for t in stuck)
 
-    if stuck:
-        cards = "".join(_render_card(t, "stuck") for t in stuck)
-        sections += (
-            f'<div style="margin-bottom:30px">'
-            f'<h2 style="color:#c0392b;font-size:1.1em;margin-bottom:8px">'
-            f'Stuck / Failed <span class="count">{len(stuck)}</span></h2>'
-            f'{cards}</div>'
-        )
+    # Column order: In-Flight, Completed, Stuck/Failed
+    columns = (
+        _render_column("In-Flight", "#E8792F", in_flight_cards, len(in_flight))
+        + _render_column("Completed", "#2D8B57", completed_cards, len(completed))
+        + _render_column("Stuck / Failed", "#c0392b", stuck_cards, len(stuck))
+    )
 
-    if in_flight:
-        cards = "".join(_render_card(t, "in_flight") for t in in_flight)
-        sections += (
-            f'<div style="margin-bottom:30px">'
-            f'<h2 style="color:#E8792F;font-size:1.1em;margin-bottom:8px">'
-            f'In-Flight <span class="count">{len(in_flight)}</span></h2>'
-            f'{cards}</div>'
-        )
+    board = (
+        f'<div style="display:flex;gap:16px;align-items:flex-start">'
+        f'{columns}</div>'
+    )
 
-    if completed:
-        cards = "".join(_render_card(t, "completed") for t in completed)
-        sections += (
-            f'<div style="margin-bottom:30px">'
-            f'<h2 style="color:#2D8B57;font-size:1.1em;margin-bottom:8px">'
-            f'Completed <span class="count">{len(completed)}</span></h2>'
-            f'{cards}</div>'
-        )
-
-    if not sections:
-        sections = '<p style="color:#888;text-align:center;margin:40px 0">No tickets yet.</p>'
+    if not traces:
+        board = '<p style="color:#888;text-align:center;margin:40px 0">No tickets yet.</p>'
 
     # Stuck notification JS (fires once per set of stuck tickets via sessionStorage)
     notification_js = """
@@ -318,7 +332,10 @@ def _render_board(traces: list[dict], total: int) -> str:
 })();
 </script>"""
 
-    view_toggle = '<div style="text-align:right;margin-bottom:10px;font-size:0.85em"><a href="/traces?view=table">Table view</a></div>'
+    view_toggle = (
+        '<div style="text-align:right;margin-bottom:10px;font-size:0.85em">'
+        '<a href="/traces?view=table">Table view</a></div>'
+    )
 
     return f"""<!DOCTYPE html>
 <html>
@@ -333,7 +350,7 @@ def _render_board(traces: list[dict], total: int) -> str:
 <body>
     <h1>Agent Harness — Status Board<span class="count">{total} tickets</span></h1>
     {view_toggle}
-    {sections}
+    {board}
     {notification_js}
 </body>
 </html>"""
