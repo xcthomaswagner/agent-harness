@@ -27,9 +27,11 @@ For small tickets with one implementation unit.
 git checkout -b ai/<ticket-id>
 ```
 
-Log: `{"phase": "ticket_read", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Pipeline started, simple mode"}`
+Log: `{"phase": "ticket_read", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Pipeline started, simple mode", "pipeline_mode": "simple"}`
 
 ### Step 2: Implementation
+
+Log start: `{"phase": "implementation", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "phase_started"}`
 
 Spawn one developer:
 
@@ -47,9 +49,11 @@ Agent(
 )
 ```
 
-Log: `{"phase": "implementation", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Implementation complete", "commit": "<sha>"}`
+Log: `{"phase": "implementation", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Implementation complete", "commit": "<sha>", "files_changed": N, "tests_passed": N, "tests_added": N}`
 
 ### Step 3: Code Review
+
+Log start: `{"phase": "code_review", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "phase_started"}`
 
 Spawn a reviewer (see Code Review section below).
 
@@ -77,7 +81,7 @@ For medium/large tickets with 2+ independent implementation units.
 git checkout -b ai/<ticket-id>
 ```
 
-Log: `{"phase": "ticket_read", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Pipeline started, full mode, estimated_units: N"}`
+Log: `{"phase": "ticket_read", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Pipeline started, full mode", "pipeline_mode": "full", "estimated_units": N}`
 
 ### Step 2: Planning
 
@@ -301,9 +305,11 @@ Log: `{"phase": "judge", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Ju
 
 **If all issues rejected by the Judge:** Skip developer fix, proceed to QA.
 
-Log: `{"phase": "code_review", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Review complete", "verdict": "APPROVED|CHANGES_NEEDED", "issues": N}`
+Log: `{"phase": "code_review", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Review complete", "verdict": "APPROVED|CHANGES_NEEDED", "issues": N, "critical": N, "warnings": N}`
 
 ## QA Validation (shared by both pipelines)
+
+Log start: `{"phase": "qa_validation", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "phase_started"}`
 
 Spawn a QA agent:
 
@@ -323,9 +329,11 @@ Read `.harness/logs/qa-matrix.md`.
 
 **Circuit breaker:** If >50% of the **original acceptance criteria** (from `acceptance_criteria` + `generated_acceptance_criteria` in the ticket) fail, do NOT route individual failures. Escalate the entire ticket. Edge cases and design compliance checks do NOT count toward this threshold.
 
-Log: `{"phase": "qa_validation", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "QA complete", "overall": "PASS|FAIL", "criteria_passed": N, "criteria_total": M}`
+Log: `{"phase": "qa_validation", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "QA complete", "overall": "PASS|FAIL", "criteria_passed": N, "criteria_total": M, "e2e_screenshots": N}`
 
-## Code Simplification (shared by both pipelines)
+## Code Simplification
+
+Log start: `{"phase": "simplify", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "phase_started"}` (shared by both pipelines)
 
 After QA passes, run `/simplify` to review the changes for code reuse, quality, and efficiency.
 

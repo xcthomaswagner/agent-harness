@@ -10,6 +10,8 @@ import pytest
 
 from tracer import (
     append_trace,
+    build_span_tree,
+    build_trace_list_row,
     compute_phase_durations,
     consolidate_worktree_logs,
     extract_diagnostic_info,
@@ -471,3 +473,166 @@ class TestExtractDiagnosticInfo:
         ]
         diag = extract_diagnostic_info(entries)
         assert "network" in diag["hint"].lower()
+
+
+class TestBuildSpanTree:
+    """Tests for build_span_tree — L1/L2/L3 grouping with artifact linking."""
+
+    def _scrum10_entries(self) -> list[dict]:
+        """Realistic SCRUM-10 trace entries."""
+        return [
+            {"phase": "webhook", "event": "jira_webhook_received",
+             "timestamp": "2026-03-23T17:27:30Z", "source": "jira",
+             "ticket_type": "story"},
+            {"phase": "pipeline", "event": "processing_completed",
+             "timestamp": "2026-03-23T17:28:05Z", "source": "l1",
+             "status": "enriched"},
+            {"phase": "ticket_read",
+             "event": "Pipeline started, simple mode",
+             "timestamp": "2026-03-23T17:28:23Z", "source": "agent"},
+            {"phase": "implementation",
+             "event": "Implementation complete",
+             "timestamp": "2026-03-23T17:35:27Z", "source": "agent",
+             "commit": "86499d1"},
+            {"phase": "code_review", "event": "Review complete",
+             "timestamp": "2026-03-23T17:36:54Z", "source": "agent",
+             "verdict": "APPROVED", "issues": 6},
+            {"phase": "qa_validation", "event": "QA complete",
+             "timestamp": "2026-03-23T17:40:50Z", "source": "agent",
+             "overall": "PASS", "criteria_passed": 8,
+             "criteria_total": 8},
+            {"phase": "complete", "event": "Pipeline complete",
+             "timestamp": "2026-03-23T17:41:22Z", "source": "agent",
+             "pr_url": "https://github.com/test/pr/10",
+             "review_verdict": "APPROVED", "qa_result": "PASS",
+             "pipeline_mode": "simple", "units": 1},
+            {"phase": "artifact", "event": "code_review_artifact",
+             "timestamp": "2026-03-23T17:41:33Z",
+             "content": "## Code Review\nAPPROVED"},
+            {"phase": "artifact", "event": "qa_matrix_artifact",
+             "timestamp": "2026-03-23T17:41:33Z",
+             "content": "## QA Matrix\nPASS 8/8"},
+        ]
+
+    def test_groups_into_layers(self) -> None:
+        tree = build_span_tree(self._scrum10_entries())
+        assert len(tree["l1"]) == 2  # webhook + processing_completed
+        assert len(tree["l2"]) >= 4  # ticket_read, impl, review, qa, complete
+        assert len(tree["l3"]) == 0
+        assert len(tree["errors"]) == 0
+
+    def test_artifacts_linked_to_phases(self) -> None:
+        tree = build_span_tree(self._scrum10_entries())
+        review_node = next(
+            n for n in tree["l2"]
+            if n["entry"].get("phase") == "code_review"
+        )
+        assert len(review_node["artifacts"]) == 1
+        assert "Code Review" in review_node["artifacts"][0].get("content", "")
+
+        qa_node = next(
+            n for n in tree["l2"]
+            if n["entry"].get("phase") == "qa_validation"
+        )
+        assert len(qa_node["artifacts"]) == 1
+
+    def test_summary_extracted(self) -> None:
+        tree = build_span_tree(self._scrum10_entries())
+        s = tree["summary"]
+        assert s["status"] == "Complete"
+        assert s["review_verdict"] == "APPROVED"
+        assert s["qa_result"] == "PASS"
+        assert s["pr_url"] == "https://github.com/test/pr/10"
+        assert s["pipeline_mode"] == "simple"
+        assert "implementation" in s["phases_completed"]
+
+    def test_durations_populated(self) -> None:
+        tree = build_span_tree(self._scrum10_entries())
+        impl_node = next(
+            n for n in tree["l2"]
+            if n["entry"].get("phase") == "implementation"
+        )
+        assert impl_node["duration_seconds"] is not None
+        assert impl_node["duration_seconds"] > 0
+
+    def test_empty_entries(self) -> None:
+        tree = build_span_tree([])
+        assert tree["l1"] == []
+        assert tree["l2"] == []
+        assert tree["summary"] == {}
+
+    def test_l3_events_separated(self) -> None:
+        entries = [
+            {"phase": "webhook", "event": "jira_webhook_received",
+             "timestamp": "2026-01-01T00:00:00Z", "source": "jira"},
+            {"phase": "l3_pr_review", "event": "pr_review_spawned",
+             "timestamp": "2026-01-01T01:00:00Z", "source": "l1",
+             "pr_number": 10},
+        ]
+        tree = build_span_tree(entries)
+        assert len(tree["l3"]) == 1
+        assert tree["l3"][0]["entry"]["event"] == "pr_review_spawned"
+
+    def test_errors_collected(self) -> None:
+        entries = [
+            {"phase": "pipeline", "event": "processing_started",
+             "timestamp": "2026-01-01T00:00:00Z"},
+            {"phase": "pipeline", "event": "error",
+             "error_type": "RuntimeError",
+             "error_message": "API failed",
+             "timestamp": "2026-01-01T00:00:05Z"},
+        ]
+        tree = build_span_tree(entries)
+        assert len(tree["errors"]) == 1
+
+    def test_phase_started_events_captured(self) -> None:
+        entries = [
+            {"phase": "webhook", "event": "jira_webhook_received",
+             "timestamp": "2026-01-01T00:00:00Z", "source": "jira"},
+            {"phase": "implementation", "event": "phase_started",
+             "timestamp": "2026-01-01T00:01:00Z", "source": "agent"},
+            {"phase": "implementation",
+             "event": "Implementation complete",
+             "timestamp": "2026-01-01T00:08:00Z", "source": "agent",
+             "commit": "abc123"},
+        ]
+        tree = build_span_tree(entries)
+        impl = next(
+            n for n in tree["l2"]
+            if n["entry"].get("phase") == "implementation"
+        )
+        assert impl["started_entry"] is not None
+        assert impl["started_entry"]["event"] == "phase_started"
+
+
+class TestBuildTraceListRow:
+    """Tests for build_trace_list_row — phase dots and duration percentage."""
+
+    def test_phase_dots_from_agent_entries(self) -> None:
+        entries = [
+            {"phase": "webhook", "event": "received",
+             "timestamp": "2026-01-01T00:00:00Z", "source": "jira"},
+            {"phase": "implementation",
+             "event": "Implementation complete",
+             "timestamp": "2026-01-01T00:05:00Z", "source": "agent"},
+            {"phase": "code_review", "event": "Review complete",
+             "timestamp": "2026-01-01T00:06:00Z", "source": "agent"},
+            {"phase": "complete", "event": "Pipeline complete",
+             "timestamp": "2026-01-01T00:07:00Z", "source": "agent"},
+        ]
+        summary = {"duration": "7m 0s", "status": "Complete"}
+        row = build_trace_list_row(summary, entries)
+        assert len(row["phase_dots"]) == 3
+        assert row["phase_dots"][0]["phase"] == "implementation"
+        assert row["duration_pct"] > 0
+
+    def test_duration_color_green_for_short(self) -> None:
+        summary = {"duration": "5m 0s"}
+        row = build_trace_list_row(summary, [])
+        assert row["duration_color"] == "#124D49"
+
+    def test_duration_color_red_for_long(self) -> None:
+        summary = {"duration": ">24h (multi-run)"}
+        row = build_trace_list_row(summary, [])
+        assert row["duration_color"] == "#DB2626"
+        assert row["duration_pct"] == 100

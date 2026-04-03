@@ -356,6 +356,279 @@ def _generate_hint(last_event: str, errors: list[dict[str, Any]]) -> str:
     return f"{etype}: {err['error_message'][:200]}"
 
 
+# --- Span tree construction ---
+
+_ARTIFACT_PHASE_MAP: dict[str, str] = {
+    "code_review_artifact": "code_review",
+    "qa_matrix_artifact": "qa_validation",
+    "judge_verdict_artifact": "code_review",
+    "merge_report_artifact": "merge",
+    "plan_review_artifact": "plan_review",
+    "plan_artifact": "planning",
+    "blocked_units_artifact": "implementation",
+    "simplify_artifact": "simplify",
+    "escalation_artifact": "complete",
+}
+
+# Phase icon types for the span tree UI
+_PHASE_ICON_TYPE: dict[str, str] = {
+    "webhook": "event",
+    "analyst": "span",
+    "pipeline": "event",
+    "ticket_read": "span",
+    "planning": "agent",
+    "plan_review": "span",
+    "implementation": "tool",
+    "merge": "span",
+    "code_review": "span",
+    "judge": "span",
+    "qa_validation": "span",
+    "simplify": "tool",
+    "pr_created": "event",
+    "complete": "trace",
+    "completion": "event",
+    "spawn": "event",
+}
+
+
+def build_span_tree(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Group flat trace entries into an L1/L2/L3 span tree with artifact linking.
+
+    Returns a dict with ``l1``, ``l2``, ``l3``, ``errors``, and ``summary`` keys.
+    Designed to power both the Langfuse-style detail view and the trace list view.
+    """
+    if not entries:
+        return {
+            "l1": [], "l2": [], "l3": [], "errors": [],
+            "summary": {},
+        }
+
+    run_start_idx = _find_run_start_idx(entries)
+    run_entries = entries[run_start_idx:]
+
+    # Separate entries by layer — use ALL entries for L1 (they precede run boundary),
+    # but only run_entries for L2/L3/artifacts/errors
+    l1_entries: list[dict[str, Any]] = []
+    l2_phase_events: list[dict[str, Any]] = []
+    l2_started_events: dict[str, dict[str, Any]] = {}  # phase → started entry
+    artifact_entries: list[dict[str, Any]] = []
+    l3_entries: list[dict[str, Any]] = []
+    error_entries: list[dict[str, Any]] = []
+
+    # L1 entries: non-agent, non-artifact entries from the full trace
+    for e in entries:
+        source = e.get("source", "")
+        phase = e.get("phase", "")
+        is_l1 = (
+            source != "agent"
+            and phase != "artifact"
+            and not phase.startswith("l3_")
+            and e.get("event") != "error"
+        )
+        if is_l1:
+            l1_entries.append(e)
+
+    # L2, L3, artifacts, errors: from the last run only
+    for e in run_entries:
+        source = e.get("source", "")
+        phase = e.get("phase", "")
+        event = e.get("event", "")
+
+        if event == "error":
+            error_entries.append(e)
+        elif phase.startswith("l3_") or phase == "l3_session":
+            l3_entries.append(e)
+        elif phase == "artifact":
+            artifact_entries.append(e)
+        elif source == "agent":
+            if event == "phase_started":
+                l2_started_events[phase] = e
+            else:
+                l2_phase_events.append(e)
+
+    # Build L1 nodes
+    l1_nodes = [{"entry": e, "icon": _PHASE_ICON_TYPE.get(e.get("phase", ""), "event")}
+                for e in l1_entries]
+
+    # Build L2 nodes with artifact linking and duration
+    durations = compute_phase_durations(entries)
+    duration_map = {d["phase"]: d["duration_seconds"] for d in durations}
+
+    l2_nodes: list[dict[str, Any]] = []
+    for e in l2_phase_events:
+        phase = e.get("phase", "")
+
+        # Find matching artifacts
+        artifacts = [
+            a for a in artifact_entries
+            if _ARTIFACT_PHASE_MAP.get(a.get("event", "")) == phase
+        ]
+
+        l2_nodes.append({
+            "entry": e,
+            "started_entry": l2_started_events.get(phase),
+            "duration_seconds": duration_map.get(phase),
+            "artifacts": artifacts,
+            "icon": _PHASE_ICON_TYPE.get(phase, "span"),
+        })
+
+    # Build L3 nodes
+    l3_nodes = [{"entry": e, "icon": "event"} for e in l3_entries]
+
+    # Build summary
+    summary = _build_summary(run_entries, l2_phase_events, durations)
+
+    return {
+        "l1": l1_nodes,
+        "l2": l2_nodes,
+        "l3": l3_nodes,
+        "errors": [{"entry": e} for e in error_entries],
+        "summary": summary,
+    }
+
+
+def _build_summary(
+    run_entries: list[dict[str, Any]],
+    l2_phases: list[dict[str, Any]],
+    durations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Extract summary metrics from trace entries."""
+    summary: dict[str, Any] = {
+        "status": "", "duration": "", "pipeline_mode": "",
+        "review_verdict": "", "qa_result": "",
+        "qa_passed": 0, "qa_total": 0,
+        "pr_url": "", "tokens_in": 0, "tokens_out": 0,
+        "phases_completed": [],
+    }
+
+    events = [e.get("event", "") for e in run_entries]
+    phases_seen: list[str] = []
+
+    for e in run_entries:
+        if e.get("pr_url"):
+            summary["pr_url"] = str(e["pr_url"])
+        if e.get("pipeline_mode"):
+            summary["pipeline_mode"] = str(e["pipeline_mode"])
+        if e.get("event") == "Pipeline complete":
+            summary["review_verdict"] = str(e.get("review_verdict", ""))
+            summary["qa_result"] = str(e.get("qa_result", ""))
+        if e.get("event") == "analyst_completed":
+            ti = e.get("tokens_in", 0)
+            to_ = e.get("tokens_out", 0)
+            if isinstance(ti, int):
+                summary["tokens_in"] = ti
+            if isinstance(to_, int):
+                summary["tokens_out"] = to_
+        if e.get("event") == "QA complete":
+            summary["qa_passed"] = e.get("criteria_passed", 0)
+            summary["qa_total"] = e.get("criteria_total", 0)
+
+    for e in l2_phases:
+        phase = e.get("phase", "")
+        if phase and phase not in phases_seen:
+            phases_seen.append(phase)
+    summary["phases_completed"] = phases_seen
+
+    # Derive status (reuse existing logic pattern)
+    if "Escalated" in events:
+        summary["status"] = "Escalated"
+    elif "Pipeline complete" in events:
+        summary["status"] = "Complete"
+    elif summary["pr_url"] and "Pipeline complete" not in events:
+        summary["status"] = "PR Created"
+    elif "QA complete" in events:
+        summary["status"] = "QA Done"
+    elif "Review complete" in events:
+        summary["status"] = "Review Done"
+    elif any("l2_dispatched" in ev for ev in events):
+        summary["status"] = "Dispatched"
+    elif any("processing_completed" in ev for ev in events):
+        summary["status"] = "Enriched"
+    else:
+        summary["status"] = events[-1] if events else "Unknown"
+
+    # Duration
+    if run_entries:
+        try:
+            start_ts = datetime.fromisoformat(run_entries[0].get("timestamp", ""))
+            end_ts = datetime.fromisoformat(run_entries[-1].get("timestamp", ""))
+            total_secs = (end_ts - start_ts).total_seconds()
+            if 0 < total_secs <= 86400:
+                minutes = int(total_secs // 60)
+                seconds = int(total_secs % 60)
+                summary["duration"] = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
+            elif total_secs > 86400:
+                summary["duration"] = ">24h (multi-run)"
+        except (ValueError, TypeError):
+            pass
+
+    return summary
+
+
+def build_trace_list_row(
+    trace_summary: dict[str, Any], entries: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Enrich a trace summary with phase dots and duration percentage for list rendering.
+
+    Adds ``phase_dots`` (list of {phase, color} dicts) and ``duration_pct``
+    (0-100 relative to a 30-minute baseline) to the trace summary.
+    """
+    phase_dot_colors: dict[str, str] = {
+        "ticket_read": "#64748B",
+        "planning": "#9333EA",
+        "plan_review": "#9333EA",
+        "implementation": "#EA580C",
+        "merge": "#82CB15",
+        "code_review": "#6466F1",
+        "judge": "#6466F1",
+        "qa_validation": "#124D49",
+        "simplify": "#64748B",
+        "pr_created": "#64748B",
+        "complete": "#64748B",
+    }
+
+    # Extract L2 phases from entries
+    run_start_idx = _find_run_start_idx(entries)
+    run_entries = entries[run_start_idx:]
+    phase_dots: list[dict[str, str]] = []
+    seen_phases: set[str] = set()
+
+    for e in run_entries:
+        if e.get("source") != "agent" or e.get("event") == "phase_started":
+            continue
+        phase = e.get("phase", "")
+        if phase and phase not in seen_phases:
+            seen_phases.add(phase)
+            color = phase_dot_colors.get(phase, "#64748B")
+            phase_dots.append({"phase": phase, "color": color})
+
+    # Duration percentage (relative to 30-minute baseline)
+    duration_pct = 0
+    duration = trace_summary.get("duration", "")
+    if duration and duration != ">24h (multi-run)":
+        try:
+            parts = duration.replace("s", "").split("m ")
+            total_secs = int(parts[0]) * 60 + (int(parts[1]) if len(parts) > 1 else 0)
+            duration_pct = min(100, int((total_secs / 1800) * 100))  # 30 min = 100%
+        except (ValueError, IndexError):
+            pass
+    elif duration == ">24h (multi-run)":
+        duration_pct = 100
+
+    # Duration color
+    duration_color = "#124D49"  # green
+    if duration_pct > 50:
+        duration_color = "#C79004"  # yellow
+    if duration_pct > 80 or duration == ">24h (multi-run)":
+        duration_color = "#DB2626"  # red
+
+    row = dict(trace_summary)
+    row["phase_dots"] = phase_dots
+    row["duration_pct"] = duration_pct
+    row["duration_color"] = duration_color
+    return row
+
+
 def consolidate_worktree_logs(
     ticket_id: str, trace_id: str, worktree_path: str
 ) -> None:
