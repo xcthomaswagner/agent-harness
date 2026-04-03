@@ -1,0 +1,11 @@
+client: "Rockwell Test"
+
+ticket_source:
+  type: jira
+  instance: xcentium.atlassian.net
+  project_key: ROC
+  done_status: Done
+
+client_repo:
+  local_path: /Users/thomaswagner/Desktop/Projects.nosync/rockwell-test
+  github_repo: xcthomaswagner/rockwell-test

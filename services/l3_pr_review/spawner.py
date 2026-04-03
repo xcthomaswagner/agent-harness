@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import ClassVar
 
 import structlog
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from shared.env_sanitize import sanitized_env
 
 logger = structlog.get_logger()
 
@@ -112,31 +118,37 @@ class SessionSpawner:
         )
         return self._spawn("comment-response", prompt, model="sonnet", pr_number=pr_number)
 
+    # Default timeout per session type (seconds). Override via L3_SESSION_TIMEOUT.
+    _TIMEOUTS: ClassVar[dict[str, int]] = {
+        "pr-review": 1800,         # 30 minutes
+        "ci-fix": 1800,            # 30 minutes
+        "comment-response": 900,   # 15 minutes
+    }
+
     def _spawn(
         self, session_type: str, prompt: str, model: str = "opus", pr_number: int = 0
     ) -> bool:
-        """Launch a Claude Code headless session with logging."""
+        """Launch a Claude Code headless session with logging and timeout."""
         cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions"]
         if model == "sonnet":
             cmd.extend(["--model", "sonnet"])
 
         log = logger.bind(session_type=session_type, model=model, pr_number=pr_number)
 
-        # Use client repo as cwd so gh CLI has repo context
         cwd = self._repo_path or os.getenv("CLIENT_REPO_PATH", "")
         if not cwd:
             log.warning("no_repo_path_for_session", hint="Set CLIENT_REPO_PATH env var")
 
-        # Strip secrets from agent environment
-        _secret_vars = {
-            "ANTHROPIC_API_KEY", "JIRA_API_TOKEN", "ADO_PAT",
-            "GITHUB_WEBHOOK_SECRET", "FIGMA_API_TOKEN", "WEBHOOK_SECRET",
-        }
-        env = {k: v for k, v in os.environ.items() if k not in _secret_vars}
+        env = sanitized_env()
 
-        # Log output to file (with timestamp to avoid overwrites)
         ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         log_file = LOGS_DIR / f"pr-{pr_number}-{session_type}-{ts}.log"
+        pid_file = LOGS_DIR / f"pr-{pr_number}-{session_type}.pid"
+
+        timeout = int(os.getenv(
+            "L3_SESSION_TIMEOUT",
+            str(self._TIMEOUTS.get(session_type, 1800)),
+        ))
 
         try:
             with log_file.open("w") as f:
@@ -149,15 +161,34 @@ class SessionSpawner:
                     start_new_session=True,
                 )
 
-            # Track PID for monitoring and cleanup
-            pid_file = LOGS_DIR / f"pr-{pr_number}-{session_type}.pid"
             pid_file.write_text(str(proc.pid))
 
             log.info(
                 "session_spawned",
                 pid=proc.pid,
                 log_file=str(log_file),
+                timeout=timeout,
             )
+
+            # Background watchdog: kill process if it exceeds timeout
+            def _watchdog() -> None:
+                try:
+                    proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        "l3_session_timed_out",
+                        session_type=session_type,
+                        pr_number=pr_number,
+                        pid=proc.pid,
+                        timeout=timeout,
+                    )
+                    proc.kill()
+                finally:
+                    pid_file.unlink(missing_ok=True)
+
+            watchdog = threading.Thread(target=_watchdog, daemon=True)
+            watchdog.start()
+
             return True
         except FileNotFoundError:
             log.error("claude_cli_not_found")

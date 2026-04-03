@@ -25,6 +25,7 @@ class Settings(BaseSettings):
 
     # GitHub
     github_token: str = ""
+    agent_gh_token: str = ""  # Dedicated agent GitHub PAT (injected as GH_TOKEN in agent sessions)
 
     # Webhook
     webhook_secret: str = ""

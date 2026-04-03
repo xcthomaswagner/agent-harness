@@ -14,6 +14,8 @@ Usage:
 
 from __future__ import annotations
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -24,6 +26,9 @@ import sys
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR.parent / "services"))
+
+from shared.env_sanitize import sanitized_env  # noqa: E402
 
 
 def run_git(client_repo: str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -113,6 +118,13 @@ def main() -> None:
     if result.returncode != 0:
         run_git(str(client_repo), "worktree", "add", str(worktree_dir), branch_name)
 
+    # Set git identity in worktree so commits come from the agent account
+    agent_name = os.environ.get("AGENT_GIT_NAME", "XCentium Agent")
+    agent_email = os.environ.get("AGENT_GIT_EMAIL", "xcagent.rockwell@xcentium.com")
+    run_git(str(worktree_dir), "config", "user.name", agent_name)
+    run_git(str(worktree_dir), "config", "user.email", agent_email)
+    print(f"[spawn] Git identity: {agent_name} <{agent_email}>")
+
     # --- Step 2: Inject runtime ---
     inject_args = ["python3", str(SCRIPT_DIR / "inject_runtime.py"), "--target-dir", str(worktree_dir)]
     if args.platform_profile:
@@ -154,93 +166,49 @@ def main() -> None:
     print(f"[spawn] Mode: {pipeline_mode}")
 
     if pipeline_mode == "quick":
-        prompt = (
-            "You are the team lead in QUICK mode. Read the enriched ticket at "
-            ".harness/ticket.json. Implement the changes yourself (do NOT spawn "
-            "sub-agents). Follow the project conventions in CLAUDE.md. "
-            "If the ticket has design image attachments in .harness/attachments/, "
-            "read them to understand the visual design.\n\n"
-            "STEP 1 — IMPLEMENT: Write code + tests. Run the full test suite. "
-            "Fix failures (up to 3 attempts). Commit: feat(<ticket-id>): <description>. "
-            "Do not commit .env, secrets, or harness files.\n\n"
-            "STEP 2 — SELF-REVIEW: Switch roles. You are now a SEPARATE code reviewer "
-            "who did NOT write this code. Be skeptical. Run git diff main...HEAD and "
-            "review the diff as if someone else wrote it.\n\n"
-            "Check EVERY item on this list:\n"
-            "- CORRECTNESS: Does the code satisfy ALL acceptance criteria from the ticket?\n"
-            "- SECURITY: dangerouslySetInnerHTML, hardcoded secrets, injection, auth gaps?\n"
-            "- DEPENDENCIES: dev-only packages (ts-node, ts-jest, @types/*) in devDependencies?\n"
-            "- AUTO-GENERATED FILES: Were any files committed that should be gitignored "
-            "(next-env.d.ts, .next/, node_modules, dist)?\n"
-            "- TEST GAPS: Every new module/component should have tests. Flag any untested code.\n"
-            "- STYLE: Does the code follow project conventions from CLAUDE.md?\n"
-            "- UNNECESSARY COMPLEXITY: Inline SVGs that should use a library? "
-            "Duplicated logic that should be extracted?\n\n"
-            "Do NOT rationalize issues away. If dangerouslySetInnerHTML is used, "
-            "mark it as a warning even if the content is static — the reviewer should "
-            "flag it and explain why it's acceptable, not skip it.\n\n"
-            "Write findings to .harness/logs/code-review.md with format:\n"
-            "## Code Review — <ticket-id>\n"
-            "### Verdict: APPROVED | CHANGES_NEEDED\n"
-            "### Issues Found\n"
-            "- [severity: critical|warning] [category] Description — Suggestion\n"
-            "### Summary\n\n"
-            "If CHANGES_NEEDED with critical issues: fix them, re-run tests, "
-            "amend the commit, then re-review and update the file.\n\n"
-            "STEP 3 — QA MATRIX: For each acceptance criterion in the ticket, "
-            "determine PASS/FAIL/NOT_TESTED with evidence. Write to "
-            ".harness/logs/qa-matrix.md with format:\n"
-            "## QA Matrix — <ticket-id>\n"
-            "### Overall: PASS | FAIL\n"
-            "### Acceptance Criteria\n"
-            "| # | Criterion | Status | Evidence |\n"
-            "If figma_design_spec is NOT present in the ticket, write: "
-            "'Design Compliance: skipped — no Figma design spec provided'\n\n"
-            "STEP 4 — SCREENSHOT: If the implementation has a visual UI, start the "
-            "dev server, navigate to the page, take a browser screenshot, and save "
-            "as .harness/screenshots/final.png. Skip for backend-only work.\n\n"
-            "STEP 5 — PR: Push and open a draft PR. Include the code review verdict "
-            "and QA matrix in the PR body.\n\n"
-            "Log each step to .harness/logs/pipeline.jsonl as JSON Lines. "
-            "Use actual timestamps: run 'date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ' for each entry."
-        )
+        # Read quick-mode instructions from the shared file (single source of truth)
+        quick_prompt_file = SCRIPT_DIR.parent / "runtime" / "quick-mode-prompt.md"
+        prompt = quick_prompt_file.read_text()
     else:
         prompt = (
             "You are the team lead. Read the enriched ticket at .harness/ticket.json "
             "and execute the pipeline per the Agentic Harness Pipeline Instructions in CLAUDE.md."
         )
 
-    # Strip secrets so Claude Code uses the Max subscription and doesn't
-    # leak credentials into agent sessions. Blocklist approach — remove known
-    # secrets while preserving PATH, HOME, and other system vars needed by git/gh.
-    _SECRET_VARS = {
-        "ANTHROPIC_API_KEY",
-        "JIRA_API_TOKEN",
-        "ADO_PAT",
-        "GITHUB_WEBHOOK_SECRET",
-        "FIGMA_API_TOKEN",
-        "WEBHOOK_SECRET",
-        "REDIS_URL",
-    }
-    env = {k: v for k, v in os.environ.items() if k not in _SECRET_VARS}
+    env = sanitized_env()
+
+    # Session timeout: prevent runaway agents from holding resources indefinitely.
+    # Quick mode: 30 minutes. Multi mode: 90 minutes. Override via AGENT_TIMEOUT_SECONDS.
+    default_timeout = 1800 if pipeline_mode == "quick" else 5400
+    timeout_seconds = int(os.environ.get("AGENT_TIMEOUT_SECONDS", str(default_timeout)))
 
     # Write lock file before launching agent
     agent_lock = worktree_dir / ".harness" / ".agent.lock"
     agent_lock.write_text(str(os.getpid()))
 
     session_log = worktree_dir / ".harness" / "logs" / "session.log"
+    timed_out = False
     with session_log.open("w") as log_file:
-        proc = subprocess.run(
-            ["claude", "-p", prompt, "--dangerously-skip-permissions"],
-            cwd=str(worktree_dir),
-            env=env,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-        )
+        try:
+            proc = subprocess.run(
+                ["claude", "-p", prompt, "--dangerously-skip-permissions"],
+                cwd=str(worktree_dir),
+                env=env,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                timeout=timeout_seconds,
+            )
+            exit_code = proc.returncode
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            exit_code = 124  # Standard timeout exit code
+            print(f"[spawn] Session timed out after {timeout_seconds}s")
 
-    exit_code = proc.returncode
     agent_lock.unlink(missing_ok=True)
-    print(f"[spawn] Session ended with exit code: {exit_code}")
+    if timed_out:
+        print(f"[spawn] Session TIMED OUT after {timeout_seconds}s")
+    else:
+        print(f"[spawn] Session ended with exit code: {exit_code}")
     print(f"[spawn] Logs at: {session_log}")
 
     # --- Step 5: Notify L1 of completion ---

@@ -1,0 +1,11 @@
+client: "Harness Test"
+
+ticket_source:
+  type: jira
+  instance: xcentium-team-zehw5w7x.atlassian.net
+  project_key: SCRUM
+  done_status: Done
+
+client_repo:
+  local_path: /Users/thomaswagner/Desktop/Projects.nosync/harness-test-client
+  github_repo: xcthomaswagner/harness-test-client

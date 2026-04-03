@@ -82,6 +82,36 @@ def load_profile(name: str, profiles_dir: Path | None = None) -> ClientProfile |
     return ClientProfile(data, name)
 
 
+def find_profile_by_project_key(
+    project_key: str, profiles_dir: Path | None = None
+) -> ClientProfile | None:
+    """Find a client profile whose project_key matches the given key.
+
+    Scans all YAML profiles and returns the first match.
+    Returns None if no profile matches.
+    """
+    directory = profiles_dir or PROFILES_DIR
+    if not directory.exists():
+        return None
+
+    for path in sorted(directory.glob("*.yaml")):
+        if path.stem == "schema":
+            continue
+        data = yaml.safe_load(path.read_text())
+        if not isinstance(data, dict):
+            continue
+        profile_key = data.get("ticket_source", {}).get("project_key", "")
+        if profile_key and profile_key.upper() == project_key.upper():
+            logger.info(
+                "client_profile_matched_by_project_key",
+                name=path.stem,
+                project_key=project_key,
+            )
+            return ClientProfile(data, path.stem)
+
+    return None
+
+
 def list_profiles(profiles_dir: Path | None = None) -> list[str]:
     """List available client profile names."""
     directory = profiles_dir or PROFILES_DIR
