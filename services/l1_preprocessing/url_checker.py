@@ -19,6 +19,9 @@ logger = structlog.get_logger()
 PROFILES_DIR = Path(__file__).resolve().parents[2] / "runtime" / "platform-profiles"
 RESULTS_PATH = Path(__file__).resolve().parents[2] / "data" / "url-check.json"
 
+# Domains that block automated HEAD requests (403) but work in browsers
+_BOT_BLOCKED_DOMAINS = {"help.salesforce.com"}
+
 
 def _extract_urls(text: str) -> list[str]:
     """Extract https URLs from markdown text."""
@@ -69,8 +72,15 @@ async def check_reference_urls() -> None:
                 try:
                     resp = await client.head(url)
                     status_code = resp.status_code
+                    # Check if this domain is known to block bots
+                    from urllib.parse import urlparse
+                    domain = urlparse(url).netloc
+                    is_bot_blocked = domain in _BOT_BLOCKED_DOMAINS
+
                     if 200 <= status_code < 300:
                         status = "ok"
+                    elif status_code == 403 and is_bot_blocked:
+                        status = "ok_bot_blocked"
                     elif 300 <= status_code < 400:
                         status = "redirect"
                         redirect_url = resp.headers.get("location", "")
