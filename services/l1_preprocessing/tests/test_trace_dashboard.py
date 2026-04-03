@@ -184,11 +184,18 @@ class TestStatusBoardBucketing:
         assert len(stuck) == 1
         assert len(in_flight) == 0
 
-    def test_implementing_stays_in_flight(self) -> None:
-        old = "2025-01-01T00:00:00Z"
-        in_flight, _, stuck = _classify_traces([self._trace("Implementing", old)])
+    def test_implementing_recent_is_in_flight(self) -> None:
+        from datetime import UTC, datetime
+        now = datetime.now(UTC).isoformat()
+        in_flight, _, stuck = _classify_traces([self._trace("Implementing", now)])
         assert len(in_flight) == 1
         assert len(stuck) == 0
+
+    def test_implementing_old_is_stuck(self) -> None:
+        old = "2025-01-01T00:00:00Z"
+        in_flight, _, stuck = _classify_traces([self._trace("Implementing", old)])
+        assert len(stuck) == 1
+        assert len(in_flight) == 0
 
     def test_mixed_traces(self) -> None:
         from datetime import UTC, datetime

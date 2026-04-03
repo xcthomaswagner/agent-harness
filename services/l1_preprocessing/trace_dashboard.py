@@ -60,8 +60,14 @@ _PHASE_COLORS: dict[str, str] = {
 }
 
 _COMPLETED_STATUSES = {"Complete"}
-_STUCK_ELIGIBLE_STATUSES = {"Received", "Processing", "Enriched", "Dispatched"}
 _FAILED_STATUSES = {"Escalated", "Agent Done (no PR)"}
+
+# Two-tier stuck detection: early stages get a shorter threshold
+_STUCK_THRESHOLD_HOURS: dict[str, float] = {
+    "Received": 1, "Processing": 1, "Enriched": 1, "Dispatched": 1,
+    "Planned": 2, "Implementing": 2, "Merged": 2,
+    "Review Done": 2, "QA Done": 2, "PR Created": 2, "CI Fix": 2,
+}
 
 _BASE_STYLES = """
     body { font-family: -apple-system, sans-serif; margin: 40px; background: #fafafa; color: #333; }
@@ -124,14 +130,15 @@ def _classify_traces(
             completed.append(t)
             continue
 
-        # Check for stuck: early-stage status and >1 hour since run started
-        if status in _STUCK_ELIGIBLE_STATUSES:
+        # Check for stuck: any non-complete status exceeding its threshold
+        threshold = _STUCK_THRESHOLD_HOURS.get(status)
+        if threshold is not None:
             run_started = t.get("run_started_at", t.get("started_at", ""))
             if run_started:
                 try:
                     started_dt = datetime.fromisoformat(run_started)
                     age_hours = (now - started_dt).total_seconds() / 3600
-                    if age_hours > 1:
+                    if age_hours > threshold:
                         stuck.append(t)
                         continue
                 except (ValueError, TypeError):
