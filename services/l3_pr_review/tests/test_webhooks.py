@@ -437,3 +437,44 @@ async def test_rejects_non_json_body() -> None:
                 },
             )
     assert response.status_code == 422
+
+
+# --- _lookup_trace_id ---
+
+
+class TestLookupTraceId:
+    """Tests for _lookup_trace_id — correlates L3 events with L2 trace IDs."""
+
+    def test_finds_agent_finished_trace_id(self) -> None:
+        entries = [
+            {"event": "jira_webhook_received", "trace_id": "aaa"},
+            {"event": "agent_finished", "trace_id": "bbb"},
+            {"event": "code_review_artifact", "trace_id": "bbb"},
+        ]
+        with patch.object(l3_main, "read_trace", return_value=entries):
+            result = l3_main._lookup_trace_id("PROJ-1")
+        assert result == "bbb"
+
+    def test_finds_pipeline_complete_trace_id(self) -> None:
+        entries = [
+            {"event": "jira_webhook_received", "trace_id": "aaa"},
+            {"event": "Pipeline complete", "trace_id": "ccc"},
+        ]
+        with patch.object(l3_main, "read_trace", return_value=entries):
+            result = l3_main._lookup_trace_id("PROJ-2")
+        assert result == "ccc"
+
+    def test_fallback_to_last_entry(self) -> None:
+        entries = [
+            {"event": "jira_webhook_received", "trace_id": "aaa"},
+            {"event": "l2_dispatched", "trace_id": "ddd"},
+        ]
+        with patch.object(l3_main, "read_trace", return_value=entries):
+            result = l3_main._lookup_trace_id("PROJ-3")
+        assert result == "ddd"
+
+    def test_generates_new_id_when_no_entries(self) -> None:
+        with patch.object(l3_main, "read_trace", return_value=[]):
+            result = l3_main._lookup_trace_id("PROJ-4")
+        assert len(result) == 12
+        int(result, 16)  # Should be valid hex

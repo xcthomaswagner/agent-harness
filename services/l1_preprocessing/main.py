@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,9 @@ import httpx
 import structlog
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from shared.env_sanitize import sanitized_env
 
 from adapters.ado_adapter import AdoAdapter
 from adapters.jira_adapter import JiraAdapter
@@ -90,7 +93,8 @@ def _is_ticket_active(ticket_id: str) -> bool:
 
 
 def _enqueue_or_background(
-    ticket: TicketPayload, background_tasks: BackgroundTasks
+    ticket: TicketPayload, background_tasks: BackgroundTasks,
+    trace_id: str = "",
 ) -> str:
     """Try to enqueue via Redis, fall back to FastAPI BackgroundTasks.
 
@@ -109,34 +113,30 @@ def _enqueue_or_background(
         return "queued"
 
     _active_tickets.add(ticket.id)
-    background_tasks.add_task(_process_ticket, ticket)
+    background_tasks.add_task(_process_ticket, ticket, trace_id)
     return "background"
 
 
-async def _process_ticket(ticket: TicketPayload) -> None:
-    """Process a normalized ticket through the L1 pipeline.
-
-    Steps:
-    1. Run ticket analyst (Claude Opus API call) to enrich
-    2. Route based on analyst output:
-       - Enriched: hand off to L2 (spawn Agent Team)
-       - Info request: write comment to Jira/ADO, set status
-       - Decomposition: flag for manual PM splitting
-    """
+async def _process_ticket(ticket: TicketPayload, trace_id: str = "") -> None:
+    """Process a normalized ticket through the L1 pipeline."""
     log = logger.bind(ticket_id=ticket.id, source=ticket.source)
     log.info("processing_ticket_started")
-    trace_id = generate_trace_id()
-    append_trace(ticket.id, trace_id, "pipeline", "processing_started",
+    tid = trace_id or generate_trace_id()
+    append_trace(ticket.id, tid, "pipeline", "processing_started",
                  ticket_type=ticket.ticket_type, source=ticket.source)
 
     try:
-        result = await _get_pipeline().process(ticket)
+        result = await _get_pipeline().process(ticket, trace_id=tid)
         log.info("processing_ticket_completed", **result)
-        # Remove ticket_id from result to avoid collision with positional arg
         trace_data = {k: v for k, v in result.items() if k != "ticket_id"}
-        append_trace(ticket.id, trace_id, "pipeline", "processing_completed", **trace_data)
-    except Exception:
+        append_trace(ticket.id, tid, "pipeline", "processing_completed", **trace_data)
+    except Exception as exc:
         log.exception("processing_ticket_failed")
+        append_trace(
+            ticket.id, tid, "pipeline", "error",
+            error_type=type(exc).__name__,
+            error_message=str(exc)[:500],
+        )
     finally:
         _active_tickets.discard(ticket.id)
 
@@ -150,43 +150,47 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+async def _validate_and_parse_webhook(
+    request: Request, signature: str | None,
+) -> dict[str, Any]:
+    """Validate webhook signature and parse JSON body.
+
+    Shared by Jira and ADO webhook handlers.
+    """
+    body = await request.body()
+
+    if settings.webhook_secret:
+        if not signature:
+            raise HTTPException(status_code=401, detail="Missing webhook signature")
+        expected = hmac.new(
+            settings.webhook_secret.encode(), body, hashlib.sha256
+        ).hexdigest()
+        sig_value = signature.removeprefix("sha256=")
+        if not hmac.compare_digest(expected, sig_value):
+            raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    try:
+        return json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON body: {exc}") from exc
+
+
 @app.post("/webhooks/jira", status_code=202)
 async def jira_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
     x_hub_signature: str | None = Header(default=None, alias="x-hub-signature"),
 ) -> dict[str, str]:
-    """Receive a Jira automation webhook and enqueue for processing.
-
-    Jira automation rules fire this webhook when a ticket transitions to
-    "Ready for AI" or receives the `ai-implement` label.
-    """
-    body = await request.body()
-
-    # Validate webhook signature if secret is configured
-    if settings.webhook_secret:
-        if not x_hub_signature:
-            raise HTTPException(status_code=401, detail="Missing webhook signature")
-        expected = hmac.new(
-            settings.webhook_secret.encode(), body, hashlib.sha256
-        ).hexdigest()
-        signature = x_hub_signature.removeprefix("sha256=")
-        if not hmac.compare_digest(expected, signature):
-            raise HTTPException(status_code=401, detail="Invalid webhook signature")
-
-    try:
-        payload: dict[str, Any] = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid JSON body: {exc}") from exc
-
+    """Receive a Jira automation webhook and enqueue for processing."""
+    payload = await _validate_and_parse_webhook(request, x_hub_signature)
     ticket = _get_jira_adapter().normalize(payload)
-    trace_id = generate_trace_id()
 
+    trace_id = generate_trace_id()
     logger.info("jira_webhook_received", ticket_id=ticket.id, ticket_type=ticket.ticket_type)
     append_trace(ticket.id, trace_id, "webhook", "jira_webhook_received",
                  ticket_type=ticket.ticket_type, source="jira")
 
-    dispatch = _enqueue_or_background(ticket, background_tasks)
+    dispatch = _enqueue_or_background(ticket, background_tasks, trace_id=trace_id)
     if dispatch == "duplicate":
         return {"status": "skipped", "ticket_id": ticket.id, "reason": "already processing"}
     return {"status": "accepted", "ticket_id": ticket.id, "dispatch": dispatch}
@@ -199,29 +203,17 @@ async def ado_webhook(
     x_hub_signature: str | None = Header(default=None, alias="x-hub-signature"),
 ) -> dict[str, str]:
     """Receive an Azure DevOps Service Hook webhook and enqueue for processing."""
-    body = await request.body()
-
-    # Validate webhook signature if secret is configured
-    if settings.webhook_secret:
-        if not x_hub_signature:
-            raise HTTPException(status_code=401, detail="Missing webhook signature")
-        expected = hmac.new(
-            settings.webhook_secret.encode(), body, hashlib.sha256
-        ).hexdigest()
-        signature = x_hub_signature.removeprefix("sha256=")
-        if not hmac.compare_digest(expected, signature):
-            raise HTTPException(status_code=401, detail="Invalid webhook signature")
-
-    try:
-        payload: dict[str, Any] = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid JSON body: {exc}") from exc
-
+    payload = await _validate_and_parse_webhook(request, x_hub_signature)
     ticket = _get_ado_adapter().normalize(payload)
 
+    trace_id = generate_trace_id()
     logger.info("ado_webhook_received", ticket_id=ticket.id, ticket_type=ticket.ticket_type)
+    append_trace(ticket.id, trace_id, "webhook", "ado_webhook_received",
+                 ticket_type=ticket.ticket_type, source="ado")
 
-    dispatch = _enqueue_or_background(ticket, background_tasks)
+    dispatch = _enqueue_or_background(ticket, background_tasks, trace_id=trace_id)
+    if dispatch == "duplicate":
+        return {"status": "skipped", "ticket_id": ticket.id, "reason": "already processing"}
     return {"status": "accepted", "ticket_id": ticket.id, "dispatch": dispatch}
 
 
@@ -315,7 +307,7 @@ async def retest(payload: RetestPayload, background_tasks: BackgroundTasks) -> d
 
     prompt = phase_prompts.get(payload.phase, phase_prompts["qa"])
 
-    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    env = sanitized_env()
     cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions"]
 
     def run_retest() -> None:

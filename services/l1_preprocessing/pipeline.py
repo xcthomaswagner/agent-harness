@@ -18,7 +18,7 @@ import structlog
 
 from adapters.jira_adapter import JiraAdapter
 from analyst import TicketAnalyst
-from client_profile import ClientProfile, load_profile
+from client_profile import ClientProfile, find_profile_by_project_key, load_profile
 from config import Settings
 from conflict_detector import ConflictDetector
 from figma_extractor import (
@@ -33,6 +33,7 @@ from models import (
     TicketPayload,
     classify_analyst_output,
 )
+from tracer import append_trace, generate_trace_id
 
 logger = structlog.get_logger()
 
@@ -70,13 +71,21 @@ class Pipeline:
         """
         return self._jira_adapter
 
-    async def process(self, ticket: TicketPayload) -> dict[str, Any]:
+    async def process(
+        self, ticket: TicketPayload, trace_id: str = ""
+    ) -> dict[str, Any]:
         """Run a ticket through the full L1 pipeline.
+
+        Args:
+            trace_id: If provided, reuse the trace ID from the webhook handler.
+                      Otherwise generate a new one.
 
         Returns a status dict with the outcome for logging/API response.
         """
         log = logger.bind(ticket_id=ticket.id, source=ticket.source)
         log.info("pipeline_started")
+
+        tid = trace_id or generate_trace_id()
 
         # Step 0: Download image attachments so analyst can see them
         ticket = await self._download_image_attachments(ticket, log)
@@ -85,12 +94,19 @@ class Pipeline:
         output = await self._analyst.analyze(ticket)
         output_type = classify_analyst_output(output)
         log.info("analyst_completed", output_type=output_type)
+        # Token counts stashed by analyst — may be absent if analyst is mocked
+        tokens_in = getattr(self._analyst, "_last_tokens_in", 0)
+        tokens_out = getattr(self._analyst, "_last_tokens_out", 0)
+        append_trace(ticket.id, tid, "analyst", "analyst_completed",
+                     output_type=output_type,
+                     tokens_in=tokens_in if isinstance(tokens_in, int) else 0,
+                     tokens_out=tokens_out if isinstance(tokens_out, int) else 0)
 
         # Step 2: Route based on output type
         if output_type == "enriched":
             if not isinstance(output, EnrichedTicket):
                 raise TypeError(f"Expected EnrichedTicket, got {type(output).__name__}")
-            return await self._handle_enriched(output, log)
+            return await self._handle_enriched(output, log, tid)
 
         if output_type == "info_request":
             if not isinstance(output, InfoRequest):
@@ -102,13 +118,28 @@ class Pipeline:
         return await self._handle_decomposition(output, log)
 
     def _load_client_profile(self, ticket: TicketPayload) -> ClientProfile | None:
-        """Load the client profile for this ticket's project."""
+        """Load the client profile for this ticket's project.
+
+        Routing order:
+        1. Match by project key extracted from ticket ID (e.g., SCRUM-16 → SCRUM)
+        2. Fall back to DEFAULT_CLIENT_PROFILE from settings
+        """
+        log = logger.bind(ticket_id=ticket.id)
+
+        # Extract project key from ticket ID (e.g., "ROC-1" → "ROC")
+        project_key = ticket.id.rsplit("-", 1)[0] if "-" in ticket.id else ""
+        if project_key:
+            profile = find_profile_by_project_key(project_key)
+            if profile:
+                log.info("client_profile_routed", profile=profile.name, project_key=project_key)
+                return profile
+
+        # Fall back to default
         profile_name = self._settings.default_client_profile
         if not profile_name:
             return None
         profile = load_profile(profile_name)
         if profile:
-            log = logger.bind(ticket_id=ticket.id)
             log.info("client_profile_loaded", profile=profile_name)
         return profile
 
@@ -136,14 +167,10 @@ class Pipeline:
         )
         return ticket
 
-    async def _handle_enriched(
-        self, enriched: EnrichedTicket, log: Any
-    ) -> dict[str, Any]:
-        """Handle an enriched ticket — write back to Jira and trigger L2."""
-        adapter = self._get_adapter(enriched)
-        profile = self._load_client_profile(enriched)
-
-        # Check for conflicts with in-progress tickets
+    async def _check_and_warn_conflicts(
+        self, enriched: EnrichedTicket, adapter: JiraAdapter, log: Any
+    ) -> list[Any]:
+        """Check for conflicts with in-progress tickets and post warning if found."""
         conflicts = self._conflict_detector.check_conflicts(
             enriched.id, [f.name for f in (enriched.test_scenarios or [])]
         )
@@ -151,70 +178,81 @@ class Pipeline:
             warning = self._conflict_detector.format_warning(enriched.id, conflicts)
             await adapter.write_comment(enriched.id, warning)
             log.warning("conflict_warning_posted", conflicts=len(conflicts))
+        return conflicts or []
 
-        # Extract Figma design spec if Figma link found in ticket
-        if not enriched.figma_design_spec:
-            all_text = (
-                f"{enriched.description} "
-                f"{' '.join(enriched.acceptance_criteria)}"
-            )
-            figma_links = detect_figma_links(all_text)
-            if figma_links:
-                # Create a temp dir for rendered frame images
-                figma_img_dir = tempfile.mkdtemp(
-                    prefix=f"figma-{enriched.id}-"
-                )
-                self._temp_dirs.append(figma_img_dir)
-                spec = await self._figma_extractor.extract(
-                    figma_links[0]["url"],
-                    image_dest_dir=figma_img_dir,
-                )
-                if spec:
-                    enriched.figma_design_spec = spec
-                    log.info(
-                        "figma_design_extracted",
-                        components=len(spec.components),
-                        rendered=len(spec.rendered_frames),
-                    )
-                    # Add rendered frames as image attachments
-                    frame_atts = rendered_frames_to_attachments(spec)
-                    if frame_atts:
-                        enriched.attachments.extend(frame_atts)
-                        log.info(
-                            "figma_frames_added_as_attachments",
-                            count=len(frame_atts),
-                        )
+    async def _extract_figma_if_needed(
+        self, enriched: EnrichedTicket, log: Any
+    ) -> None:
+        """Extract Figma design spec if a Figma link is found in the ticket."""
+        if enriched.figma_design_spec:
+            return
 
-        # Auto-detect platform profile
-        if not enriched.platform_profile:
-            # From client profile first
-            if profile and profile.platform_profile:
-                enriched.platform_profile = profile.platform_profile
-                log.info("platform_profile_from_config", profile=profile.platform_profile)
-            else:
-                # Auto-detect from repo files
-                detected = self._detect_platform_from_repo()
-                if detected:
-                    enriched.platform_profile = detected
-                    log.info("platform_profile_auto_detected", profile=detected)
+        all_text = f"{enriched.description} {' '.join(enriched.acceptance_criteria)}"
+        figma_links = detect_figma_links(all_text)
+        if not figma_links:
+            return
 
-        # Determine done status from client profile
+        figma_img_dir = tempfile.mkdtemp(prefix=f"figma-{enriched.id}-")
+        self._temp_dirs.append(figma_img_dir)
+        spec = await self._figma_extractor.extract(
+            figma_links[0]["url"], image_dest_dir=figma_img_dir,
+        )
+        if not spec:
+            return
+
+        enriched.figma_design_spec = spec
+        log.info("figma_design_extracted",
+                 components=len(spec.components), rendered=len(spec.rendered_frames))
+
+        frame_atts = rendered_frames_to_attachments(spec)
+        if frame_atts:
+            enriched.attachments.extend(frame_atts)
+            log.info("figma_frames_added_as_attachments", count=len(frame_atts))
+
+    def _resolve_platform_profile(
+        self, enriched: EnrichedTicket, profile: ClientProfile | None, log: Any
+    ) -> None:
+        """Auto-detect platform profile from client config or repo files."""
+        if enriched.platform_profile:
+            return
+        if profile and profile.platform_profile:
+            enriched.platform_profile = profile.platform_profile
+            log.info("platform_profile_from_config", profile=profile.platform_profile)
+        else:
+            detected = self._detect_platform_from_repo()
+            if detected:
+                enriched.platform_profile = detected
+                log.info("platform_profile_auto_detected", profile=detected)
+
+    async def _handle_enriched(
+        self, enriched: EnrichedTicket, log: Any, trace_id: str = ""
+    ) -> dict[str, Any]:
+        """Handle an enriched ticket — write back to Jira and trigger L2."""
+        tid = trace_id or generate_trace_id()
+        adapter = self._get_adapter(enriched)
+        profile = self._load_client_profile(enriched)
+
+        conflicts = await self._check_and_warn_conflicts(enriched, adapter, log)
+        await self._extract_figma_if_needed(enriched, log)
+        self._resolve_platform_profile(enriched, profile, log)
+
         done_status = profile.done_status if profile else "In Progress"
 
-        # Transition to "In Progress"
         if enriched.callback:
             try:
                 target_status = "In Progress" if done_status == "Done" else done_status
                 await adapter.transition_status(enriched.id, target_status)
                 log.info("ticket_transitioned_to_in_progress")
-            except Exception:
+            except Exception as exc:
                 log.warning("status_transition_failed", target="In Progress")
+                append_trace(
+                    enriched.id, tid, "pipeline", "error",
+                    error_type="JiraTransitionFailed",
+                    error_message=str(exc)[:500],
+                )
 
-        # Write generated AC back to Jira
         if enriched.callback and enriched.generated_acceptance_criteria:
-            ac_text = "\n".join(
-                f"- {ac}" for ac in enriched.generated_acceptance_criteria
-            )
+            ac_text = "\n".join(f"- {ac}" for ac in enriched.generated_acceptance_criteria)
             comment = (
                 f"*AI Analyst — Generated Acceptance Criteria:*\n\n{ac_text}"
                 f"\n\n*Edge Cases:*\n"
@@ -223,36 +261,31 @@ class Pipeline:
             await adapter.write_comment(enriched.id, comment)
             log.info("enrichment_written_to_jira")
 
-        # Write enriched ticket to temp file for spawn script
         ticket_path = self._write_ticket_json(enriched)
+        pipeline_mode = "quick" if "ai-quick" in enriched.labels else "multi"
 
-        # Determine pipeline mode from labels
-        pipeline_mode = "multi"
-        if "ai-quick" in enriched.labels:
-            pipeline_mode = "quick"
-
-        # Register as active ticket for conflict detection
-        affected_files = []
-        if enriched.size_assessment:
-            affected_files = [enriched.title]  # Placeholder — real file list comes from plan
+        affected_files = [enriched.title] if enriched.size_assessment else []
         self._conflict_detector.register(
             enriched.id, enriched.title, affected_files, f"ai/{enriched.id}"
         )
 
-        # Use client profile repo path if available
         client_repo = (
             (profile.client_repo_path if profile else "")
             or self._settings.default_client_repo
         )
 
-        # Trigger L2 (spawn Agent Team)
         spawn_result = await self._trigger_l2(
             enriched, ticket_path, log,
             pipeline_mode=pipeline_mode, client_repo_override=client_repo,
+            trace_id=tid,
         )
-
-        # Clean up temp directories (images already copied to worktree by spawn)
         self._cleanup_temp_dirs(log)
+
+        append_trace(enriched.id, tid, "pipeline", "l2_dispatched",
+                     pipeline_mode=pipeline_mode, spawn_triggered=spawn_result,
+                     conflicts=len(conflicts),
+                     figma_extracted=enriched.figma_design_spec is not None,
+                     platform_profile=enriched.platform_profile or "none")
 
         return {
             "status": "enriched",
@@ -260,7 +293,7 @@ class Pipeline:
             "generated_ac_count": len(enriched.generated_acceptance_criteria),
             "test_scenario_count": len(enriched.test_scenarios),
             "spawn_triggered": spawn_result,
-            "conflicts": len(conflicts) if conflicts else 0,
+            "conflicts": len(conflicts),
             "figma_extracted": enriched.figma_design_spec is not None,
         }
 
@@ -371,15 +404,19 @@ class Pipeline:
         log: Any,
         pipeline_mode: str = "multi",
         client_repo_override: str = "",
+        trace_id: str = "",
     ) -> bool:
         """Trigger L2 by calling the spawn script.
 
         Args:
             pipeline_mode: "multi" (default) for full review/QA pipeline,
                           "quick" for single-agent fast mode.
+            trace_id: Trace ID for error reporting.
 
         Returns True if spawn was triggered, False if skipped.
         """
+        import asyncio
+
         client_repo = client_repo_override or self._settings.default_client_repo
         if not client_repo:
             log.warning(
@@ -409,11 +446,30 @@ class Pipeline:
             pipeline_mode=pipeline_mode,
         )
 
-        subprocess.Popen(
+        proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             start_new_session=True,
         )
 
+        # Check for immediate spawn failure (exits within 2s = setup error)
+        await asyncio.sleep(2)
+        exit_code = proc.poll()
+        if exit_code is not None and exit_code != 0:
+            stderr_out = (proc.stderr.read() or b"").decode(errors="replace")[:1000]
+            proc.stderr.close()
+            log.error("l2_spawn_failed", exit_code=exit_code, stderr=stderr_out)
+            tid = trace_id or generate_trace_id()
+            append_trace(
+                enriched.id, tid, "spawn", "error",
+                error_type="SpawnFailed",
+                error_message=f"spawn_team.py exited {exit_code}",
+                error_context={"stderr": stderr_out, "exit_code": exit_code},
+            )
+            return False
+
+        # Process still running — detach stderr pipe and let it run
+        if proc.stderr:
+            proc.stderr.close()
         return True

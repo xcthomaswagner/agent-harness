@@ -6,11 +6,19 @@ import hashlib
 import hmac
 import json
 import os
+import re
+import sys
+from collections import OrderedDict
+from pathlib import Path
 from typing import Any
 
 import structlog
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+
+# Add L1 to path for shared tracer access (single-machine deployment)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "l1_preprocessing"))
+from tracer import append_trace, generate_trace_id, read_trace
 
 from event_classifier import EventType, classify_event
 from spawner import SessionSpawner
@@ -26,8 +34,9 @@ BOT_USERNAME = os.getenv("BOT_GITHUB_USERNAME", "github-actions[bot]")
 BOT_COMMENT_MARKER = "<!-- xcagent -->"
 
 # Dedup: track recently processed GitHub delivery IDs to prevent double-processing
-# on webhook retries or race conditions. Bounded to prevent memory growth.
-_processed_deliveries: set[str] = set()
+# on webhook retries or race conditions. OrderedDict gives FIFO eviction so recent
+# entries are never evicted before old ones.
+_processed_deliveries: OrderedDict[str, None] = OrderedDict()
 _MAX_DELIVERY_CACHE = 500
 
 app = FastAPI(
@@ -47,6 +56,16 @@ def _get_spawner() -> SessionSpawner:
 
 
 # --- Helpers ---
+
+_AI_BRANCH_PATTERN = re.compile(r"^ai/([A-Za-z0-9]+-\d+)")
+
+
+def _ticket_id_from_payload(payload: dict[str, Any]) -> str:
+    """Extract ticket ID from the PR branch name (e.g., ai/SCRUM-16 → SCRUM-16)."""
+    pr = payload.get("pull_request", {})
+    branch = pr.get("head", {}).get("ref", "")
+    match = _AI_BRANCH_PATTERN.match(branch)
+    return match.group(1) if match else ""
 
 
 def _is_bot_comment(payload: dict[str, Any], user_path: list[str]) -> bool:
@@ -72,6 +91,23 @@ def _is_bot_comment(payload: dict[str, Any], user_path: list[str]) -> bool:
     return BOT_COMMENT_MARKER in body
 
 
+def _lookup_trace_id(ticket_id: str) -> str:
+    """Find the L2 run's trace ID for this ticket.
+
+    Looks for the ``agent_finished`` or ``Pipeline complete`` event's trace_id
+    (the L2 run's ID) rather than just taking the last entry, which could be
+    from any source.
+    """
+    entries = read_trace(ticket_id)
+    for entry in reversed(entries):
+        ev = entry.get("event", "")
+        if "agent_finished" in ev or "Pipeline complete" in ev:
+            return entry.get("trace_id", generate_trace_id())
+    if entries:
+        return entries[-1].get("trace_id", generate_trace_id())
+    return generate_trace_id()
+
+
 # --- Event handlers ---
 
 
@@ -84,6 +120,11 @@ async def _handle_pr_opened(payload: dict[str, Any]) -> None:
 
     log = logger.bind(pr_number=pr_number)
     log.info("handling_pr_opened")
+
+    ticket_id = _ticket_id_from_payload(payload)
+    if ticket_id:
+        append_trace(ticket_id, _lookup_trace_id(ticket_id), "l3_pr_review",
+                     "pr_review_spawned", pr_number=pr_number)
 
     _get_spawner().spawn_pr_review(
         pr_number=pr_number,
@@ -156,6 +197,13 @@ async def _handle_ci_failed(payload: dict[str, Any]) -> None:
     log = logger.bind(pr_numbers=pr_numbers, branch=branch)
     log.info("handling_ci_failure")
 
+    # Trace CI failure — extract ticket ID from branch name
+    match = _AI_BRANCH_PATTERN.match(branch)
+    if match:
+        ci_ticket_id = match.group(1)
+        append_trace(ci_ticket_id, _lookup_trace_id(ci_ticket_id), "l3_ci_fix",
+                     "ci_fix_spawned", branch=branch, pr_numbers=pr_numbers)
+
     # Fetch actual failure logs from GitHub Actions
     run_id = check.get("id", 0)
     failure_logs = await _fetch_ci_logs(repo, run_id)
@@ -200,6 +248,12 @@ async def _handle_review_comment(payload: dict[str, Any]) -> None:
     log = logger.bind(pr_number=pr_number, author=comment_author)
     log.info("handling_review_comment")
 
+    ticket_id = _ticket_id_from_payload(payload)
+    if ticket_id:
+        append_trace(ticket_id, _lookup_trace_id(ticket_id), "l3_comment",
+                     "comment_response_spawned", pr_number=pr_number,
+                     author=comment_author)
+
     _get_spawner().spawn_comment_response(
         pr_number=pr_number,
         comment_body=comment_body,
@@ -220,6 +274,12 @@ async def _handle_review_changes_requested(payload: dict[str, Any]) -> None:
 
     log = logger.bind(pr_number=pr_number, reviewer=reviewer)
     log.info("handling_changes_requested")
+
+    ticket_id = _ticket_id_from_payload(payload)
+    if ticket_id:
+        append_trace(ticket_id, _lookup_trace_id(ticket_id), "l3_changes_requested",
+                     "changes_requested_spawned", pr_number=pr_number,
+                     reviewer=reviewer)
 
     _get_spawner().spawn_comment_response(
         pr_number=pr_number,
@@ -339,13 +399,9 @@ async def github_webhook(
         logger.debug("duplicate_delivery_skipped", delivery_id=delivery_id)
         return {"status": "skipped", "reason": "duplicate delivery"}
     if delivery_id:
-        _processed_deliveries.add(delivery_id)
-        # Bound the cache to prevent memory growth
-        if len(_processed_deliveries) > _MAX_DELIVERY_CACHE:
-            # Remove oldest entries (set is unordered, but this is fine for dedup)
-            excess = len(_processed_deliveries) - _MAX_DELIVERY_CACHE
-            for _ in range(excess):
-                _processed_deliveries.pop()
+        _processed_deliveries[delivery_id] = None
+        while len(_processed_deliveries) > _MAX_DELIVERY_CACHE:
+            _processed_deliveries.popitem(last=False)  # FIFO: evict oldest
 
     try:
         payload: dict[str, Any] = json.loads(body)

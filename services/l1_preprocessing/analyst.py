@@ -75,6 +75,8 @@ class TicketAnalyst:
         self._settings = settings
         self._client = client or anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         self._skills_dir = skills_dir or SKILLS_DIR
+        self._last_tokens_in: int = 0
+        self._last_tokens_out: int = 0
 
     def _load_skill_file(self, filename: str) -> str:
         """Load a skill file from the ticket-analyst skill directory."""
@@ -283,8 +285,10 @@ class TicketAnalyst:
             log.error("analyst_empty_response")
             raise ValueError(f"Analyst returned empty response for {ticket.id}")
 
-        log.info("analyst_response_received", tokens_in=response.usage.input_tokens,
-                 tokens_out=response.usage.output_tokens)
+        self._last_tokens_in = response.usage.input_tokens
+        self._last_tokens_out = response.usage.output_tokens
+        log.info("analyst_response_received", tokens_in=self._last_tokens_in,
+                 tokens_out=self._last_tokens_out)
 
         # Parse JSON from response (may be wrapped in ```json ... ```)
         json_str = self._extract_json(raw_text)

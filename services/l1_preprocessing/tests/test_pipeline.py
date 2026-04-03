@@ -225,7 +225,9 @@ class TestRouteEnriched:
         mock_analyst.analyze.return_value = enriched
 
         with patch("pipeline.subprocess.Popen") as mock_popen:
-            mock_popen.return_value = MagicMock()
+            mock_proc = MagicMock()
+            mock_proc.poll.return_value = None  # Process still running
+            mock_popen.return_value = mock_proc
             result = await pipe.process(sample_ticket)
 
         assert result["spawn_triggered"] is True
@@ -237,9 +239,9 @@ class TestRouteEnriched:
         assert "--branch-name" in cmd
         assert "ai/PIPE-10" in cmd
 
-        # Verify DEVNULL is used (not PIPE, which would deadlock)
+        # Verify stderr is captured for error detection
         assert call_args[1]["stdout"] == subprocess.DEVNULL
-        assert call_args[1]["stderr"] == subprocess.DEVNULL
+        assert call_args[1]["stderr"] == subprocess.PIPE
 
 
 # --- Route: Info Request ---
