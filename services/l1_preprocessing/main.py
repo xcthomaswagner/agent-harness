@@ -50,6 +50,16 @@ async def _validate_config() -> None:
     if not settings.jira_base_url and not settings.ado_org_url:
         logger.warning("no_ticket_source_configured", hint="Set JIRA_BASE_URL or ADO_ORG_URL")
 
+    # Check reference documentation URLs in background (non-blocking)
+    import asyncio
+
+    from url_checker import check_reference_urls
+
+    _background_tasks.add(asyncio.create_task(check_reference_urls()))
+
+# Hold references to background tasks so they aren't garbage-collected
+_background_tasks: set[object] = set()
+
 _jira_adapter: JiraAdapter | None = None
 _ado_adapter: AdoAdapter | None = None
 _pipeline: Pipeline | None = None

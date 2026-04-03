@@ -98,6 +98,17 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
             shutil.copy2(conventions, skills_dest / "implement" / "CONVENTIONS.md")
             print("[inject] Platform conventions copied")
 
+        # Append REFERENCE_URLS.md to all three skills (implement, code-review, qa-validation)
+        ref_urls = profile_dir / "REFERENCE_URLS.md"
+        if ref_urls.exists():
+            ref_content = ref_urls.read_text()
+            for skill_name in ("implement", "code-review", "qa-validation"):
+                skill_file = skills_dest / skill_name / "SKILL.md"
+                if skill_file.exists():
+                    with skill_file.open("a") as f:
+                        f.write(f"\n\n---\n\n{ref_content}")
+            print("[inject] Reference URLs appended to all skills")
+
         print(f"[inject] Platform profile: {platform_profile}")
 
     # --- Step 4: Merge CLAUDE.md ---
