@@ -56,6 +56,11 @@ Run the full test suite, not just your new tests. Fix any failures:
 - If your tests fail, debug and fix the test or implementation
 - Maximum 3 self-correction attempts before marking the unit as BLOCKED
 
+**If no test framework is configured** (test commands return "command not found"):
+1. Check `package.json` scripts, `pyproject.toml`, or the project's `CLAUDE.md` for the correct test command
+2. If the project genuinely has no test framework, write your tests but note "No test framework configured — tests written but not executed" in your commit message
+3. Do NOT install a test framework unless the ticket specifically asks for it
+
 ### 6. Commit
 
 Only when all tests pass:

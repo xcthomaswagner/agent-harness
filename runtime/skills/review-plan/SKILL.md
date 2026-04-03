@@ -67,9 +67,15 @@ Your output is one of:
 }
 ```
 
+When corrections are needed, **you write the corrected plan directly** to `.harness/plans/plan-v<N+1>.json` (never overwrite the original). Do NOT send corrections back to the Planner — you are the authority on plan correctness.
+
+Also check for the `recommendation` field: if the planner outputs `"recommendation": "simple_pipeline"`, verify that all units truly form a linear chain (every unit depends on the previous, no parallelism possible). If the recommendation is wrong, correct it in the new plan version.
+
+Write your review to `.harness/logs/plan-review.md`.
+
 ## Failure Handling
 
-- **Max 2 review-correction cycles** with the Planner
+- **Max 2 review cycles** — you review, write corrections, review again
 - If the plan is still not acceptable after 2 rounds, escalate:
 ```json
 {

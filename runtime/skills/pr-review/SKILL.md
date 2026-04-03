@@ -40,13 +40,27 @@ See `SECURITY_REVIEW.md`:
 
 ### Step 5: Post Review
 
-Post findings as a GitHub PR review with inline comments using the GitHub MCP or CLI:
+Post findings as a GitHub PR review using `gh` CLI:
 ```bash
 gh pr review <PR_NUMBER> --comment --body "AI Review: ..."
 ```
 
-For specific file comments, use the GitHub API to post inline review comments.
+### Step 6: Save Local Artifact
 
-## Output Format
+Also write your review to `.harness/logs/pr-review.md` so it is captured by the observability trace. Use the same format as the PR comment.
 
-See `REVIEW_TEMPLATE.md` for the structured output.
+**Note:** This skill runs in L3 (outside the Agent Team pipeline), triggered by a GitHub webhook when a draft PR is opened. It does NOT run inside the agent worktree — it runs in the client repo directly.
+
+## Output
+
+1. **GitHub PR comment** — posted via `gh pr review` (primary)
+2. **Local artifact** — `.harness/logs/pr-review.md` in the worktree (for observability)
+
+See `REVIEW_TEMPLATE.md` for the structured format used in both outputs.
+
+## Failure Handling
+
+If the GitHub API is unavailable or the PR doesn't exist:
+1. Log the error
+2. Write the review to `.harness/logs/pr-review.md` only
+3. The review is not lost — it can be posted manually

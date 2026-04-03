@@ -57,7 +57,11 @@ Spawn a reviewer (see Code Review section below).
 
 Spawn QA (see QA Validation section below).
 
-### Step 5: Push + PR
+### Step 5: Simplify
+
+Run /simplify (see Code Simplification section below).
+
+### Step 6: Push + PR
 
 Push and open PR (see PR Creation section below).
 
@@ -205,20 +209,12 @@ The dev agents with `isolation: "worktree"` each created a branch named `ai/<tic
 
 ```
 Agent(
-  prompt="You are the merge coordinator. You are on branch ai/<ticket-id>.
+  prompt="You are the merge coordinator. Follow the /merge skill at
+         .claude/skills/merge/SKILL.md.
+         You are on branch ai/<ticket-id>.
          Read the plan at .harness/plans/plan-v<N>.json.
          Merge ONLY the following completed unit branches (skip blocked/failed):
          <list of branches, e.g., ai/<ticket-id>/unit-1, ai/<ticket-id>/unit-2>
-
-         Merge in topological order (units with no dependencies first, then dependents).
-         For each branch:
-         1. git merge --no-commit --no-ff ai/<ticket-id>/unit-N
-         2. Run the full test suite
-         3. If green: git commit -m 'merge: integrate unit-N'
-         4. If red: git merge --abort, report the conflict and which files conflicted
-
-         After all merges, run the full test suite one final time.
-         Do NOT attempt to delete unit branches — the Team Lead handles cleanup.
          Write results to .harness/logs/merge-report.md.",
   description="Merge <ticket-id>",
   mode="bypassPermissions"
@@ -239,7 +235,11 @@ Spawn a reviewer (see Code Review section below). Reviews the **merged** branch.
 
 Spawn QA (see QA Validation section below). Validates the **merged** branch.
 
-### Step 8: Push + PR
+### Step 8: Simplify
+
+Run /simplify (see Code Simplification section below).
+
+### Step 9: Push + PR
 
 Push and open PR (see PR Creation section below).
 
@@ -251,34 +251,9 @@ Spawn a code reviewer. This agent reviews the diff but CANNOT modify code:
 
 ```
 Agent(
-  prompt="You are a code reviewer. Review the changes on this branch.
-         Run: git diff <base-branch>...HEAD
-         (where <base-branch> is the repository's default branch, e.g. main or master)
-
-         Evaluate for:
-         1. CORRECTNESS: Does the code match the acceptance criteria in .harness/ticket.json?
-         2. SECURITY: dangerouslySetInnerHTML, hardcoded secrets, injection vectors, auth gaps?
-            Flag ALL uses of dangerouslySetInnerHTML even if the content appears safe.
-         3. STYLE: Does the code follow the project conventions in CLAUDE.md?
-         4. DEPENDENCIES: If package.json was modified, are dev-only packages
-            (ts-node, ts-jest, @types/*, test frameworks) in devDependencies not dependencies?
-         5. AUTO-GENERATED FILES: Were any auto-generated files committed that should be
-            gitignored (next-env.d.ts, .next/, dist/, coverage/)?
-         6. TEST COVERAGE: Are all acceptance criteria and edge cases tested?
-            Flag any new module/component that has zero test coverage.
-         7. BUGS: Logic errors, off-by-one, missing null checks?
-
-         Do NOT rationalize issues away. Flag them and explain why they are
-         or are not acceptable. Let the Judge decide what to filter.
-
-         Write your review to .harness/logs/code-review.md:
-
-         ## Code Review — <ticket-id>
-         ### Verdict: APPROVED | CHANGES_NEEDED
-         ### Issues Found
-         - [severity: critical|warning] [category] Description — Suggestion
-         ### Summary
-         One paragraph overall assessment.",
+  prompt="Follow the /code-review skill at .claude/skills/code-review/SKILL.md.
+         Review the changes on this branch against the acceptance criteria
+         in .harness/ticket.json. Write your review to .harness/logs/code-review.md.",
   description="Review <ticket-id>",
   mode="bypassPermissions"
 )
@@ -334,96 +309,9 @@ Spawn a QA agent:
 
 ```
 Agent(
-  prompt="You are a QA validator. Validate the implementation against the acceptance criteria.
-
-         UNIT + INTEGRATION TESTS:
-         1. Read .harness/ticket.json — note ALL acceptance criteria
-            (both 'acceptance_criteria' and 'generated_acceptance_criteria')
-         2. Read the code changes: git diff <base-branch>...HEAD
-            (where <base-branch> is the repository's default branch, e.g. main or master)
-         3. Run the full test suite and capture results
-         4. For EACH acceptance criterion: PASS, FAIL, or NOT_TESTED with evidence
-         5. For EACH edge case: COVERED or NOT_COVERED
-
-         E2E BROWSER TESTS (if applicable):
-         6. Check if any test scenarios in the ticket have test_type: 'e2e'
-         7. If yes, check if playwright.config.ts exists in the project root
-         8. If Playwright is available:
-            a. Start the dev server (npm run dev) in the background
-            b. Wait for it to be ready (check http://localhost:3000)
-            c. For each e2e test scenario:
-               - Navigate to the relevant page using Playwright MCP browser_navigate
-               - Interact with the UI (click, type) per the test scenario
-               - Verify the expected outcome using browser_snapshot (accessibility tree)
-               - Take a screenshot using browser_screenshot and save to .harness/screenshots/
-               - Record PASS or FAIL with the screenshot path as evidence
-            d. Stop the dev server
-         9. If Playwright is NOT available, mark e2e criteria as NOT_TESTED
-            with note: 'Playwright not installed in project'
-         10. If E2E tests FAIL or are SKIPPED for any reason, include ALL of:
-            - The exact error message or reason
-            - What command was run and what it returned
-            - What port/process conflicted (if port conflict)
-            - How to reproduce or fix: e.g., "kill process on port 3000:
-              lsof -ti:3000 | xargs kill, then re-run npm run test:e2e"
-            - Mark each skipped test individually in the QA matrix with
-              the specific reason, not a blanket "E2E NOT_TESTED"
-
-         FIGMA DESIGN COMPLIANCE (if figma_design_spec is present in the ticket):
-         10. Read the figma_design_spec from .harness/ticket.json
-         11. During E2E browser validation (or in a separate pass if no e2e scenarios),
-             start the dev server and navigate to the relevant pages
-         12. For each page/component, use Playwright MCP to verify structural compliance.
-             If a Playwright tool is unavailable, mark that check as
-             'Skipped — Playwright MCP tool not available' instead of failing.
-
-             COLOR TOKENS: Use browser_snapshot to inspect the rendered page.
-             Visually confirm that key element colors match figma_design_spec.color_tokens.
-             If computed style extraction is available, use it. Otherwise compare
-             visually from screenshots.
-             Record: expected color from Figma vs observed. PASS if they match.
-
-             TYPOGRAPHY: Inspect rendered headings, body text, and labels.
-             Compare against figma_design_spec.typography.
-             Record: expected font spec vs observed values.
-
-             COMPONENTS: Use browser_snapshot (accessibility tree) to verify all components
-             listed in figma_design_spec.components are present in the rendered page.
-             Record: each expected component and whether it was found.
-
-             LAYOUT: Inspect page layout for flex/grid direction, spacing.
-             Compare against figma_design_spec.layout_patterns.
-             Record: expected layout direction vs observed.
-
-         13. If figma_design_spec is NOT present in the ticket JSON, write in the
-             Design Compliance section: 'Skipped — no Figma design spec provided in ticket.'
-             Do NOT mark individual items as NOT_TESTED without explanation.
-
-         Write to .harness/logs/qa-matrix.md:
-
-         ## QA Matrix — <ticket-id>
-         ### Overall: PASS | FAIL
-         ### Acceptance Criteria
-         | # | Criterion | Status | Evidence |
-         |---|-----------|--------|----------|
-         | 1 | <text> | PASS/FAIL | <evidence> |
-         ### Edge Cases
-         | Case | Status | Notes |
-         |------|--------|-------|
-         ### E2E Visual Validation (if performed)
-         | Page/Component | Screenshot | Status | Notes |
-         |---------------|-----------|--------|-------|
-         ### Figma Design Compliance (if design spec present)
-         | Check | Expected (Figma) | Actual (Rendered) | Status |
-         |-------|-----------------|-------------------|--------|
-         | Primary color | #1B2A4A | #1B2A4A | PASS |
-         | Heading font | Inter 24px Bold | Inter 24px 700 | PASS |
-         | Component: Button | Present | Found (role=button) | PASS |
-         | Layout: Header | horizontal | flex-direction: row | PASS |
-         ### Test Results
-         Unit/Integration: X passed, Y failed
-         E2E: X passed, Y failed (or 'skipped — no Playwright')
-         Design Compliance: X/Y checks passed (or 'Skipped — no Figma design spec provided in ticket')",
+  prompt="Follow the /qa-validation skill at .claude/skills/qa-validation/SKILL.md.
+         Validate the implementation against the acceptance criteria in .harness/ticket.json.
+         Write your QA matrix to .harness/logs/qa-matrix.md.",
   description="QA <ticket-id>",
   mode="bypassPermissions"
 )
@@ -437,15 +325,39 @@ Read `.harness/logs/qa-matrix.md`.
 
 Log: `{"phase": "qa_validation", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "QA complete", "overall": "PASS|FAIL", "criteria_passed": N, "criteria_total": M}`
 
+## Code Simplification (shared by both pipelines)
+
+After QA passes, run `/simplify` to review the changes for code reuse, quality, and efficiency.
+
+Spawn a simplification agent:
+
+```
+Agent(
+  prompt="Follow the /simplify skill at .claude/skills/simplify/SKILL.md.
+         Review all changed files on this branch for code reuse, quality, and efficiency.
+         Fix real issues. Skip false positives. Re-run tests after changes.
+         If tests fail, revert the simplification that broke them.
+         Commit any fixes: refactor(<ticket-id>): simplify implementation",
+  description="Simplify <ticket-id>",
+  mode="bypassPermissions"
+)
+```
+
+**If tests fail after simplification:** Revert the simplification changes and proceed to PR creation with the original code. Do not block the PR on simplification issues.
+
+Log: `{"phase": "simplify", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Simplification complete", "changes_made": true|false}`
+
 ## Final Screenshot
 
 After QA passes (and before PR creation), if the implementation has a visual UI component:
 
 1. Start the dev server if not already running
-2. Navigate to the main page/feature that was implemented
-3. Take a single curated screenshot that shows the finished result
-4. Save it as `.harness/screenshots/final.png`
-5. Stop the dev server
+2. Capture the finished result using `agent-browser`:
+   ```bash
+   agent-browser open http://localhost:3000/<main-page>
+   agent-browser screenshot --full -o .harness/screenshots/final.png
+   ```
+3. Stop the dev server
 
 This screenshot will be automatically uploaded to the Jira ticket as visual proof of the implementation. If the implementation has no visual UI (e.g., backend-only, API, config change), skip this step.
 

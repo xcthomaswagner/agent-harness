@@ -50,7 +50,8 @@ The implementation plan MUST be valid JSON matching this schema.
     "parallel_tracks": 1,
     "recommended_devs": 1,
     "estimated_complexity": "small|medium|large"
-  }
+  },
+  "recommendation": "full_pipeline|simple_pipeline"
 }
 ```
 
@@ -69,6 +70,7 @@ The implementation plan MUST be valid JSON matching this schema.
 | `test_strategy` | object | Overall test approach for the ticket |
 | `architecture_notes` | string | How the changes fit existing patterns |
 | `sizing` | object | Summary sizing assessment |
+| `recommendation` | enum | `full_pipeline` (default) or `simple_pipeline` if all units form a linear chain with no parallelism benefit. The team lead may switch pipeline mode based on this. |
 
 ## Validation Rules
 

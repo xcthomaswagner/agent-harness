@@ -93,9 +93,12 @@ You MUST return a JSON object matching one of these three schemas:
     "decomposition_needed": false,
     "rationale": "Why this size"
   },
-  "analyst_notes": "Implementation notes"
+  "analyst_notes": "Implementation notes",
+  "figma_design_spec": null
 }
 ```
+
+**Note on `figma_design_spec`:** This field is populated by the L1 pipeline (not the analyst) when a Figma URL is detected in the ticket. The analyst should return `null` for this field. Downstream agents (implement, QA) consume it from `.harness/ticket.json` after L1 enrichment. See `FIGMA_EXTRACTION.md` for details.
 
 ### Path B: Info Request
 

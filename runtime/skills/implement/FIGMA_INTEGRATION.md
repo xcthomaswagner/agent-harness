@@ -2,7 +2,7 @@
 
 ## When This Applies
 
-This guide applies when the enriched ticket at `/.harness/ticket.json` has a non-null `figma_design_spec` field. The design spec was extracted by the L1 analyst and cached — you do NOT need to call the Figma API.
+This guide applies when the enriched ticket at `.harness/ticket.json` has a non-null `figma_design_spec` field. The design spec was extracted by the L1 analyst and cached — you do NOT need to call the Figma API.
 
 ## Reading the Design Spec
 
@@ -92,4 +92,4 @@ After implementing, verify:
 - [ ] Interactive states are implemented
 - [ ] Responsive behavior follows the breakpoints
 
-The QA teammate will check design compliance in their validation matrix.
+The QA teammate will run full design compliance checks using `agent-browser` — pixel diffs against Figma exports, computed style verification, and responsive viewport testing. See the QA validation skill (Step 3) for details.

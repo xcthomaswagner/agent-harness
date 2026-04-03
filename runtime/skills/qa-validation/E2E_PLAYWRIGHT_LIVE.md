@@ -1,5 +1,8 @@
 # E2E Playwright Live Validation
 
+> **Scope:** This guide covers E2E functional test flows only (navigate, interact, assert).
+> For visual design verification (Figma compliance, pixel diffs, style checks), use `agent-browser` — see Step 3 in SKILL.md.
+
 ## When to Run
 
 Run E2E validation when:
