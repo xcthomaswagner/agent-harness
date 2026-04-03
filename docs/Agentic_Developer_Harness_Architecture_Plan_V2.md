@@ -11,6 +11,7 @@ XCentium GenAI Practice | March 2026 | V2 — Confidential
 |---------|------|---------|
 | V1 DRAFT | 2026-03-21 | Initial architecture plan |
 | V2 | 2026-03-21 | Incorporated architecture review: failure mode analysis, Claude Max throughput model, merge coordinator redesign, ticket-splitting logic, platform profiles, observability, client onboarding configuration, concurrent ticket isolation, revised timeline |
+| V2.1 | 2026-03-28 | Visual verification overhaul: replaced Playwright MCP with agent-browser CLI for Figma design compliance (pixel diffs, computed styles, responsive viewports). Playwright MCP retained for E2E functional test flows. L1 Figma frame PNGs now serve as pixel-diff baselines. |
 
 ---
 
@@ -99,9 +100,12 @@ The analyst runs as a single Claude Opus API call (not a Claude Code session) wi
    - **(B) Information request** — targeted questions posted as a comment. Ticket set to "Needs Clarification." Processing halted until the human responds.
    - **(C) Decomposed tickets** — for oversized tickets, the analyst creates linked sub-tickets in Jira/ADO, each scoped to fit within a single Agent Team. Each sub-ticket enters the pipeline independently. A parent-level coordinator (see Section 5.7) reassembles the results.
 
-### 4.3 Figma Link Detection
+### 4.3 Figma Link Detection & Frame Export
 
-When the analyst detects a Figma link in the ticket, it uses the Figma MCP server to extract the design context before evaluating completeness. The extraction produces a structured design specification: components used, layout patterns, color tokens, typography, interactive states, and responsive breakpoints. This design spec is cached as an artifact and passed to Layer 2, avoiding repeated Figma MCP calls by downstream teammates.
+When the analyst detects a Figma link in the ticket, it calls the Figma REST API to extract the design context before evaluating completeness. The extraction produces:
+
+1. **Structured design specification:** Components, layout patterns, color tokens, typography, interactive states, and responsive breakpoints — cached in the enriched ticket JSON.
+2. **Rendered frame PNGs:** Up to 5 top-level frames exported at 2x scale via the Figma Image API. These are saved as attachments (e.g., `figma-Header.png`, `figma-Footer.png`) and copied into the agent worktree at `.harness/attachments/`. They serve as **pixel-diff baselines** for the QA skill's visual verification step using `agent-browser`.
 
 The analyst cross-references the design against the ticket's text acceptance criteria, identifying gaps such as "the Figma shows 4 screens but the acceptance criteria only mention 2 of them."
 
@@ -166,7 +170,7 @@ This abstraction is the primary insurance against the Agent Teams experimental r
 | **Plan Reviewer** | Opus | Read-only | /review-plan | Critiques plan for gaps, incorrect dependencies, missing edge cases |
 | **Dev Teammate(s)** | Opus (complex) / Sonnet (straightforward) | Full (bash, edit, write) + Figma MCP | /implement + Platform Profile | Implements assigned units, writes tests, runs tests, commits |
 | **Code Reviewer** | Opus | Read-only + run scripts | /code-review + Platform Profile | Reviews diffs for correctness, style, security. Cannot write code files. |
-| **QA Teammate** | Sonnet | Read + test runners + Playwright MCP | /qa-validation + Platform Profile | Validates against AC via unit, integration, and E2E tests |
+| **QA Teammate** | Sonnet | Read + test runners + Playwright MCP + agent-browser CLI | /qa-validation + Platform Profile | Validates against AC via unit, integration, E2E tests, and visual design compliance |
 | **Merge Coordinator** | Sonnet | Git operations | (built-in) | Integrates branches in dependency order, resolves conflicts |
 
 **Model selection rationale (Claude Max):** With flat-rate unlimited pricing, the optimization target is quality, not cost. Opus is used for all reasoning-heavy roles (analyst, planner, reviewer, complex devs, code review, PR review). Sonnet is used only where speed matters more than reasoning depth (QA test execution, merge coordination, CI fix agents). The quality improvement in planning and review phases reduces downstream failures, meaning fewer retry loops and faster end-to-end throughput.
@@ -201,14 +205,21 @@ The Code Review teammate receives diffs from each dev teammate via direct messag
 
 #### Phase 5: QA Validation
 
-The QA teammate runs a four-step validation process:
+The QA teammate runs a five-step validation process:
 
 1. **Unit test validation:** Runs the full unit test suite, verifies coverage meets plan requirements, flags gaps.
 2. **Integration/API test validation:** Starts services in the worktree, runs integration tests, verifies contract compliance.
 3. **E2E live browser validation via Playwright MCP:** Starts the dev server, navigates the app via browser automation using the accessibility tree (34 MCP tools), walks through each acceptance criterion interactively, captures screenshots as evidence.
-4. **Persistent test suite generation via Playwright Test Agents:** Runs the Planner agent to produce Markdown test plans from acceptance criteria, the Generator to create `.spec.ts` files validated against the live DOM, and the Healer to auto-repair any selector drift. Generated test files are committed alongside implementation code.
+4. **Figma design compliance via `agent-browser`:** For Figma-linked tickets, the QA teammate uses `agent-browser` (CLI) — not Playwright MCP — for visual design verification:
+   - **Pixel diff:** Compares rendered pages against Figma frame PNGs exported by L1 (`agent-browser diff screenshot --baseline .harness/attachments/figma-<Frame>.png`)
+   - **Computed style checks:** Verifies color tokens and typography via `agent-browser get styles` against `figma_design_spec`
+   - **Component presence:** Parses `agent-browser snapshot` (accessibility tree) for expected components
+   - **Responsive testing:** Iterates breakpoints via `agent-browser set viewport` and captures screenshots at each
+5. **Persistent test suite generation via Playwright Test Agents (Phase 3+):** Runs the Planner agent to produce Markdown test plans from acceptance criteria, the Generator to create `.spec.ts` files validated against the live DOM, and the Healer to auto-repair any selector drift. Generated test files are committed alongside implementation code.
 
-The QA teammate outputs a pass/fail matrix mapping each acceptance criterion to test evidence (including screenshots for UI work). For Figma-linked tickets, the matrix includes a design compliance section.
+The QA teammate outputs a pass/fail matrix mapping each acceptance criterion to test evidence (including screenshots for UI work). For Figma-linked tickets, the matrix includes a design compliance section with pixel diff results, style comparisons, and responsive screenshots.
+
+**Tool separation:** Playwright MCP handles E2E functional test flows (navigate, interact, assert behavior). `agent-browser` handles visual design verification (pixel diffs, computed styles, responsive viewports). This separation exists because `agent-browser` provides pixel-level image diffing and computed CSS style inspection that Playwright MCP's accessibility tree cannot.
 
 **Failure mode:** If QA finds implementation bugs, it routes the specific failure back to the dev teammate that owns the affected unit (identified via the plan's unit-to-dev mapping). If that dev session has ended, the team lead spawns a new focused dev session with the failure context and the original unit's code. Maximum 2 QA-dev round trips per unit before human escalation.
 
@@ -248,18 +259,29 @@ This coordinator runs as a separate Claude Code session (not an Agent Team), avo
 | `/review-plan` | L2 / Plan Reviewer | Anti-pattern checklist, mandatory verification points, correction format |
 | `/implement` | L2 / Devs | Coding standards, Figma integration section, test patterns + project-level CLAUDE.md + Platform Profile |
 | `/code-review` | L2 / Code Reviewer | Security checks, style guide, review format template, coverage check scripts + Platform Profile |
-| `/qa-validation` | L2 / QA | Unit/integration/E2E guides, Playwright live + generation docs, QA matrix template, helper scripts + Platform Profile |
+| `/qa-validation` | L2 / QA | Unit/integration/E2E guides, Playwright live + generation docs, agent-browser visual verification, QA matrix template, helper scripts + Platform Profile |
 | `/pr-review` | L3 / PR Reviewer | Architecture review checklist, security review, PR-level review template |
 
 ### 5.6 MCP Server Map
 
-| MCP Server | Used By | Purpose |
-|------------|---------|---------|
-| **Jira MCP** | L1 Analyst, L3 Feedback Loop | Read tickets, write enrichments/comments, create sub-tasks, update status |
-| **ADO MCP** (to build) | L1 Analyst, L3 Feedback Loop | Same as Jira MCP but for Azure DevOps work items |
-| **GitHub MCP** | L2 Devs, L3 PR Review | Commit, create branches, open PRs, post reviews, read CI status |
-| **Figma MCP** | L1 Analyst, L2 Devs | Extract design context, Code Connect component mappings. Plugin: `claude plugin install figma@claude-plugins-official` |
-| **Playwright MCP** | L2 QA | Live browser E2E validation via accessibility tree. 34 tools. Setup: `claude mcp add playwright npx @playwright/mcp@latest`. CI: `--headless --no-sandbox` |
+> **Design principle:** Use CLI as the default for all tools where the model has training-data
+> fluency (git, gh, npm, sf). Reserve MCP for tools with no CLI equivalent or for progressive
+> discovery of unfamiliar APIs. Custom skills serve as the composability layer.
+
+| Tool | Access Method | Rationale |
+|------|--------------|-----------|
+| **git** | CLI (training-data fluency) | Branch, merge, commit, diff, blame — native to all models |
+| **gh** | CLI (training-data fluency) | PR creation, reviews, comments — well-documented, fast |
+| **npm/npx** | CLI | Test runners, dev servers, package management |
+| **sf** (Salesforce) | CLI + SF MCP Server (planned) | CLI for basic ops; MCP server adds structured tool access with production guard |
+| **Playwright** | **MCP** (`@playwright/mcp@latest`) | E2E functional test flows — navigate, click, type, assert via accessibility tree |
+| **agent-browser** | **CLI** (`agent-browser`) | Visual design verification — pixel diffs, computed style inspection, responsive viewports, annotated screenshots. Used by QA skill for Figma design compliance. |
+| **Figma** | L1 REST API (extractor) | MCP blocked on OAuth for headless sessions (see `docs/future-enhancements.md`). REST API exports frames as PNGs for pixel-diff baselines. |
+| **Jira** | L1 REST API (adapter) | httpx wrapper in Python service — MCP unnecessary for server-side calls |
+| **ADO** | L1 REST API (adapter) | Same pattern as Jira |
+
+**Not using MCP for:** GitHub (gh CLI is better), Jira (REST adapter in L1), ADO (REST adapter in L1), agent-browser (CLI-native design, no MCP needed).
+These were listed as MCP servers in the original architecture plan but CLI/REST proved simpler and more reliable.
 
 ---
 
@@ -502,7 +524,8 @@ With Claude Max (flat-rate unlimited), the optimization target shifts from cost 
 
 - **Agent Teams limit:** Maximum 10 simultaneous teammates per team. A medium ticket (lead + planner + plan reviewer + 3 devs + code reviewer + QA + merge coordinator) = 9 teammates. Oversized tickets are decomposed in L1 (Section 4.6).
 - **Figma MCP rate limits:** Dev seat required. Per-minute limits apply. Mitigation: extract design context once in L1, pass cached artifact to L2.
-- **Playwright MCP in CI:** Headless mode (`--headless --no-sandbox`) for GitHub Actions. Browser binaries must be installed in the CI environment.
+- **Playwright MCP in CI:** Headless mode (`--headless --no-sandbox`) for GitHub Actions. Browser binaries must be installed in the CI environment. Playwright is used for E2E test flows only.
+- **agent-browser:** CLI tool for visual design verification (pixel diffs, style inspection, responsive testing). Must be installed on the host: `npx @anthropic-ai/agent-browser install`. Used by the QA skill for Figma design compliance checks.
 - **1M token context window:** Available on Max/Team/Enterprise plans. Substantially reduces context saturation concerns for role-separated Agent Teams. Each teammate has ample room for skills, MCP schemas, plan artifacts, code diffs, and conversation history.
 
 ### 11.5 Credential & Secrets Management
@@ -787,22 +810,18 @@ This lets you develop and test skills in isolation without running the full L1�
 MCP servers that are useful across all projects can be configured globally to avoid per-session setup:
 
 ```jsonc
-// ~/.claude/settings.json — Global MCP servers
+// runtime/harness-mcp.json — Injected into worktree as .mcp.json
+// Minimal: only MCP servers with no CLI equivalent
 {
   "mcpServers": {
-    // Useful everywhere — configure globally
     "playwright": {
       "command": "npx",
-      "args": ["@playwright/mcp@latest"]
-    },
-    "figma": {
-      // Remote MCP — requires auth per session
-      "type": "http",
-      "url": "https://mcp.figma.com/mcp"
-    },
-    // Client-specific — configure per-project via .mcp.json
-    // "jira": { ... }     ← NOT here, in worktree .mcp.json
-    // "github": { ... }   ← NOT here, in worktree .mcp.json
+      "args": ["@playwright/mcp@latest", "--headless"]
+    }
+    // Figma MCP: blocked on OAuth for headless sessions (see future-enhancements.md)
+    // GitHub: using gh CLI instead (training-data fluency)
+    // Jira/ADO: using REST adapters in L1 service
+    // Salesforce: planned as composable MCP per platform profile
   }
 }
 ```
@@ -828,7 +847,7 @@ Playwright and Figma are global because they work the same regardless of client.
 | Graduated autonomy metrics dashboard | 1-2 weeks | P3 |
 | Client Profile configuration system | 1 week | P3 (deferred from P2 — hardcode first client, extract config on client #2) |
 | Cross-Ticket Coordinator for decomposed tickets | 1 week | P3 (deferred from P2 — manual ticket splitting until decomposition volume justifies automation) |
-| Visual regression testing integration (Percy/Chromatic) | 1-2 weeks | P3 |
+| Visual regression testing integration (Percy/Chromatic) | 1-2 weeks | P3 (partially addressed by agent-browser pixel diff — Percy/Chromatic would add CI-managed baselines) |
 | Concurrent ticket conflict detection in L1 | 3-5 days | P3 |
 
 ---
@@ -857,7 +876,7 @@ Add the full teammate roster and the review/QA layer.
 - Implement parallel dev teammates (2-3 per ticket) with worktree isolation
 - Build the Merge Coordinator with the full merge strategy (Section 5.3 Phase 6)
 - Build the L3 PR Review Service with GitHub webhook handling
-- Add Playwright MCP for E2E QA validation
+- Add Playwright MCP for E2E QA validation + agent-browser for visual design verification
 - Implement failure mode handling for all phase transitions (Section 9)
 - Add structured logging (observability layer)
 - Build first Platform Profile (Sitecore)
@@ -871,7 +890,7 @@ Extend the pipeline for design-driven tickets and comprehensive testing.
 - Add Playwright Test Agents for persistent test suite generation
 - Build ADO MCP server and ADO tracker plugin for Composio
 - Implement ticket size assessment in L1 (analyst flags oversized tickets for manual splitting by PM — automated decomposition deferred to Phase 4)
-- **Success metric:** Figma-linked tickets produce code that matches design structure. Generated E2E tests run in CI. ADO pipeline operational.
+- **Success metric:** Figma-linked tickets produce code that matches design structure (verified by agent-browser pixel diffs). Generated E2E tests run in CI. ADO pipeline operational.
 
 ### Phase 4: Production Hardening & Scale (Weeks 14-20)
 
@@ -898,7 +917,7 @@ Prepare for multi-client production deployment.
 |------|--------|------------|
 | Agent Teams is experimental | High — API could change | Agent Teams abstraction layer (Section 5.1) with file-based message fallback. System degrades to sequential but preserves correctness. |
 | Max subscription throughput limits | Medium — concurrency ceiling | Empirical testing in Phase 1. If throttled, implement ticket queuing with priority ordering. |
-| Figma MCP rate limits | Medium — throttled at scale | Extract design context once in L1, cache artifact. Dev teammates use cached spec, not repeated MCP calls. |
+| Figma API rate limits | Medium — throttled at scale | Extract design context + frame PNGs once in L1, cache as artifacts. Dev teammates use cached spec. QA uses cached frame PNGs as pixel-diff baselines via agent-browser. No downstream Figma API calls. |
 | Atlassian MCP auth instability | Medium — session drops | Use self-hosted Jira MCP with API token auth, not Atlassian's SSE-based MCP. |
 | Context window saturation | Low — with 1M window | Monitor token usage per teammate via observability layer. Use context editing (auto-compaction) for long sessions. |
 | PR review bottleneck at scale | Medium — human review slows | Graduated autonomy: auto-merge low-risk PRs as confidence builds. AI PR review reduces human review time. |
