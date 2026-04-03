@@ -22,3 +22,42 @@
 {"trace_id": "b4a140cfa710", "ticket_id": "TEST-1", "timestamp": "2026-03-24T16:13:52.374981+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
 {"trace_id": "5f5fdec299ab", "ticket_id": "TEST-1", "timestamp": "2026-03-24T16:52:26.661557+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
 {"trace_id": "5f5fdec299ab", "ticket_id": "TEST-1", "timestamp": "2026-03-24T16:52:32.957905+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "96ce89f80a7c", "ticket_id": "TEST-1", "timestamp": "2026-03-26T15:25:21.250154+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "96ce89f80a7c", "ticket_id": "TEST-1", "timestamp": "2026-03-26T15:25:28.507681+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "8dd20d692e7c", "ticket_id": "TEST-1", "timestamp": "2026-03-26T15:27:17.866742+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "8dd20d692e7c", "ticket_id": "TEST-1", "timestamp": "2026-03-26T15:27:24.640669+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "094c938b64f9", "ticket_id": "TEST-1", "timestamp": "2026-03-26T22:05:05.030277+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "094c938b64f9", "ticket_id": "TEST-1", "timestamp": "2026-03-26T22:05:11.467889+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "a2f7765c2ce8", "ticket_id": "TEST-1", "timestamp": "2026-03-26T22:19:17.302563+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "a2f7765c2ce8", "ticket_id": "TEST-1", "timestamp": "2026-03-26T22:19:23.691965+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "e18f7ffa6602", "ticket_id": "TEST-1", "timestamp": "2026-03-26T23:03:06.161337+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "e18f7ffa6602", "ticket_id": "TEST-1", "timestamp": "2026-03-26T23:03:12.198935+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "6ecfb863e112", "ticket_id": "TEST-1", "timestamp": "2026-03-27T14:57:40.245142+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "6ecfb863e112", "ticket_id": "TEST-1", "timestamp": "2026-03-27T14:57:46.169892+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "1f06645b63ba", "ticket_id": "TEST-1", "timestamp": "2026-03-27T16:31:08.814545+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "1f06645b63ba", "ticket_id": "TEST-1", "timestamp": "2026-03-27T16:31:15.903823+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request"}
+{"trace_id": "1f06645b63ba", "ticket_id": "TEST-1", "timestamp": "2026-03-27T16:31:15.904266+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "2f59ad0ba734", "ticket_id": "TEST-1", "timestamp": "2026-03-28T00:24:48.113788+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "2f59ad0ba734", "ticket_id": "TEST-1", "timestamp": "2026-03-28T00:24:54.351260+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request"}
+{"trace_id": "2f59ad0ba734", "ticket_id": "TEST-1", "timestamp": "2026-03-28T00:24:54.351745+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "d823205cbbee", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:33:54.420818+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "d823205cbbee", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:34:00.842372+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request", "tokens_in": 2813, "tokens_out": 153}
+{"trace_id": "d823205cbbee", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:34:00.842911+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "d8bb2f043375", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:35:01.399649+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "d8bb2f043375", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:35:06.132837+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request", "tokens_in": 2813, "tokens_out": 129}
+{"trace_id": "d8bb2f043375", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:35:06.133439+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "3867f6b23678", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:36:14.391448+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "3867f6b23678", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:36:19.334354+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request", "tokens_in": 2813, "tokens_out": 128}
+{"trace_id": "3867f6b23678", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:36:19.335065+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "f66fa3d797f5", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:43:38.879534+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "f66fa3d797f5", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:43:47.795527+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request", "tokens_in": 2813, "tokens_out": 201}
+{"trace_id": "f66fa3d797f5", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:43:47.796199+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "562541f9670a", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:44:24.582924+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "562541f9670a", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:44:30.714623+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request", "tokens_in": 2813, "tokens_out": 146}
+{"trace_id": "562541f9670a", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:44:30.715470+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "8f72cad82013", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:45:24.049702+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "8f72cad82013", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:45:36.352506+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request", "tokens_in": 2813, "tokens_out": 299}
+{"trace_id": "8f72cad82013", "ticket_id": "TEST-1", "timestamp": "2026-04-03T14:45:36.353263+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "61aa4ce90551", "ticket_id": "TEST-1", "timestamp": "2026-04-03T16:25:17.883389+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "story", "source": "jira"}
+{"trace_id": "61aa4ce90551", "ticket_id": "TEST-1", "timestamp": "2026-04-03T16:25:23.605822+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request", "tokens_in": 2813, "tokens_out": 154}
+{"trace_id": "61aa4ce90551", "ticket_id": "TEST-1", "timestamp": "2026-04-03T16:25:23.606424+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}

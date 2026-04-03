@@ -22,3 +22,57 @@
 {"trace_id": "14c68016a708", "ticket_id": "10", "timestamp": "2026-03-24T16:13:46.492832+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
 {"trace_id": "ff9b38f0c653", "ticket_id": "10", "timestamp": "2026-03-24T16:52:22.240992+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
 {"trace_id": "ff9b38f0c653", "ticket_id": "10", "timestamp": "2026-03-24T16:52:26.650334+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 2}
+{"trace_id": "5d75c948965f", "ticket_id": "10", "timestamp": "2026-03-26T15:25:15.221729+00:00", "phase": "webhook", "event": "ado_webhook_received", "ticket_type": "task", "source": "ado"}
+{"trace_id": "95542f5719a5", "ticket_id": "10", "timestamp": "2026-03-26T15:25:15.222297+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
+{"trace_id": "95542f5719a5", "ticket_id": "10", "timestamp": "2026-03-26T15:25:21.236998+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "e0dbe7e8ecbe", "ticket_id": "10", "timestamp": "2026-03-26T15:27:12.165412+00:00", "phase": "webhook", "event": "ado_webhook_received", "ticket_type": "task", "source": "ado"}
+{"trace_id": "b35ae4cab5d1", "ticket_id": "10", "timestamp": "2026-03-26T15:27:12.165760+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
+{"trace_id": "b35ae4cab5d1", "ticket_id": "10", "timestamp": "2026-03-26T15:27:17.852854+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "199fa32dd39c", "ticket_id": "10", "timestamp": "2026-03-26T22:05:00.611195+00:00", "phase": "webhook", "event": "ado_webhook_received", "ticket_type": "task", "source": "ado"}
+{"trace_id": "0167037c4380", "ticket_id": "10", "timestamp": "2026-03-26T22:05:00.611536+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
+{"trace_id": "0167037c4380", "ticket_id": "10", "timestamp": "2026-03-26T22:05:05.017400+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 2}
+{"trace_id": "b47c7491beab", "ticket_id": "10", "timestamp": "2026-03-26T22:19:13.023824+00:00", "phase": "webhook", "event": "ado_webhook_received", "ticket_type": "task", "source": "ado"}
+{"trace_id": "adc006e60417", "ticket_id": "10", "timestamp": "2026-03-26T22:19:13.024138+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
+{"trace_id": "adc006e60417", "ticket_id": "10", "timestamp": "2026-03-26T22:19:17.295452+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 2}
+{"trace_id": "36dce4742813", "ticket_id": "10", "timestamp": "2026-03-26T23:03:00.615930+00:00", "phase": "webhook", "event": "ado_webhook_received", "ticket_type": "task", "source": "ado"}
+{"trace_id": "5eac1a619204", "ticket_id": "10", "timestamp": "2026-03-26T23:03:00.616460+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
+{"trace_id": "5eac1a619204", "ticket_id": "10", "timestamp": "2026-03-26T23:03:06.154050+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 2}
+{"trace_id": "1c71ceefd1d9", "ticket_id": "10", "timestamp": "2026-03-27T14:57:34.581718+00:00", "phase": "webhook", "event": "ado_webhook_received", "ticket_type": "task", "source": "ado"}
+{"trace_id": "b33088540e8f", "ticket_id": "10", "timestamp": "2026-03-27T14:57:34.582210+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
+{"trace_id": "b33088540e8f", "ticket_id": "10", "timestamp": "2026-03-27T14:57:40.230896+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "9bbce4a2ee4a", "ticket_id": "10", "timestamp": "2026-03-27T16:31:04.887381+00:00", "phase": "webhook", "event": "ado_webhook_received", "ticket_type": "task", "source": "ado"}
+{"trace_id": "9bbce4a2ee4a", "ticket_id": "10", "timestamp": "2026-03-27T16:31:04.887898+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
+{"trace_id": "9bbce4a2ee4a", "ticket_id": "10", "timestamp": "2026-03-27T16:31:08.804233+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request"}
+{"trace_id": "9bbce4a2ee4a", "ticket_id": "10", "timestamp": "2026-03-27T16:31:08.804751+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 2}
+{"trace_id": "d8d8f38a4d1a", "ticket_id": "10", "timestamp": "2026-03-28T00:24:43.410842+00:00", "phase": "webhook", "event": "ado_webhook_received", "ticket_type": "task", "source": "ado"}
+{"trace_id": "d8d8f38a4d1a", "ticket_id": "10", "timestamp": "2026-03-28T00:24:43.411457+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
+{"trace_id": "d8d8f38a4d1a", "ticket_id": "10", "timestamp": "2026-03-28T00:24:48.105045+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request"}
+{"trace_id": "d8d8f38a4d1a", "ticket_id": "10", "timestamp": "2026-03-28T00:24:48.105592+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 2}
+{"trace_id": "d694a47daf29", "ticket_id": "10", "timestamp": "2026-04-03T14:33:49.676595+00:00", "phase": "webhook", "event": "ado_webhook_received", "ticket_type": "task", "source": "ado"}
+{"trace_id": "d694a47daf29", "ticket_id": "10", "timestamp": "2026-04-03T14:33:49.677013+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
+{"trace_id": "d694a47daf29", "ticket_id": "10", "timestamp": "2026-04-03T14:33:54.408333+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request", "tokens_in": 2613, "tokens_out": 134}
+{"trace_id": "d694a47daf29", "ticket_id": "10", "timestamp": "2026-04-03T14:33:54.408821+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 2}
+{"trace_id": "53913411dfdd", "ticket_id": "10", "timestamp": "2026-04-03T14:34:56.358605+00:00", "phase": "webhook", "event": "ado_webhook_received", "ticket_type": "task", "source": "ado"}
+{"trace_id": "53913411dfdd", "ticket_id": "10", "timestamp": "2026-04-03T14:34:56.358951+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
+{"trace_id": "53913411dfdd", "ticket_id": "10", "timestamp": "2026-04-03T14:35:01.387553+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request", "tokens_in": 2613, "tokens_out": 145}
+{"trace_id": "53913411dfdd", "ticket_id": "10", "timestamp": "2026-04-03T14:35:01.387961+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 2}
+{"trace_id": "92224bc9f618", "ticket_id": "10", "timestamp": "2026-04-03T14:36:09.196460+00:00", "phase": "webhook", "event": "ado_webhook_received", "ticket_type": "task", "source": "ado"}
+{"trace_id": "92224bc9f618", "ticket_id": "10", "timestamp": "2026-04-03T14:36:09.196764+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
+{"trace_id": "92224bc9f618", "ticket_id": "10", "timestamp": "2026-04-03T14:36:14.380489+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request", "tokens_in": 2613, "tokens_out": 124}
+{"trace_id": "92224bc9f618", "ticket_id": "10", "timestamp": "2026-04-03T14:36:14.381106+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 2}
+{"trace_id": "b07a308f62e8", "ticket_id": "10", "timestamp": "2026-04-03T14:43:33.901521+00:00", "phase": "webhook", "event": "ado_webhook_received", "ticket_type": "task", "source": "ado"}
+{"trace_id": "b07a308f62e8", "ticket_id": "10", "timestamp": "2026-04-03T14:43:33.901992+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
+{"trace_id": "b07a308f62e8", "ticket_id": "10", "timestamp": "2026-04-03T14:43:38.866072+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request", "tokens_in": 2613, "tokens_out": 135}
+{"trace_id": "b07a308f62e8", "ticket_id": "10", "timestamp": "2026-04-03T14:43:38.866834+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "5444bb5334bd", "ticket_id": "10", "timestamp": "2026-04-03T14:44:12.156209+00:00", "phase": "webhook", "event": "ado_webhook_received", "ticket_type": "task", "source": "ado"}
+{"trace_id": "5444bb5334bd", "ticket_id": "10", "timestamp": "2026-04-03T14:44:12.156531+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
+{"trace_id": "5444bb5334bd", "ticket_id": "10", "timestamp": "2026-04-03T14:44:24.570460+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request", "tokens_in": 2613, "tokens_out": 383}
+{"trace_id": "5444bb5334bd", "ticket_id": "10", "timestamp": "2026-04-03T14:44:24.571362+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
+{"trace_id": "835552304695", "ticket_id": "10", "timestamp": "2026-04-03T14:45:20.076192+00:00", "phase": "webhook", "event": "ado_webhook_received", "ticket_type": "task", "source": "ado"}
+{"trace_id": "835552304695", "ticket_id": "10", "timestamp": "2026-04-03T14:45:20.076501+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
+{"trace_id": "835552304695", "ticket_id": "10", "timestamp": "2026-04-03T14:45:24.039012+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request", "tokens_in": 2613, "tokens_out": 118}
+{"trace_id": "835552304695", "ticket_id": "10", "timestamp": "2026-04-03T14:45:24.039524+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 2}
+{"trace_id": "309678227b25", "ticket_id": "10", "timestamp": "2026-04-03T16:25:09.993109+00:00", "phase": "webhook", "event": "ado_webhook_received", "ticket_type": "task", "source": "ado"}
+{"trace_id": "309678227b25", "ticket_id": "10", "timestamp": "2026-04-03T16:25:09.993505+00:00", "phase": "pipeline", "event": "processing_started", "ticket_type": "task", "source": "ado"}
+{"trace_id": "309678227b25", "ticket_id": "10", "timestamp": "2026-04-03T16:25:17.875200+00:00", "phase": "analyst", "event": "analyst_completed", "output_type": "info_request", "tokens_in": 2613, "tokens_out": 157}
+{"trace_id": "309678227b25", "ticket_id": "10", "timestamp": "2026-04-03T16:25:17.875659+00:00", "phase": "pipeline", "event": "processing_completed", "status": "info_request", "question_count": 3}
