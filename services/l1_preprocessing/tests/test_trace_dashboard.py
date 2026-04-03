@@ -8,7 +8,8 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from main import app
-from trace_dashboard import _classify_traces, _e as _escape
+from trace_dashboard import _classify_traces
+from trace_dashboard import _e as _escape
 
 
 class TestEscape:
