@@ -26,3 +26,17 @@ Jira label → L1 analyst enriches → L2 agents implement + review + QA → PR 
 | [Operational runbook](docs/operational-runbook.md) | Monitoring, troubleshooting, retest |
 | [Jira automation](docs/jira-automation-setup.md) | Webhook setup with screenshots |
 | [How it works](docs/how-it-works.md) | End-to-end pipeline walkthrough |
+
+## Dashboard
+
+View pipeline history and debug tickets without starting the full service:
+
+```bash
+python scripts/dashboard.py              # http://localhost:8080
+python scripts/dashboard.py --port 8090  # custom port
+```
+
+Three views:
+- **Table** (default) — filterable trace list with phase dots, duration bars, stats
+- **Board** — Kanban columns (In-Flight / Stuck / Completed)
+- **Detail** — click any ticket for L1/L2/L3 span tree with expandable artifacts

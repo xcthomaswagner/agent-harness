@@ -25,6 +25,21 @@ cd <client-repo> && git worktree prune
 
 ## Monitoring
 
+### Trace Dashboard
+
+The primary monitoring tool. No L1 service required — reads directly from trace files.
+
+```bash
+python scripts/dashboard.py --port 8090
+```
+
+Open `http://localhost:8090`:
+- **Table view** (default) — all traces with status, duration, phase dots, filters
+- **Board view** (`?view=board`) — Kanban columns: In-Flight / Stuck / Completed
+- **Detail view** (click any ticket) — L1/L2/L3 span tree with expandable code review, QA matrix, and other artifacts
+
+Auto-refreshes every 10 seconds. Stuck tickets are flagged automatically (>1hr for early stages, >2hr for later stages) with diagnostic hints.
+
 ### Service Health
 ```bash
 curl http://localhost:8000/health  # L1

@@ -64,7 +64,11 @@ Add the `ai-implement` label to any ticket in your Jira project.
 
 Within ~60 seconds: analyst enriches → agent implements → code review → QA → draft PR on GitHub.
 
-Watch it: `tail -f /tmp/l1-service.log`
+Watch it in the dashboard:
+```bash
+python scripts/dashboard.py --port 8090   # http://localhost:8090
+```
+Or via logs: `tail -f /tmp/l1-service.log`
 
 ## What Happens
 
@@ -80,9 +84,10 @@ Jira label → webhook → L1 analyst enriches ticket → comment posted to Jira
 
 | URL | What |
 |-----|------|
-| `http://localhost:8000/health` | Service health check |
-| `http://localhost:8000/traces` | Trace dashboard — all tickets processed |
-| `http://localhost:8000/traces/SCRUM-1` | Detailed trace for one ticket |
+| `http://localhost:8090` | Trace dashboard (standalone) |
+| `http://localhost:8090?view=board` | Kanban board view |
+| `http://localhost:8000/health` | L1 service health check |
+| `http://localhost:8000/traces` | Trace dashboard (via L1 service) |
 | `http://localhost:4040` | ngrok dashboard — incoming webhooks |
 
 ## Quick Commands
