@@ -32,7 +32,7 @@ jobs:
         run: ruff check .
 
       - name: Type check with mypy
-        run: mypy main.py models.py config.py analyst.py pipeline.py autonomy.py conflict_detector.py figma_extractor.py client_profile.py queue_worker.py cross_ticket_coordinator.py adapters/
+        run: mypy main.py models.py config.py analyst.py pipeline.py autonomy.py figma_extractor.py client_profile.py queue_worker.py cross_ticket_coordinator.py url_checker.py trace_dashboard.py tracer.py adapters/
 
       - name: Run tests
         run: pytest tests/ -v --tb=short

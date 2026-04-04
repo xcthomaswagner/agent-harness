@@ -64,8 +64,13 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 explicit_package_bases = true
-mypy_path = "."
+mypy_path = [".", ".."]
 
 [[tool.mypy.overrides]]
-module = ["anthropic.*"]
+module = ["anthropic.*", "structlog.*", "shared.*", "rq", "redis"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["analyst"]
+# PEP 695 generics (def _safe_enum[E]) not yet supported by mypy
+disable_error_code = ["valid-type", "name-defined", "unused-ignore"]

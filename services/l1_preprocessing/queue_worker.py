@@ -86,8 +86,9 @@ def enqueue_ticket(ticket: TicketPayload) -> str | None:
             description=f"Process ticket {ticket.id}",
         )
 
-        logger.info("ticket_enqueued", ticket_id=ticket.id, job_id=job.id)
-        return job.id
+        job_id = str(job.id)
+        logger.info("ticket_enqueued", ticket_id=ticket.id, job_id=job_id)
+        return job_id
 
     except ImportError:
         logger.warning("redis_not_installed")

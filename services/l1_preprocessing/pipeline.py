@@ -446,8 +446,11 @@ class Pipeline:
         await asyncio.sleep(2)
         exit_code = proc.poll()
         if exit_code is not None and exit_code != 0:
-            stderr_out = (proc.stderr.read() or b"").decode(errors="replace")[:1000]
-            proc.stderr.close()
+            stderr_out = ""
+            if proc.stderr:
+                stderr_out = (proc.stderr.read() or b"").decode(errors="replace")[:1000]
+            if proc.stderr:
+                proc.stderr.close()
             log.error("l2_spawn_failed", exit_code=exit_code, stderr=stderr_out)
             tid = trace_id or generate_trace_id()
             append_trace(

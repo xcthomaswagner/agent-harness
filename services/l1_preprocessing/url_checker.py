@@ -56,7 +56,7 @@ async def check_reference_urls() -> None:
     total = sum(len(urls) for urls in url_map.values())
     logger.info("url_check_started", profiles=list(url_map.keys()), total_urls=total)
 
-    results: list[dict] = []
+    results: list[dict[str, str | int]] = []
     broken = 0
     redirected = 0
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import html
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
@@ -132,10 +133,10 @@ def _fmt_ts(ts: str) -> str:
 # --- Trace List (Table View) ---
 
 
-def _render_trace_table(traces: list[dict], total: int, page: int, per_page: int) -> str:
+def _render_trace_table(traces: list[dict[str, Any]], total: int, page: int, per_page: int) -> str:
     """Render the Langfuse-style trace list table."""
     # Enrich each trace with phase dots (use cached entries from list_traces)
-    enriched: list[dict] = []
+    enriched: list[dict[str, Any]] = []
     for t in traces:
         entries = t.pop("_raw_entries", None) or read_trace(t["ticket_id"])
         enriched.append(build_trace_list_row(t, entries))
@@ -324,8 +325,8 @@ tbody tr:last-child td {{ border-bottom:none }}
 
 
 def _render_span_row(
-    entry: dict, icon_type: str, duration: float | None = None,
-    indent: int = 0, artifacts: list[dict] | None = None,
+    entry: dict[str, Any], icon_type: str, duration: float | None = None,
+    indent: int = 0, artifacts: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render a single span row in the tree."""
     phase = entry.get("phase", "")
@@ -521,7 +522,7 @@ def _render_detail(ticket_id: str) -> str:
         )
 
     # --- Span tree sections ---
-    def _section(title: str, icon_type: str, color: str, nodes: list, default_open: bool = True) -> str:
+    def _section(title: str, icon_type: str, color: str, nodes: list[dict[str, Any]], default_open: bool = True) -> str:
         if not nodes:
             return ""
         count = len(nodes)
@@ -609,12 +610,12 @@ def _render_detail(ticket_id: str) -> str:
 
 
 def _classify_traces(
-    traces: list[dict],
-) -> tuple[list[dict], list[dict], list[dict]]:
+    traces: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Split traces into in-flight, completed, and stuck/failed buckets."""
-    in_flight: list[dict] = []
-    completed: list[dict] = []
-    stuck: list[dict] = []
+    in_flight: list[dict[str, Any]] = []
+    completed: list[dict[str, Any]] = []
+    stuck: list[dict[str, Any]] = []
     now = datetime.now(UTC)
 
     for t in traces:
@@ -641,7 +642,7 @@ def _classify_traces(
     return in_flight, completed, stuck
 
 
-def _render_board_column(title: str, color: str, traces: list[dict], count: int) -> str:
+def _render_board_column(title: str, color: str, traces: list[dict[str, Any]], count: int) -> str:
     """Render a single Kanban column."""
     cards = ""
     for t in traces:
@@ -695,7 +696,7 @@ def _render_board_column(title: str, color: str, traces: list[dict], count: int)
     )
 
 
-def _render_board(traces: list[dict], total: int) -> str:
+def _render_board(traces: list[dict[str, Any]], total: int) -> str:
     """Render Kanban board view."""
     in_flight, completed, stuck = _classify_traces(traces)
     board = (
@@ -773,6 +774,6 @@ async def traces_api(
 
 
 @router.get("/api/traces/{ticket_id}", response_model=None)
-async def trace_api(ticket_id: str) -> list[dict[str, object]]:
+async def trace_api(ticket_id: str) -> list[dict[str, Any]]:
     """JSON API for a single trace."""
     return read_trace(ticket_id)
