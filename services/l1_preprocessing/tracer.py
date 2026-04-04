@@ -604,12 +604,19 @@ def build_trace_list_row(
             phase_dots.append({"phase": phase, "color": color})
 
     # Duration percentage (relative to 30-minute baseline)
+    # Duration format: "Nm Ss" or "Ss" (from _format_duration)
     duration_pct = 0
     duration = trace_summary.get("duration", "")
     if duration and duration != ">24h (multi-run)":
         try:
-            parts = duration.replace("s", "").split("m ")
-            total_secs = int(parts[0]) * 60 + (int(parts[1]) if len(parts) > 1 else 0)
+            total_secs = 0
+            if "m " in duration:
+                # "5m 30s" → minutes + seconds
+                m_part, s_part = duration.split("m ")
+                total_secs = int(m_part) * 60 + int(s_part.rstrip("s"))
+            elif duration.endswith("s"):
+                # "30s" → seconds only
+                total_secs = int(duration.rstrip("s"))
             duration_pct = min(100, int((total_secs / 1800) * 100))  # 30 min = 100%
         except (ValueError, IndexError):
             pass

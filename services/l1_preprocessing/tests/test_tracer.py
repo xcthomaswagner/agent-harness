@@ -631,6 +631,12 @@ class TestBuildTraceListRow:
         row = build_trace_list_row(summary, [])
         assert row["duration_color"] == "#124D49"
 
+    def test_duration_seconds_only_not_inflated(self) -> None:
+        """'30s' should be 30 seconds (1.7%), not 30 minutes (100%)."""
+        summary = {"duration": "30s"}
+        row = build_trace_list_row(summary, [])
+        assert row["duration_pct"] < 5  # 30s / 1800s = 1.7%
+
     def test_duration_color_red_for_long(self) -> None:
         summary = {"duration": ">24h (multi-run)"}
         row = build_trace_list_row(summary, [])

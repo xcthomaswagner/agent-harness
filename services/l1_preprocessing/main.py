@@ -322,6 +322,11 @@ async def retest(payload: RetestPayload, background_tasks: BackgroundTasks) -> d
     worktrees_parent = (Path(client_repo).parent / "worktrees").resolve()
     if not str(worktree_resolved).startswith(str(worktrees_parent)):
         raise HTTPException(status_code=400, detail="Branch resolves outside worktree directory")
+    if not Path(worktree_dir).exists():
+        return {
+            "status": "error",
+            "detail": f"Worktree not found for branch '{branch}'. Run the ticket first.",
+        }
 
     log = logger.bind(ticket_id=payload.ticket_id, phase=payload.phase)
     log.info("retest_requested", branch=branch)
