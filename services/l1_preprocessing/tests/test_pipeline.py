@@ -141,6 +141,39 @@ class TestRouteEnriched:
         assert result["status"] == "enriched"
         mock_jira.write_comment.assert_not_called()
 
+    async def test_enriched_writes_edge_cases_without_ac(
+        self,
+        pipeline: Pipeline,
+        mock_analyst: AsyncMock,
+        mock_jira: AsyncMock,
+        sample_ticket: TicketPayload,
+    ) -> None:
+        """Edge cases alone (no generated AC) should still trigger a comment."""
+        enriched = EnrichedTicket(
+            **sample_ticket.model_dump(),
+            generated_acceptance_criteria=[],
+            edge_cases=["Empty input crashes", "Unicode in name field"],
+            size_assessment=SizeAssessment(
+                classification=SizeClassification.SMALL,
+                estimated_units=1,
+                recommended_dev_count=1,
+            ),
+        )
+        mock_analyst.analyze.return_value = enriched
+
+        with patch("pipeline.subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.poll.return_value = None
+            mock_popen.return_value = mock_proc
+            await pipeline.process(sample_ticket)
+
+        mock_jira.write_comment.assert_called_once()
+        comment = mock_jira.write_comment.call_args[0][1]
+        assert "Edge Cases" in comment
+        assert "Empty input crashes" in comment
+        # Should NOT have "Acceptance Criteria" section
+        assert "Acceptance Criteria" not in comment
+
     async def test_enriched_skips_jira_when_no_callback(
         self,
         pipeline: Pipeline,

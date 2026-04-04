@@ -166,9 +166,13 @@ class SessionSpawner:
         return text.replace("</ci_failure_logs>", "&lt;/ci_failure_logs&gt;")
 
     def spawn_comment_response(
-        self, pr_number: int, comment_body: str, comment_author: str
+        self, pr_number: int, comment_body: str, comment_author: str,
+        branch: str = "", repo: str = "",
     ) -> bool:
         """Spawn a session to respond to a human review comment."""
+        if branch:
+            log = logger.bind(pr_number=pr_number, session_type="comment-response")
+            self._ensure_branch_current(branch, log, expected_repo=repo)
         safe_body = self._sanitize_user_content(comment_body[:3000])
         prompt = (
             f"Human reviewer @{comment_author} commented on PR #{pr_number}:\n\n"

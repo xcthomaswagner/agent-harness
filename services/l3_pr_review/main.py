@@ -262,10 +262,15 @@ async def _handle_review_comment(payload: dict[str, Any]) -> None:
                      "comment_response_spawned", pr_number=pr_number,
                      author=comment_author)
 
+    pr = payload.get("pull_request", {})
+    branch = pr.get("head", {}).get("ref", "")
+    repo = payload.get("repository", {}).get("full_name", "")
     _get_spawner().spawn_comment_response(
         pr_number=pr_number,
         comment_body=comment_body,
         comment_author=comment_author,
+        branch=branch,
+        repo=repo,
     )
 
 
@@ -289,10 +294,14 @@ async def _handle_review_changes_requested(payload: dict[str, Any]) -> None:
                      "changes_requested_spawned", pr_number=pr_number,
                      reviewer=reviewer)
 
+    branch = pr.get("head", {}).get("ref", "")
+    repo = payload.get("repository", {}).get("full_name", "")
     _get_spawner().spawn_comment_response(
         pr_number=pr_number,
         comment_body=f"Changes requested by @{reviewer}:\n\n{review_body}",
         comment_author=reviewer,
+        branch=branch,
+        repo=repo,
     )
 
 
