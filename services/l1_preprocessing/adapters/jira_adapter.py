@@ -108,13 +108,15 @@ class JiraAdapter:
         # Assignee
         assignee = (fields.get("assignee", {}) or {}).get("emailAddress", "")
 
-        # Callback config for write-back
-        callback = CallbackConfig(
-            base_url=self._settings.jira_base_url,
-            ticket_id=key,
-            source=TicketSource.JIRA,
-            auth_token=self._settings.jira_api_token,
-        )
+        # Callback config for write-back (skip if no base URL configured)
+        callback = None
+        if self._settings.jira_base_url:
+            callback = CallbackConfig(
+                base_url=self._settings.jira_base_url,
+                ticket_id=key,
+                source=TicketSource.JIRA,
+                auth_token=self._settings.jira_api_token,
+            )
 
         return TicketPayload(
             source=TicketSource.JIRA,
