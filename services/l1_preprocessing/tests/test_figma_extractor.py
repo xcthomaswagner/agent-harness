@@ -37,6 +37,13 @@ class TestDetectFigmaLinks:
         assert len(links) == 1
         assert links[0]["file_key"] == "def456"
 
+    def test_hyphenated_file_key(self) -> None:
+        """Figma file keys can contain hyphens — ensure full key is captured."""
+        text = "https://figma.com/file/abc-def-123/My-Design"
+        links = detect_figma_links(text)
+        assert len(links) == 1
+        assert links[0]["file_key"] == "abc-def-123"
+
     def test_no_figma_link(self) -> None:
         text = "No design link here, just a regular ticket description."
         assert detect_figma_links(text) == []
@@ -336,7 +343,8 @@ class TestFrameRendering:
         ]
         assert len(image_calls) == 1
         call_url = str(image_calls[0])
-        assert "1:10" in call_url
+        # Node IDs are URL-encoded (1:10 → 1%3A10)
+        assert "1%3A10" in call_url
 
 
 class TestGetRenderableFrameIds:
@@ -399,3 +407,35 @@ class TestRenderedFramesToAttachments:
         )
         atts = rendered_frames_to_attachments(spec)
         assert len(atts) == 0
+
+
+class TestFetchWithRetry:
+    """Tests for Figma API 429 rate limit retry logic."""
+
+    async def test_retries_on_429(self) -> None:
+        client = AsyncMock(spec=httpx.AsyncClient)
+        req = httpx.Request("GET", "https://api.figma.com/v1/test")
+        resp_429 = httpx.Response(429, headers={"Retry-After": "0"},
+                                  request=req)
+        resp_200 = httpx.Response(200, json={"ok": True}, request=req)
+        client.get.side_effect = [resp_429, resp_200]
+
+        extractor = FigmaExtractor(api_token="tok", client=client)
+        result = await extractor._fetch_with_retry("/v1/test", "test")
+        assert result is not None
+        assert result.status_code == 200
+        assert client.get.call_count == 2
+
+    async def test_gives_up_after_max_retries(self) -> None:
+        client = AsyncMock(spec=httpx.AsyncClient)
+        req = httpx.Request("GET", "https://api.figma.com/v1/test")
+        resp_429 = httpx.Response(429, headers={"Retry-After": "0"},
+                                  request=req)
+        client.get.return_value = resp_429
+
+        extractor = FigmaExtractor(api_token="tok", client=client)
+        result = await extractor._fetch_with_retry(
+            "/v1/test", "test", max_retries=1
+        )
+        assert result is None
+        assert client.get.call_count == 2  # initial + 1 retry

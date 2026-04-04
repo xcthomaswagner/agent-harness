@@ -233,7 +233,9 @@ class FigmaExtractor:
         dest = Path(dest_dir)
         dest.mkdir(parents=True, exist_ok=True)
 
-        ids_param = ",".join(fid for fid, _ in frame_ids)
+        from urllib.parse import quote
+
+        ids_param = ",".join(quote(fid, safe="") for fid, _ in frame_ids)
         response = await self._client.get(
             f"/v1/images/{file_key}?ids={ids_param}"
             f"&format=png&scale=2"

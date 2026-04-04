@@ -396,6 +396,7 @@ async def github_webhook_proxy(request: Request) -> dict[str, str]:
                     if k.lower() in (
                         "content-type", "x-github-event",
                         "x-hub-signature-256", "x-github-delivery",
+                        "user-agent",
                     )
                 },
                 timeout=30.0,
