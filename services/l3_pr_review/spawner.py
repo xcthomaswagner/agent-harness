@@ -151,7 +151,7 @@ class SessionSpawner:
             f"[description of what was fixed]\n\n"
             f"---\n"
             f'{BOT_COMMENT_MARKER}"\n\n'
-            f"<ci_failure_logs>\n{failure_logs[:3000]}\n</ci_failure_logs>"
+            f"<ci_failure_logs>\n{self._sanitize_ci_logs(failure_logs[:3000])}\n</ci_failure_logs>"
         )
         return self._spawn("ci-fix", prompt, model="sonnet", pr_number=pr_number)
 
@@ -159,6 +159,11 @@ class SessionSpawner:
     def _sanitize_user_content(text: str) -> str:
         """Escape XML-like closing tags to prevent prompt injection."""
         return text.replace("</user_provided_content>", "&lt;/user_provided_content&gt;")
+
+    @staticmethod
+    def _sanitize_ci_logs(text: str) -> str:
+        """Escape CI log closing tag to prevent prompt injection."""
+        return text.replace("</ci_failure_logs>", "&lt;/ci_failure_logs&gt;")
 
     def spawn_comment_response(
         self, pr_number: int, comment_body: str, comment_author: str

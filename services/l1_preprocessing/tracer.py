@@ -510,6 +510,11 @@ def _build_summary(
             summary["pr_url"] = str(e["pr_url"])
         if e.get("pipeline_mode"):
             summary["pipeline_mode"] = str(e["pipeline_mode"])
+        # Pick up review/QA from any entry, prefer "Pipeline complete" if present
+        if e.get("review_verdict"):
+            summary["review_verdict"] = str(e["review_verdict"])
+        if e.get("qa_result"):
+            summary["qa_result"] = str(e["qa_result"])
         if e.get("event") == "Pipeline complete":
             summary["review_verdict"] = str(e.get("review_verdict", ""))
             summary["qa_result"] = str(e.get("qa_result", ""))

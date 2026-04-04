@@ -132,6 +132,12 @@ def main() -> None:
 
     subprocess.run(inject_args, check=True)
 
+    # Verify injection created CLAUDE.md (critical for agent operation)
+    claude_md = worktree_dir / "CLAUDE.md"
+    if not claude_md.exists():
+        print(f"[spawn] ERROR: CLAUDE.md not found at {claude_md} after injection")
+        sys.exit(1)
+
     # --- Step 3: Write ticket, mode, and copy attachments ---
     shutil.copy2(ticket_json, worktree_dir / ".harness" / "ticket.json")
     (worktree_dir / ".harness" / "pipeline-mode").write_text(pipeline_mode)
