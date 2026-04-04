@@ -14,6 +14,7 @@ class EventType(StrEnum):
     """Classified PR event types."""
 
     PR_OPENED = "pr_opened"
+    PR_SYNCHRONIZE = "pr_synchronize"  # New commits pushed to existing PR
     PR_READY_FOR_REVIEW = "pr_ready_for_review"
     CI_FAILED = "ci_failed"
     CI_PASSED = "ci_passed"
@@ -43,8 +44,8 @@ def classify_event(headers: dict[str, str], payload: dict[str, Any]) -> EventTyp
         if action == "ready_for_review":
             return EventType.PR_READY_FOR_REVIEW
         if action == "synchronize":
-            # New commits pushed to an open PR — triggers re-review
-            return EventType.PR_OPENED
+            # New commits pushed to an open PR — distinct from initial open
+            return EventType.PR_SYNCHRONIZE
         return EventType.IGNORED
 
     # Check suite / check run events (CI)

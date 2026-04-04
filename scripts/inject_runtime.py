@@ -53,6 +53,9 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
             else:
                 print(f"[inject] WARNING: Client skill '{skill_name}' exists — prefixing with 'harness-'")
                 target_skill = skills_dest / f"harness-{skill_name}"
+                # Clean stale prefixed dir from previous injection
+                if target_skill.exists():
+                    shutil.rmtree(target_skill)
 
         shutil.copytree(skill_dir, target_skill, dirs_exist_ok=True)
         # Mark as harness-injected for clean re-injection
@@ -111,17 +114,24 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
 
         print(f"[inject] Platform profile: {platform_profile}")
 
-    # --- Step 4: Merge CLAUDE.md ---
+    # --- Step 4: Merge CLAUDE.md (idempotent — skip if already injected) ---
     harness_claude = RUNTIME_DIR / "harness-CLAUDE.md"
     target_claude = target_dir / "CLAUDE.md"
+    harness_marker = "<!-- harness-injected -->"
 
     if target_claude.exists():
-        with target_claude.open("a") as f:
-            f.write("\n\n---\n\n")
-            f.write(harness_claude.read_text())
-        print("[inject] Harness instructions appended to existing CLAUDE.md")
+        existing = target_claude.read_text()
+        if harness_marker in existing:
+            print("[inject] CLAUDE.md already contains harness instructions — skipping")
+        else:
+            with target_claude.open("a") as f:
+                f.write(f"\n\n---\n{harness_marker}\n\n")
+                f.write(harness_claude.read_text())
+            print("[inject] Harness instructions appended to existing CLAUDE.md")
     else:
-        shutil.copy2(harness_claude, target_claude)
+        with target_claude.open("w") as f:
+            f.write(f"{harness_marker}\n\n")
+            f.write(harness_claude.read_text())
         print("[inject] CLAUDE.md created (harness only, no client conventions)")
 
     # --- Step 5: Generate .mcp.json ---

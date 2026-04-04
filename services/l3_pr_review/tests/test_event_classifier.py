@@ -14,11 +14,11 @@ class TestPullRequestEvents:
         payload = {"action": "ready_for_review"}
         assert classify_event(headers, payload) == EventType.PR_READY_FOR_REVIEW
 
-    def test_pr_synchronize_triggers_review(self) -> None:
-        """New commits pushed to open PR should trigger re-review."""
+    def test_pr_synchronize_distinct_from_opened(self) -> None:
+        """New commits pushed to open PR classified as PR_SYNCHRONIZE, not PR_OPENED."""
         headers = {"x-github-event": "pull_request"}
         payload = {"action": "synchronize"}
-        assert classify_event(headers, payload) == EventType.PR_OPENED
+        assert classify_event(headers, payload) == EventType.PR_SYNCHRONIZE
 
     def test_pr_closed_ignored(self) -> None:
         headers = {"x-github-event": "pull_request"}

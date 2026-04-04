@@ -265,8 +265,8 @@ async def test_manual_process_enqueues_background_task() -> None:
 # --- HMAC edge cases ---
 
 
-async def test_jira_webhook_rejects_signature_without_prefix() -> None:
-    """A raw hex signature (no sha256= prefix) should still be validated correctly."""
+async def test_jira_webhook_accepts_signature_without_prefix() -> None:
+    """A raw hex signature (no sha256= prefix) is accepted via removeprefix fallback."""
     payload = json.loads((FIXTURES / "jira_webhook_story.json").read_text())
     body = json.dumps(payload).encode()
     secret = "test-secret-456"

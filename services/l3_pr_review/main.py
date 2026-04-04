@@ -361,6 +361,7 @@ async def _handle_ci_passed(payload: dict[str, Any]) -> None:
 # Route map
 _HANDLERS: dict[EventType, Any] = {
     EventType.PR_OPENED: _handle_pr_opened,
+    EventType.PR_SYNCHRONIZE: _handle_pr_opened,  # Re-review on new commits
     EventType.PR_READY_FOR_REVIEW: _handle_pr_opened,
     EventType.CI_FAILED: _handle_ci_failed,
     EventType.CI_PASSED: _handle_ci_passed,
