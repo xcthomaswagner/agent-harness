@@ -94,6 +94,8 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
                     f.write(f"\n\n---\n# Platform Supplement: {platform_profile}\n\n")
                     f.write(supplement.read_text())
                 print(f"[inject] Platform supplement: {supplement.name} -> {target_skill_name}")
+            else:
+                print(f"[inject] WARNING: SKILL.md not found in {target_skill_name} — skipping {supplement.name}")
 
         # Copy CONVENTIONS.md if it exists
         conventions = profile_dir / "CONVENTIONS.md"

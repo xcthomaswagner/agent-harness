@@ -126,9 +126,13 @@ class TestBuildUserPrompt:
             title="Minimal ticket",
         )
         prompt = analyst._build_user_prompt(ticket)
-        assert "Attachments" not in prompt
-        assert "Linked Issues" not in prompt
-        assert "Labels" not in prompt
+        # _build_user_prompt returns str or list[dict] — normalize for assertion
+        prompt_text = prompt if isinstance(prompt, str) else "\n".join(
+            b.get("text", "") for b in prompt if isinstance(b, dict)
+        )
+        assert "Attachments" not in prompt_text
+        assert "Linked Issues" not in prompt_text
+        assert "Labels" not in prompt_text
 
 
 # --- JSON extraction ---

@@ -10,7 +10,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # --- Enums ---
 
@@ -86,10 +86,19 @@ class LinkedItem(BaseModel):
 class CallbackConfig(BaseModel):
     """Configuration for writing back to the source ticket system."""
 
-    base_url: str = Field(pattern=r"^https?://")
+    base_url: str
     ticket_id: str
     source: TicketSource
     auth_token: str = Field(default="", repr=False)  # Never logged
+
+    @field_validator("base_url")
+    @classmethod
+    def _normalize_base_url(cls, v: str) -> str:
+        """Ensure base_url has an https:// scheme."""
+        v = v.strip()
+        if v and not v.startswith(("http://", "https://")):
+            v = f"https://{v}"
+        return v
 
 
 class TestScenario(BaseModel):

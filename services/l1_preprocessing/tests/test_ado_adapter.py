@@ -98,6 +98,17 @@ class TestNormalize:
         assert ticket.callback.source == TicketSource.ADO
         assert ticket.callback.ticket_id == "42"
 
+    def test_callback_url_normalized(self, adapter: AdoAdapter) -> None:
+        """CallbackConfig should auto-prefix https:// if missing."""
+        from models import CallbackConfig, TicketSource
+
+        cb = CallbackConfig(
+            base_url="dev.azure.com/org",
+            ticket_id="1",
+            source=TicketSource.ADO,
+        )
+        assert cb.base_url == "https://dev.azure.com/org"
+
     def test_callback_ticket_id_is_numeric_only(self, adapter: AdoAdapter) -> None:
         """Callback ticket_id should be the numeric work item ID, not the composite."""
         payload = load_fixture("ado_webhook_story.json")
