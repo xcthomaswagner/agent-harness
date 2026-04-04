@@ -98,6 +98,14 @@ class TestNormalize:
         assert ticket.callback.source == TicketSource.ADO
         assert ticket.callback.ticket_id == "42"
 
+    def test_callback_ticket_id_is_numeric_only(self, adapter: AdoAdapter) -> None:
+        """Callback ticket_id should be the numeric work item ID, not the composite."""
+        payload = load_fixture("ado_webhook_story.json")
+        ticket = adapter.normalize(payload)
+        assert ticket.callback is not None
+        # Should be numeric only, no project prefix
+        assert ticket.callback.ticket_id.isdigit()
+
     def test_description_html_stripped(self, adapter: AdoAdapter) -> None:
         payload = load_fixture("ado_webhook_story.json")
         ticket = adapter.normalize(payload)

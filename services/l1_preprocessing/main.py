@@ -449,7 +449,11 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
 
     # Consolidate worktree artifacts into the persistent trace
     worktree_path = f"{settings.default_client_repo}/../worktrees/{payload.branch}"
-    consolidate_worktree_logs(payload.ticket_id, trace_id, worktree_path)
+    try:
+        consolidate_worktree_logs(payload.ticket_id, trace_id, worktree_path)
+    except Exception:
+        log.exception("worktree_consolidation_failed", worktree=worktree_path)
+        # Continue — don't block Jira updates because consolidation failed
 
     adapter = _get_jira_adapter()
 

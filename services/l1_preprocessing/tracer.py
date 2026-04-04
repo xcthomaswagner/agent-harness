@@ -68,6 +68,8 @@ def read_trace(ticket_id: str) -> list[dict[str, Any]]:
 
 def count_traces() -> int:
     """Count total number of trace files."""
+    if not LOGS_DIR.exists():
+        return 0
     return sum(1 for _ in LOGS_DIR.glob("*.jsonl"))
 
 
@@ -79,6 +81,8 @@ def list_traces(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
         limit: Maximum traces to return (default 50, 0 = all).
     """
     traces: list[dict[str, Any]] = []
+    if not LOGS_DIR.exists():
+        return traces
     all_paths = sorted(LOGS_DIR.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
 
     end = offset + limit if limit else len(all_paths)

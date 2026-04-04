@@ -34,3 +34,20 @@ class TestSettings:
             s = Settings(_env_file=None)  # type: ignore[call-arg]
         assert s.anthropic_api_key == "test-key-123"
         assert s.log_level == "DEBUG"
+
+    def test_all_secret_fields_in_sanitize_list(self) -> None:
+        """Every Settings field with 'key', 'token', 'secret', or 'pat' in
+        its name should be stripped from agent environments."""
+        import sys
+        sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
+        from shared.env_sanitize import SECRET_VARS
+
+        secret_keywords = {"key", "token", "secret", "pat"}
+        settings_fields = Settings.model_fields
+        missing = []
+        for field_name in settings_fields:
+            env_name = field_name.upper()
+            has_secret_keyword = any(kw in field_name.lower() for kw in secret_keywords)
+            if has_secret_keyword and env_name not in SECRET_VARS:
+                missing.append(env_name)
+        assert not missing, f"Secret fields missing from SECRET_VARS: {missing}"
