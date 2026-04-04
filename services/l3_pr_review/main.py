@@ -102,9 +102,9 @@ def _lookup_trace_id(ticket_id: str) -> str:
     for entry in reversed(entries):
         ev = entry.get("event", "")
         if "agent_finished" in ev or "Pipeline complete" in ev:
-            return entry.get("trace_id", generate_trace_id())
+            return str(entry.get("trace_id", generate_trace_id()))
     if entries:
-        return entries[-1].get("trace_id", generate_trace_id())
+        return str(entries[-1].get("trace_id", generate_trace_id()))
     # No trace exists — L3 event will start a new trace chain
     logger.warning("trace_id_lookup_miss", ticket_id=ticket_id,
                    hint="No existing trace found; L3 event will have a new trace ID")

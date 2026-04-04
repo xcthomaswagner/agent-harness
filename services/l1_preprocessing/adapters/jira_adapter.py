@@ -191,7 +191,7 @@ class JiraAdapter:
         if node_type == "rule":
             return "---\n"
         if node_type == "mention":
-            return "@" + node.get("attrs", {}).get("text", joined)
+            return "@" + str(node.get("attrs", {}).get("text", joined))
         if node_type in ("table", "tableRow"):
             return joined + "\n"
         if node_type == "tableCell":
@@ -206,7 +206,7 @@ class JiraAdapter:
         if node_type == "status":
             return f"[{node.get('attrs', {}).get('text', joined)}]"
         if node_type == "date":
-            return node.get("attrs", {}).get("timestamp", joined)
+            return str(node.get("attrs", {}).get("timestamp", joined))
         if node_type in ("media", "mediaGroup", "mediaSingle"):
             return "[attachment]\n"
 

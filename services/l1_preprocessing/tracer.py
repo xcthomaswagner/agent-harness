@@ -253,7 +253,7 @@ def extract_escalation_reason(entries: list[dict[str, Any]]) -> str:
     """
     for entry in entries:
         if entry.get("event") == "escalation_artifact":
-            content = entry.get("content", "")
+            content = str(entry.get("content", ""))
             for line in content.splitlines():
                 line = line.strip()
                 if line and not line.startswith("#"):

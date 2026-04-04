@@ -46,8 +46,8 @@ ignore = ["N999"]
 python_version = "3.12"
 strict = true
 explicit_package_bases = true
-mypy_path = "."
+mypy_path = [".", "../l1_preprocessing", ".."]
 
 [[tool.mypy.overrides]]
-module = ["structlog.*"]
+module = ["structlog.*", "shared.*", "tracer"]
 ignore_missing_imports = true
