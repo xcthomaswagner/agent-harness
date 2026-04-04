@@ -18,11 +18,11 @@ from pathlib import Path
 L1_DIR = Path(__file__).resolve().parents[1] / "services" / "l1_preprocessing"
 sys.path.insert(0, str(L1_DIR))
 
-import uvicorn
-from fastapi import FastAPI
-from fastapi.responses import RedirectResponse
+import uvicorn  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from fastapi.responses import RedirectResponse  # noqa: E402
 
-from trace_dashboard import router as dashboard_router
+from trace_dashboard import router as dashboard_router  # noqa: E402
 
 app = FastAPI(
     title="Agent Harness — Trace Dashboard",
