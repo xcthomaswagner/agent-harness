@@ -9,9 +9,9 @@ A multi-agent orchestration system that transforms Jira/Azure DevOps tickets int
 
 ## Architecture (Three Layers)
 
-- **L1 Pre-Processing** (`services/l1_preprocessing/`): FastAPI webhook service. Receives Jira/ADO webhooks, normalizes tickets, downloads image attachments, runs a Ticket Analyst (Claude Opus API call with vision support) to enrich and evaluate completeness. Supports design input via both attached images (PNG/JPEG/GIF/WebP) and Figma URLs.
+- **L1 Pre-Processing** (`services/l1_preprocessing/`): FastAPI webhook service. Receives Jira webhooks (ADO intake normalization exists but write-back is Jira-only), normalizes tickets, downloads image attachments, runs a Ticket Analyst (Claude Opus API call with vision support) to enrich and evaluate completeness. Supports design input via both attached images (PNG/JPEG/GIF/WebP) and Figma URLs.
 - **L2 Agent Team Execution** (`runtime/`): Claude Code Agent Teams. Specialized teammates (planner, reviewer, judge, devs, QA, merge coordinator) collaborate on implementation in parallel worktrees. Judge validates code review findings to filter false positives before developer fix cycles.
-- **L3 PR Review & Feedback** (`services/l3_pr_review/`): GitHub/ADO webhook service. AI PR review, CI failure auto-fix, human review comment routing.
+- **L3 PR Review & Feedback** (`services/l3_pr_review/`): GitHub webhook service. AI PR review, CI failure auto-fix, human review comment routing. (ADO PR webhooks not yet implemented.)
 
 See `docs/Agentic_Developer_Harness_Architecture_Plan_V2.md` for the full architecture specification.
 

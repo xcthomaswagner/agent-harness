@@ -43,7 +43,8 @@ class TestSpawnCiFix:
     def test_spawns_with_sonnet_model(self) -> None:
         spawner = SessionSpawner(repo_path="/tmp/repo")
 
-        with patch("spawner.subprocess.Popen") as mock_popen:
+        with patch("spawner.subprocess.Popen") as mock_popen, \
+             patch("spawner.subprocess.run"):
             result = spawner.spawn_ci_fix(
                 pr_number=42, branch="ai/PROJ-123", failure_logs="Error: test failed"
             )
@@ -58,7 +59,8 @@ class TestSpawnCiFix:
         spawner = SessionSpawner(repo_path="/tmp/repo")
         long_logs = "E" * 10000
 
-        with patch("spawner.subprocess.Popen") as mock_popen:
+        with patch("spawner.subprocess.Popen") as mock_popen, \
+             patch("spawner.subprocess.run"):
             spawner.spawn_ci_fix(pr_number=1, branch="main", failure_logs=long_logs)
 
         cmd = mock_popen.call_args[0][0]

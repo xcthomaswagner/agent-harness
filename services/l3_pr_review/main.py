@@ -126,10 +126,12 @@ async def _handle_pr_opened(payload: dict[str, Any]) -> None:
         append_trace(ticket_id, _lookup_trace_id(ticket_id), "l3_pr_review",
                      "pr_review_spawned", pr_number=pr_number)
 
+    branch = pr.get("head", {}).get("ref", "")
     _get_spawner().spawn_pr_review(
         pr_number=pr_number,
         pr_diff=f"Diff available at: {pr_diff_url}",
         ticket_context=pr_body,
+        branch=branch,
     )
 
 

@@ -8,7 +8,7 @@
 
 ## 1. Pipeline Phase Ordering
 
-The pipeline phase order is fixed. No agent can skip, reorder, or bypass phases.
+The pipeline phase order is defined in `harness-CLAUDE.md` and followed by the team lead agent via prompt instructions. **This is a behavioral constraint, not a technical enforcement** — the team lead has the tools to deviate but is instructed not to.
 
 ### Simple Pipeline (single unit)
 ```
@@ -58,22 +58,24 @@ Every agent session has a hard timeout enforced by the spawner. Stuck agents are
 
 ---
 
-## 4. Tool Restrictions by Agent Role
+## 4. Role Separation (Behavioral, Not Sandboxed)
 
-Each agent has enforced tool access. These are not suggestions — they are tool-level restrictions that produce fundamentally different cognitive behavior.
+Agent roles are defined by prompt instructions, not tool-level restrictions. **All agents in a Claude Code session share the same tool access** (Read, Write, Edit, Bash, etc.) because the Claude Code Agent Teams architecture does not support per-agent tool restrictions. Sessions run with `--dangerously-skip-permissions` because they are headless (no human to approve tool calls).
 
-| Role | Can Read Code | Can Write Code | Can Run Commands | Can Spawn Agents | Special Access |
-|------|:---:|:---:|:---:|:---:|---|
-| **Team Lead** | Yes | **No** | Yes | **Yes** | Orchestration only — must delegate all work |
-| **Planner** | Yes | **No** | Yes (read-only) | No | Writes to `.harness/plans/` only |
-| **Plan Reviewer** | Yes | **No** | No | No | Writes corrected plans only |
-| **Developer** | Yes | **Yes** | Yes | No | Restricted to assigned unit files |
-| **Code Reviewer** | Yes | **No** | Yes (lint/coverage) | No | Cannot modify source files |
-| **Judge** | Yes | **No** | Yes (git blame) | No | Scoring only — no code changes |
-| **QA** | Yes | **No** | Yes (test runners) | No | agent-browser + Playwright MCP |
-| **Merge Coordinator** | Yes | **Yes** (merge only) | Yes (git) | No | Git merge operations only |
+Role separation works through **behavioral instructions** in agent definition files and skill prompts:
 
-**Key principle:** The Code Reviewer, Judge, and QA agent cannot write code. This separation ensures review quality — a reviewer who can also fix code is incentivized to fix rather than flag.
+| Role | Instructed Behavior | Actual Tool Access |
+|------|--------------------|--------------------|
+| **Team Lead** | "Do not implement code yourself — spawn sub-agents" | Full (Write, Edit, Bash, Agent) |
+| **Planner** | "Write plans only, do not implement" | Full |
+| **Code Reviewer** | "You are read-only — do not modify code" | Full |
+| **Judge** | "Score findings only — no code changes" | Full |
+| **QA** | "Validate and report — do not fix issues" | Full |
+| **Developer** | "Implement assigned units" | Full |
+
+**In practice, Claude follows these role instructions reliably.** But they are not technically enforced — a sufficiently confused agent could deviate. The simple pipeline mode intentionally has a single agent that implements directly (no role separation).
+
+**Key principle:** The Code Reviewer, Judge, and QA agent are *instructed* not to write code. This behavioral separation ensures review quality — a reviewer who is told it can also fix code is incentivized to fix rather than flag.
 
 ---
 
@@ -118,7 +120,7 @@ Each agent has enforced tool access. These are not suggestions — they are tool
 
 ## 8. Behavioral Prohibitions
 
-Hard "never do this" rules enforced by convention and skill files:
+"Never do this" rules enforced by **prompt instructions** in skill files and harness-CLAUDE.md. These are behavioral expectations that Claude follows reliably but are not technically sandboxed:
 
 | Prohibition | Why | Source |
 |------------|-----|--------|

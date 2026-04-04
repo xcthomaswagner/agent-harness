@@ -20,7 +20,6 @@ from adapters.jira_adapter import JiraAdapter
 from analyst import TicketAnalyst
 from client_profile import ClientProfile, find_profile_by_project_key, load_profile
 from config import Settings
-from conflict_detector import ConflictDetector
 from figma_extractor import (
     FigmaExtractor,
     detect_figma_links,
@@ -49,13 +48,11 @@ class Pipeline:
         settings: Settings,
         analyst: TicketAnalyst | None = None,
         jira_adapter: JiraAdapter | None = None,
-        conflict_detector: ConflictDetector | None = None,
         figma_extractor: FigmaExtractor | None = None,
     ) -> None:
         self._settings = settings
         self._analyst = analyst or TicketAnalyst(settings=settings)
         self._jira_adapter = jira_adapter or JiraAdapter(settings=settings)
-        self._conflict_detector = conflict_detector or ConflictDetector()
         self._figma_extractor = figma_extractor or FigmaExtractor(
             api_token=settings.figma_api_token
         )
@@ -167,19 +164,6 @@ class Pipeline:
         )
         return ticket
 
-    async def _check_and_warn_conflicts(
-        self, enriched: EnrichedTicket, adapter: JiraAdapter, log: Any
-    ) -> list[Any]:
-        """Check for conflicts with in-progress tickets and post warning if found."""
-        conflicts = self._conflict_detector.check_conflicts(
-            enriched.id, [f.name for f in (enriched.test_scenarios or [])]
-        )
-        if conflicts and enriched.callback:
-            warning = self._conflict_detector.format_warning(enriched.id, conflicts)
-            await adapter.write_comment(enriched.id, warning)
-            log.warning("conflict_warning_posted", conflicts=len(conflicts))
-        return conflicts or []
-
     async def _extract_figma_if_needed(
         self, enriched: EnrichedTicket, log: Any
     ) -> None:
@@ -232,7 +216,6 @@ class Pipeline:
         adapter = self._get_adapter(enriched)
         profile = self._load_client_profile(enriched)
 
-        conflicts = await self._check_and_warn_conflicts(enriched, adapter, log)
         await self._extract_figma_if_needed(enriched, log)
         self._resolve_platform_profile(enriched, profile, log)
 
@@ -264,11 +247,6 @@ class Pipeline:
         ticket_path = self._write_ticket_json(enriched)
         pipeline_mode = "quick" if "ai-quick" in enriched.labels else "multi"
 
-        affected_files = [enriched.title] if enriched.size_assessment else []
-        self._conflict_detector.register(
-            enriched.id, enriched.title, affected_files, f"ai/{enriched.id}"
-        )
-
         client_repo = (
             (profile.client_repo_path if profile else "")
             or self._settings.default_client_repo
@@ -283,7 +261,6 @@ class Pipeline:
 
         append_trace(enriched.id, tid, "pipeline", "l2_dispatched",
                      pipeline_mode=pipeline_mode, spawn_triggered=spawn_result,
-                     conflicts=len(conflicts),
                      figma_extracted=enriched.figma_design_spec is not None,
                      platform_profile=enriched.platform_profile or "none")
 
@@ -293,7 +270,6 @@ class Pipeline:
             "generated_ac_count": len(enriched.generated_acceptance_criteria),
             "test_scenario_count": len(enriched.test_scenarios),
             "spawn_triggered": spawn_result,
-            "conflicts": len(conflicts),
             "figma_extracted": enriched.figma_design_spec is not None,
         }
 

@@ -8,7 +8,7 @@ import sys
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import structlog
 
@@ -30,14 +30,40 @@ class SessionSpawner:
     def __init__(self, repo_path: str = "") -> None:
         self._repo_path = repo_path
 
+    def _ensure_branch_current(self, branch: str, log: Any) -> None:
+        """Fetch and checkout the PR branch so the agent works on current code."""
+        cwd = self._repo_path or os.getenv("CLIENT_REPO_PATH", "")
+        if not cwd or not branch:
+            return
+        try:
+            subprocess.run(
+                ["git", "fetch", "origin", branch],
+                cwd=cwd, capture_output=True, timeout=30,
+            )
+            subprocess.run(
+                ["git", "checkout", branch],
+                cwd=cwd, capture_output=True, timeout=15,
+            )
+            subprocess.run(
+                ["git", "pull", "--ff-only", "origin", branch],
+                cwd=cwd, capture_output=True, timeout=30,
+            )
+            log.info("branch_synced", branch=branch)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            log.warning("branch_sync_failed", branch=branch, error=str(exc)[:200])
+
     def spawn_pr_review(
-        self, pr_number: int, pr_diff: str, ticket_context: str
+        self, pr_number: int, pr_diff: str, ticket_context: str,
+        branch: str = "",
     ) -> bool:
         """Spawn an Opus session for AI PR review.
 
         The session reads the diff, evaluates architecture and security,
         and posts a review directly to the GitHub PR via gh CLI.
         """
+        log = logger.bind(pr_number=pr_number, session_type="pr-review")
+        if branch:
+            self._ensure_branch_current(branch, log)
         prompt = (
             f"You are an AI architecture reviewer for PR #{pr_number}.\n\n"
             f"1. Run: git diff main...HEAD\n"
@@ -75,6 +101,8 @@ class SessionSpawner:
         self, pr_number: int, branch: str, failure_logs: str
     ) -> bool:
         """Spawn a Sonnet session to fix CI failures."""
+        log = logger.bind(pr_number=pr_number, session_type="ci-fix")
+        self._ensure_branch_current(branch, log)
         prompt = (
             f"CI failed on PR #{pr_number}, branch {branch}.\n\n"
             f"1. Read the failure logs below\n"

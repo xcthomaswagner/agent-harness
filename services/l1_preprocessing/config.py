@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # Webhook
     webhook_secret: str = ""
 
+    # Internal API auth (protects /api/* endpoints)
+    api_key: str = ""  # Set to require X-API-Key header on control-plane endpoints
+
     # Figma (optional — extraction skipped if empty)
     figma_api_token: str = ""
 

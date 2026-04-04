@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 import structlog
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -28,6 +28,18 @@ from trace_dashboard import router as trace_router
 from tracer import append_trace, consolidate_worktree_logs, generate_trace_id
 
 logger = structlog.get_logger()
+
+
+def _require_api_key(x_api_key: str | None = Header(default=None)) -> None:
+    """Dependency that enforces API key auth on internal control-plane endpoints.
+
+    Skipped when API_KEY is not configured (local dev mode).
+    """
+    if not settings.api_key:
+        return  # No key configured — open access (local dev)
+    if not x_api_key or x_api_key != settings.api_key:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
+
 
 app = FastAPI(
     title="Agentic Harness L1 Pre-Processing",
@@ -227,7 +239,7 @@ async def ado_webhook(
     return {"status": "accepted", "ticket_id": ticket.id, "dispatch": dispatch}
 
 
-@app.post("/api/process-ticket", status_code=202)
+@app.post("/api/process-ticket", status_code=202, dependencies=[Depends(_require_api_key)])
 async def manual_process_ticket(
     ticket: TicketPayload,
     background_tasks: BackgroundTasks,
@@ -255,7 +267,7 @@ class RetestPayload(BaseModel):
     branch: str = ""  # defaults to ai/<ticket-id>
 
 
-@app.post("/api/retest", status_code=202)
+@app.post("/api/retest", status_code=202, dependencies=[Depends(_require_api_key)])
 async def retest(payload: RetestPayload, background_tasks: BackgroundTasks) -> dict[str, str]:
     """Re-run a specific phase on an existing branch.
 
@@ -384,7 +396,7 @@ class CompletionPayload(BaseModel):
     failed_units: list[FailedUnit] = []
 
 
-@app.post("/api/agent-complete", status_code=200)
+@app.post("/api/agent-complete", status_code=200, dependencies=[Depends(_require_api_key)])
 async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
     """Called by the spawn script when the agent finishes.
 
@@ -444,11 +456,6 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
                 )
                 await adapter.write_comment(payload.ticket_id, sub_comment)
                 log.info("failed_unit_reported", unit_id=unit.unit_id)
-
-        # Unregister from conflict detection
-        from conflict_detector import ConflictDetector
-
-        ConflictDetector().unregister(payload.ticket_id)
 
     except Exception:
         log.exception("completion_update_failed")

@@ -1,6 +1,6 @@
 # Agentic Developer Harness — Architecture Plan
 
-**Jira / Azure DevOps to Pull Request**
+**Jira to Pull Request** (Azure DevOps: intake normalization only, write-back not yet implemented)
 **Autonomous Multi-Agent Pipeline with Claude Code Agent Teams**
 
 XCentium GenAI Practice | March 2026 | V2 — Confidential
