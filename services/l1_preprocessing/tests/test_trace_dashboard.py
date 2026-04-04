@@ -132,7 +132,8 @@ class TestTracesListEndpoint:
                 transport=transport, base_url="http://test"
             ) as client:
                 resp = await client.get("/traces")
-        assert 'http-equiv="refresh"' in resp.text
+        # Table view uses JS setInterval for soft refresh (preserves scroll/filters)
+        assert "setInterval" in resp.text
 
     async def test_filter_bar_present(self, mock_traces: list) -> None:
         with (

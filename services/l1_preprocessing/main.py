@@ -180,9 +180,15 @@ async def _process_ticket(ticket: TicketPayload, trace_id: str = "") -> None:
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    """Health check endpoint."""
-    return {"status": "ok"}
+async def health() -> dict[str, object]:
+    """Health check with configuration status."""
+    return {
+        "status": "ok",
+        "anthropic_api_key": bool(settings.anthropic_api_key),
+        "jira_configured": bool(settings.jira_base_url and settings.jira_api_token),
+        "webhook_secret": bool(settings.webhook_secret),
+        "client_repo": bool(settings.default_client_repo),
+    }
 
 
 async def _validate_and_parse_webhook(

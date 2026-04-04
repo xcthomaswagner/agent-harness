@@ -147,7 +147,7 @@ def _render_trace_table(traces: list[dict], total: int, page: int, per_page: int
 
     # Stats bar
     stats = (
-        f'<div style="display:flex;gap:16px;margin-bottom:16px;padding:10px 16px;'
+        f'<div data-stats style="display:flex;gap:16px;margin-bottom:16px;padding:10px 16px;'
         f'background:#F7F9FB;border:1px solid #E2E8F0;border-radius:8px">'
         f'<div style="display:flex;align-items:baseline;gap:6px">'
         f'<span style="font-size:17.6px;font-weight:600">{total}</span>'
@@ -255,9 +255,27 @@ function filterTable() {
 }
 </script>"""
 
+    # Soft auto-refresh: fetch new HTML and replace tbody without losing scroll/filters
+    auto_refresh_js = """
+<script>
+setInterval(function() {
+  fetch(location.href).then(function(r) { return r.text(); }).then(function(html) {
+    var parser = new DOMParser();
+    var doc = parser.parseFromString(html, 'text/html');
+    var newBody = doc.querySelector('tbody');
+    var newStats = doc.querySelector('[data-stats]');
+    if (newBody) document.querySelector('tbody').innerHTML = newBody.innerHTML;
+    if (newStats) {
+      var cur = document.querySelector('[data-stats]');
+      if (cur) cur.innerHTML = newStats.innerHTML;
+    }
+    filterTable();
+  }).catch(function() {});
+}, 10000);
+</script>"""
+
     return f"""<!DOCTYPE html><html><head>
 <title>Traces</title>
-<meta http-equiv="refresh" content="10">
 <style>{_LANGFUSE_STYLES}
 table {{ width:100%;border-collapse:separate;border-spacing:0;border:1px solid #E2E8F0;border-radius:8px;overflow:hidden }}
 thead th {{ background:#F7F9FB;color:#64748B;font-weight:500;font-size:11.2px;text-align:left;padding:10px 12px;border-bottom:1px solid #E2E8F0;white-space:nowrap }}
@@ -298,6 +316,7 @@ tbody tr:last-child td {{ border-bottom:none }}
   </div>
 </div>
 {filter_js}
+{auto_refresh_js}
 </div></body></html>"""
 
 
