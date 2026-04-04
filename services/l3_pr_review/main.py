@@ -315,22 +315,34 @@ async def _handle_review_approved(payload: dict[str, Any]) -> None:
             ticket_type = label
             break
 
-    # Notify L1 of the approval for autonomy tracking
-    try:
-        import httpx
+    # Notify L1 of the approval for autonomy tracking (retry once on failure)
+    l1_url = os.getenv("L1_SERVICE_URL", "http://localhost:8000")
+    completion_json = {
+        "ticket_id": branch.replace("ai/", ""),
+        "status": "complete",
+        "pr_url": pr.get("html_url", ""),
+        "branch": branch,
+    }
+    for attempt in range(2):
+        try:
+            import httpx
 
-        await httpx.AsyncClient().post(
-            "http://localhost:8000/api/agent-complete",
-            json={
-                "ticket_id": branch.replace("ai/", ""),
-                "status": "complete",
-                "pr_url": pr.get("html_url", ""),
-                "branch": branch,
-            },
-            timeout=10.0,
-        )
-    except Exception:
-        log.warning("l1_notification_failed")
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{l1_url}/api/agent-complete",
+                    json=completion_json,
+                    timeout=10.0,
+                )
+                resp.raise_for_status()
+            break
+        except Exception:
+            if attempt == 0:
+                log.warning("l1_notification_failed_retrying")
+                import asyncio
+                await asyncio.sleep(2)
+            else:
+                log.error("l1_notification_failed", url=l1_url,
+                          ticket_id=completion_json["ticket_id"])
 
     # TODO: Check autonomy.should_auto_merge() and merge if appropriate
     # For now, just log the approval

@@ -12,9 +12,9 @@ You are the **Team Lead** of an Agent Team. You orchestrate specialist sub-agent
 
 ## Pipeline Selection
 
-Read the enriched ticket at `.harness/ticket.json`. Check `size_assessment.estimated_units` and note the `base_branch` field (defaults to `main` if absent):
+Read the enriched ticket at `.harness/ticket.json`. Check `size_assessment.estimated_units` (if `size_assessment` is null or absent, default to 1):
 
-- **Single unit (estimated_units == 1):** Use the Simple Pipeline
+- **Single unit (estimated_units == 1 or missing):** Use the Simple Pipeline
 - **Multiple units (estimated_units > 1):** Use the Full Pipeline
 
 ## Simple Pipeline (Single Unit)

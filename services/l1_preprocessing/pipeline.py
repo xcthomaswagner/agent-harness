@@ -234,13 +234,15 @@ class Pipeline:
                     error_message=str(exc)[:500],
                 )
 
-        if enriched.callback and enriched.generated_acceptance_criteria:
-            ac_text = "\n".join(f"- {ac}" for ac in enriched.generated_acceptance_criteria)
-            comment = (
-                f"*AI Analyst — Generated Acceptance Criteria:*\n\n{ac_text}"
-                f"\n\n*Edge Cases:*\n"
-                + "\n".join(f"- {ec}" for ec in enriched.edge_cases)
-            )
+        if enriched.callback and (enriched.generated_acceptance_criteria or enriched.edge_cases):
+            parts = []
+            if enriched.generated_acceptance_criteria:
+                ac_text = "\n".join(f"- {ac}" for ac in enriched.generated_acceptance_criteria)
+                parts.append(f"*AI Analyst — Generated Acceptance Criteria:*\n\n{ac_text}")
+            if enriched.edge_cases:
+                ec_text = "\n".join(f"- {ec}" for ec in enriched.edge_cases)
+                parts.append(f"*Edge Cases:*\n{ec_text}")
+            comment = "\n\n".join(parts)
             await adapter.write_comment(enriched.id, comment)
             log.info("enrichment_written_to_jira")
 
