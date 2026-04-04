@@ -205,9 +205,12 @@ async def _validate_and_parse_webhook(
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     try:
-        return json.loads(body)
+        payload = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise HTTPException(status_code=422, detail=f"Invalid JSON body: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Webhook payload must be a JSON object")
+    return payload
 
 
 @app.post("/webhooks/jira", status_code=202)

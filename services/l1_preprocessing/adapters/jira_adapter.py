@@ -39,7 +39,7 @@ class JiraAdapter:
     def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
         self._settings = settings
         self._client = client or httpx.AsyncClient(
-            base_url=settings.jira_base_url,
+            base_url=settings.jira_base_url.rstrip("/"),
             headers=self._auth_headers(settings),
             timeout=30.0,
         )

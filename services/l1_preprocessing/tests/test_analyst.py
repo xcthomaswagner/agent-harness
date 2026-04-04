@@ -58,13 +58,20 @@ def sample_ticket() -> TicketPayload:
     )
 
 
+class _UsageSpec:
+    """Spec for Anthropic usage object — prevents auto-creating wrong attributes."""
+
+    input_tokens: int
+    output_tokens: int
+
+
 def _mock_response(text: str) -> MagicMock:
     """Create a mock Anthropic API response."""
     text_block = MagicMock()
     text_block.type = "text"
     text_block.text = text
 
-    usage = MagicMock()
+    usage = MagicMock(spec=_UsageSpec)
     usage.input_tokens = 1000
     usage.output_tokens = 500
 
