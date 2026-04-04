@@ -157,13 +157,21 @@ class SessionSpawner:
 
     @staticmethod
     def _sanitize_user_content(text: str) -> str:
-        """Escape XML-like closing tags to prevent prompt injection."""
-        return text.replace("</user_provided_content>", "&lt;/user_provided_content&gt;")
+        """Escape XML-like closing tags to prevent prompt injection (case-insensitive)."""
+        import re
+        return re.sub(
+            r"</user_provided_content>", "&lt;/user_provided_content&gt;",
+            text, flags=re.IGNORECASE,
+        )
 
     @staticmethod
     def _sanitize_ci_logs(text: str) -> str:
-        """Escape CI log closing tag to prevent prompt injection."""
-        return text.replace("</ci_failure_logs>", "&lt;/ci_failure_logs&gt;")
+        """Escape CI log closing tag to prevent prompt injection (case-insensitive)."""
+        import re
+        return re.sub(
+            r"</ci_failure_logs>", "&lt;/ci_failure_logs&gt;",
+            text, flags=re.IGNORECASE,
+        )
 
     def spawn_comment_response(
         self, pr_number: int, comment_body: str, comment_author: str,

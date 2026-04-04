@@ -94,9 +94,11 @@ class CallbackConfig(BaseModel):
     @field_validator("base_url")
     @classmethod
     def _normalize_base_url(cls, v: str) -> str:
-        """Ensure base_url has an https:// scheme."""
+        """Ensure base_url has an https:// scheme. Reject empty URLs."""
         v = v.strip()
-        if v and not v.startswith(("http://", "https://")):
+        if not v:
+            raise ValueError("base_url cannot be empty")
+        if not v.startswith(("http://", "https://")):
             v = f"https://{v}"
         return v
 
