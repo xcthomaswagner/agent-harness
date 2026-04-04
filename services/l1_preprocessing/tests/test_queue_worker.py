@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from models import TicketPayload, TicketSource, TicketType
 from queue_worker import enqueue_ticket, process_ticket_sync
 

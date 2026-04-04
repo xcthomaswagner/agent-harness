@@ -170,7 +170,7 @@ class TestStatusBoardBucketing:
         return {"status": status, "started_at": ts, "run_started_at": ts}
 
     def test_completed_bucket(self) -> None:
-        in_f, comp, stuck = _classify_traces([self._trace("Complete")])
+        _, comp, _ = _classify_traces([self._trace("Complete")])
         assert len(comp) == 1
 
     def test_escalated_goes_to_stuck(self) -> None:
@@ -180,11 +180,11 @@ class TestStatusBoardBucketing:
     def test_dispatched_recent_is_in_flight(self) -> None:
         from datetime import UTC, datetime
         now = datetime.now(UTC).isoformat()
-        in_f, _, stuck = _classify_traces([self._trace("Dispatched", now)])
+        in_f, _, _ = _classify_traces([self._trace("Dispatched", now)])
         assert len(in_f) == 1
 
     def test_dispatched_old_is_stuck(self) -> None:
-        in_f, _, stuck = _classify_traces(
+        _, _, stuck = _classify_traces(
             [self._trace("Dispatched", "2025-01-01T00:00:00Z")]
         )
         assert len(stuck) == 1
@@ -196,7 +196,7 @@ class TestStatusBoardBucketing:
         assert len(in_f) == 1
 
     def test_implementing_old_is_stuck(self) -> None:
-        in_f, _, stuck = _classify_traces(
+        _, _, stuck = _classify_traces(
             [self._trace("Implementing", "2025-01-01T00:00:00Z")]
         )
         assert len(stuck) == 1
