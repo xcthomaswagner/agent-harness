@@ -183,7 +183,8 @@ class TicketAnalyst:
             try:
                 image_data = base64.b64encode(path.read_bytes()).decode()
                 # Map content_type to Anthropic's expected media_type
-                media_type = att.content_type.lower()
+                # Strip parameters (e.g., "image/jpeg; charset=utf-8" → "image/jpeg")
+                media_type = att.content_type.lower().split(";")[0].strip()
                 blocks.append({
                     "type": "image",
                     "source": {

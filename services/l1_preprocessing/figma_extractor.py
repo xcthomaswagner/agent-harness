@@ -386,7 +386,10 @@ class FigmaExtractor:
             weight = style.get("fontWeight", "")
             if font and size:
                 key = name or f"text-{len(typography)}"
-                typography[key] = f"{font} {size}px {weight}".strip()
+                parts = [font, f"{size}px"]
+                if weight:
+                    parts.append(str(weight))
+                typography[key] = " ".join(parts)
 
         # Recurse into children
         for child in node.get("children", []):

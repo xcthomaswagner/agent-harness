@@ -280,6 +280,61 @@ class TestAdfHandling:
         assert "- Bullet" in result
 
 
+    def test_adf_code_block(self) -> None:
+        adf = {
+            "type": "doc", "version": 1,
+            "content": [{
+                "type": "codeBlock",
+                "attrs": {"language": "python"},
+                "content": [{"type": "text", "text": "print('hello')"}],
+            }],
+        }
+        result = JiraAdapter._extract_text(adf)
+        assert "```python" in result
+        assert "print('hello')" in result
+
+    def test_adf_blockquote(self) -> None:
+        adf = {
+            "type": "doc", "version": 1,
+            "content": [{
+                "type": "blockquote",
+                "content": [{
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": "Quoted text"}],
+                }],
+            }],
+        }
+        result = JiraAdapter._extract_text(adf)
+        assert "> " in result
+        assert "Quoted text" in result
+
+    def test_adf_mention(self) -> None:
+        adf = {
+            "type": "doc", "version": 1,
+            "content": [{
+                "type": "paragraph",
+                "content": [
+                    {"type": "text", "text": "Assigned to "},
+                    {"type": "mention", "attrs": {"text": "jdoe"}},
+                ],
+            }],
+        }
+        result = JiraAdapter._extract_text(adf)
+        assert "@jdoe" in result
+
+    def test_adf_rule(self) -> None:
+        adf = {
+            "type": "doc", "version": 1,
+            "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "Above"}]},
+                {"type": "rule"},
+                {"type": "paragraph", "content": [{"type": "text", "text": "Below"}]},
+            ],
+        }
+        result = JiraAdapter._extract_text(adf)
+        assert "---" in result
+
+
 # --- Write-back operations ---
 
 

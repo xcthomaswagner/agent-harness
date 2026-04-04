@@ -394,7 +394,11 @@ class JiraAdapter:
 
                 # Check Content-Length before downloading full body
                 content_length = response.headers.get("content-length")
-                if content_length and int(content_length) > MAX_IMAGE_ATTACHMENT_BYTES:
+                try:
+                    cl_size = int(content_length) if content_length else 0
+                except ValueError:
+                    cl_size = 0  # Malformed header — fall through to streaming check
+                if cl_size > MAX_IMAGE_ATTACHMENT_BYTES:
                     log.warning(
                         "attachment_too_large",
                         size=content_length,
