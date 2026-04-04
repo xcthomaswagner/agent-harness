@@ -165,9 +165,9 @@ class AutonomyEngine:
         total_human_issues = sum(o.human_issues_found for o in windowed)
         total_ai_issues = sum(o.ai_issues_found for o in windowed)
         catch_rate = (
-            total_ai_issues / total_human_issues
+            min(1.0, total_ai_issues / total_human_issues)
             if total_human_issues > 0
-            else 1.0  # If humans found nothing, AI caught "everything"
+            else 0.0  # No human baseline — metric is unreliable, don't inflate
         )
 
         first_pass_rate = first_pass / total if total > 0 else 0.0

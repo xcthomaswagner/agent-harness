@@ -89,6 +89,21 @@ class TestRecommendMode:
         assert metrics["recommended_mode"] == "full_autonomous"
 
 
+    def test_catch_rate_zero_when_no_human_baseline(self, tmp_path: Path) -> None:
+        """When humans find 0 issues, catch rate should be 0 (unreliable), not 1.0."""
+        engine = AutonomyEngine(metrics_path=tmp_path / "metrics.json")
+        for i in range(25):
+            engine.record_outcome(PROutcome(
+                ticket_id=f"T-{i}", pr_url=f"https://pr/{i}", ticket_type="story",
+                created_at=_now_iso(), first_pass_accepted=True, merged=True,
+                human_issues_found=0, ai_issues_found=3,
+            ))
+        metrics = engine.get_metrics()
+        assert metrics["self_review_catch_rate"] == 0.0
+        # Without human baseline, should NOT recommend full_autonomous
+        assert metrics["recommended_mode"] != "full_autonomous"
+
+
 class TestShouldAutoMerge:
     def test_conservative_never_auto_merges(self, tmp_path: Path) -> None:
         engine = AutonomyEngine(metrics_path=tmp_path / "metrics.json")

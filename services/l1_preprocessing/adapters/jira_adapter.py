@@ -220,15 +220,25 @@ class JiraAdapter:
         body = {"body": {"type": "doc", "version": 1, "content": [
             {"type": "paragraph", "content": [{"type": "text", "text": comment}]}
         ]}}
-        response = await self._client.post(url, json=body)
-        response.raise_for_status()
+        try:
+            response = await self._client.post(url, json=body)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error("jira_comment_failed", ticket_id=ticket_id,
+                         status=exc.response.status_code)
+            raise
         logger.info("jira_comment_posted", ticket_id=ticket_id)
 
     async def update_fields(self, ticket_id: str, fields: dict[str, Any]) -> None:
         """Update fields on a Jira ticket."""
         url = f"/rest/api/3/issue/{ticket_id}"
-        response = await self._client.put(url, json={"fields": fields})
-        response.raise_for_status()
+        try:
+            response = await self._client.put(url, json={"fields": fields})
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error("jira_update_fields_failed", ticket_id=ticket_id,
+                         status=exc.response.status_code, fields=list(fields.keys()))
+            raise
         logger.info("jira_fields_updated", ticket_id=ticket_id, fields=list(fields.keys()))
 
     async def transition_status(self, ticket_id: str, target_status: str) -> None:
@@ -267,8 +277,13 @@ class JiraAdapter:
         """Add a label to a Jira ticket."""
         url = f"/rest/api/3/issue/{ticket_id}"
         body = {"update": {"labels": [{"add": label}]}}
-        response = await self._client.put(url, json=body)
-        response.raise_for_status()
+        try:
+            response = await self._client.put(url, json=body)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error("jira_add_label_failed", ticket_id=ticket_id,
+                         label=label, status=exc.response.status_code)
+            raise
         logger.info("jira_label_added", ticket_id=ticket_id, label=label)
 
     # --- Attachment upload ---

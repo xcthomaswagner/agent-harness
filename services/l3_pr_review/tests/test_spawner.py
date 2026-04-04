@@ -26,17 +26,18 @@ class TestSpawnPrReview:
         # PR review uses opus — no --model flag means default (opus)
         assert "--model" not in cmd
 
-    def test_truncates_diff_to_2000_chars(self) -> None:
+    def test_truncates_diff_to_1500_chars(self) -> None:
         spawner = SessionSpawner(repo_path="/tmp/repo")
-        long_diff = "x" * 5000
+        marker = "\u00b6"  # Pilcrow — won't appear in prompt template
+        long_diff = marker * 5000
 
         with patch("spawner.subprocess.Popen") as mock_popen:
             spawner.spawn_pr_review(pr_number=1, pr_diff=long_diff, ticket_context="")
 
         cmd = mock_popen.call_args[0][0]
         prompt = cmd[cmd.index("-p") + 1]
-        # The diff portion should be truncated
-        assert len(prompt) < 5000
+        # Diff is truncated to 1500 chars via [:1500] in spawner
+        assert prompt.count(marker) == 1500
 
 
 class TestSpawnCiFix:
