@@ -86,7 +86,7 @@ class LinkedItem(BaseModel):
 class CallbackConfig(BaseModel):
     """Configuration for writing back to the source ticket system."""
 
-    base_url: str
+    base_url: str = Field(pattern=r"^https?://")
     ticket_id: str
     source: TicketSource
     auth_token: str = Field(default="", repr=False)  # Never logged

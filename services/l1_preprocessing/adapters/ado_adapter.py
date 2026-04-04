@@ -210,11 +210,22 @@ class AdoAdapter:
 
     # --- Write-back operations ---
 
+    @staticmethod
+    def _parse_ticket_id(ticket_id: str) -> tuple[str, str]:
+        """Extract (project, work_item_id) from composite ticket ID.
+
+        Raises ValueError if the ID has no project prefix (no dash).
+        """
+        if "-" not in ticket_id:
+            raise ValueError(
+                f"Invalid ADO ticket ID '{ticket_id}': expected 'PROJECT-123' format"
+            )
+        project, wi_id = ticket_id.rsplit("-", 1)
+        return project, wi_id
+
     async def write_comment(self, ticket_id: str, comment: str) -> None:
         """Post a comment on an ADO work item."""
-        # ADO uses work item ID (numeric), extract from our composite ID
-        wi_id = ticket_id.rsplit("-", 1)[-1] if "-" in ticket_id else ticket_id
-        project = ticket_id.rsplit("-", 1)[0] if "-" in ticket_id else ""
+        project, wi_id = self._parse_ticket_id(ticket_id)
 
         url = f"/{project}/_apis/wit/workItems/{wi_id}/comments?api-version=7.1-preview.4"
         body = {"text": comment}
@@ -226,8 +237,7 @@ class AdoAdapter:
 
     async def update_fields(self, ticket_id: str, fields: dict[str, str]) -> None:
         """Update fields on an ADO work item using JSON Patch."""
-        wi_id = ticket_id.rsplit("-", 1)[-1] if "-" in ticket_id else ticket_id
-        project = ticket_id.rsplit("-", 1)[0] if "-" in ticket_id else ""
+        project, wi_id = self._parse_ticket_id(ticket_id)
 
         url = f"/{project}/_apis/wit/workItems/{wi_id}?api-version=7.1"
         patch_ops = [
@@ -245,8 +255,7 @@ class AdoAdapter:
 
     async def add_label(self, ticket_id: str, label: str) -> None:
         """Add a tag to an ADO work item."""
-        wi_id = ticket_id.rsplit("-", 1)[-1] if "-" in ticket_id else ticket_id
-        project = ticket_id.rsplit("-", 1)[0] if "-" in ticket_id else ""
+        project, wi_id = self._parse_ticket_id(ticket_id)
 
         # First, get current tags
         url = f"/{project}/_apis/wit/workItems/{wi_id}?api-version=7.1&$select=System.Tags"

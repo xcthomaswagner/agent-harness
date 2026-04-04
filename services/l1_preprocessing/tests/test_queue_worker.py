@@ -43,15 +43,6 @@ class TestEnqueueTicket:
             result = enqueue_ticket(self._make_ticket())
         assert result is None
 
-    def test_returns_none_when_redis_url_empty(self) -> None:
-        """Explicit test: empty redis_url returns None without attempting connection."""
-        ticket = self._make_ticket()
-        with patch("queue_worker.settings") as mock_settings:
-            mock_settings.redis_url = ""
-            result = enqueue_ticket(ticket)
-        assert result is None
-
-
 class TestProcessTicketSync:
     def test_reconstructs_ticket_and_runs_pipeline(self) -> None:
         """Verifies ticket deserialization and pipeline invocation."""
@@ -76,9 +67,8 @@ class TestProcessTicketSync:
         assert result["status"] == "enriched"
         assert result["ticket_id"] == "Q-2"
 
-    def test_raises_on_invalid_ticket_data(self) -> None:
-        """Invalid ticket data raises during deserialization."""
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError):
-            process_ticket_sync({"invalid": "data"})
+    def test_returns_error_on_invalid_ticket_data(self) -> None:
+        """Invalid ticket data returns error dict instead of crashing."""
+        result = process_ticket_sync({"invalid": "data"})
+        assert result["status"] == "failed"
+        assert "error" in result

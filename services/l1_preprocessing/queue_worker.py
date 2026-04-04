@@ -37,17 +37,28 @@ def process_ticket_sync(ticket_data: dict[str, Any]) -> dict[str, Any]:
     RQ workers run in a separate process, so we need to reconstruct
     the ticket and pipeline from the serialized data.
     """
-    ticket = TicketPayload(**ticket_data)
-    log = logger.bind(ticket_id=ticket.id, source=ticket.source)
-    log.info("queue_worker_processing_ticket")
+    ticket_id = ticket_data.get("id", "unknown")
+    try:
+        ticket = TicketPayload(**ticket_data)
+        log = logger.bind(ticket_id=ticket.id, source=ticket.source)
+        log.info("queue_worker_processing_ticket")
 
-    pipeline = Pipeline(settings=settings)
+        pipeline = Pipeline(settings=settings)
 
-    # RQ workers are synchronous — run the async pipeline in an event loop
-    result = asyncio.run(pipeline.process(ticket))
+        # RQ workers are synchronous — run the async pipeline in an event loop
+        result = asyncio.run(pipeline.process(ticket))
 
-    log.info("queue_worker_completed", **result)
-    return result
+        log.info("queue_worker_completed", **result)
+        return result
+    except Exception as exc:
+        logger.error(
+            "queue_worker_failed",
+            ticket_id=ticket_id,
+            error_type=type(exc).__name__,
+            error=str(exc)[:500],
+            exc_info=True,
+        )
+        return {"status": "failed", "ticket_id": ticket_id, "error": str(exc)[:500]}
 
 
 def enqueue_ticket(ticket: TicketPayload) -> str | None:
