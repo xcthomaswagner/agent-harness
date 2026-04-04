@@ -23,6 +23,7 @@ SECRET_VARS: frozenset[str] = frozenset({
     "REDIS_URL",
     "GITHUB_TOKEN",       # Operator's token — agents use AGENT_GH_TOKEN instead
     "AGENT_GH_TOKEN",     # Raw agent token — injected as GH_TOKEN below
+    "API_KEY",            # L1 control-plane auth — must not leak to agents
 })
 
 

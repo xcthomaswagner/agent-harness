@@ -234,12 +234,30 @@ def main() -> None:
     else:
         status = "escalated"
 
+    # Extract failed/blocked units from pipeline log
+    failed_units = []
+    if pipeline_jsonl.exists() and status in ("partial", "escalated"):
+        for line in pipeline_jsonl.read_text().splitlines():
+            try:
+                entry = json.loads(line)
+                ev = entry.get("event", "")
+                if "blocked" in ev.lower() or "failed" in ev.lower():
+                    unit_id = entry.get("unit", entry.get("unit_id", ev))
+                    failed_units.append({
+                        "unit_id": str(unit_id),
+                        "description": entry.get("event", ""),
+                        "failure_reason": entry.get("reason", entry.get("error", "Unknown")),
+                    })
+            except json.JSONDecodeError:
+                continue
+
     l1_url = os.environ.get("L1_SERVICE_URL", "http://localhost:8000")
-    completion_data = {
+    completion_data: dict[str, object] = {
         "ticket_id": ticket_id,
         "status": status,
         "pr_url": pr_url,
         "branch": branch_name,
+        "failed_units": failed_units,
     }
 
     print(f"[spawn] Notifying L1: ticket={ticket_id} status={status} pr={pr_url}")
