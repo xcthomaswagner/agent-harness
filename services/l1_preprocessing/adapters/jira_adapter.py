@@ -175,7 +175,10 @@ class JiraAdapter:
         if node_type in ("bulletList", "orderedList"):
             return joined + "\n"
         if node_type == "heading":
-            level = int(node.get("attrs", {}).get("level", 1))
+            try:
+                level = int(node.get("attrs", {}).get("level", 1))
+            except (ValueError, TypeError):
+                level = 1
             return "#" * level + " " + joined + "\n"
 
         return joined

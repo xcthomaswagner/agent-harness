@@ -74,7 +74,11 @@ def load_profile(name: str, profiles_dir: Path | None = None) -> ClientProfile |
         logger.warning("client_profile_not_found", name=name, path=str(path))
         return None
 
-    data = yaml.safe_load(path.read_text())
+    try:
+        data = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as exc:
+        logger.warning("client_profile_parse_error", name=name, error=str(exc)[:200])
+        return None
     if not isinstance(data, dict):
         logger.warning("client_profile_invalid", name=name, reason="YAML is not a dict")
         return None
@@ -97,7 +101,10 @@ def find_profile_by_project_key(
     for path in sorted(directory.glob("*.yaml")):
         if path.stem == "schema":
             continue
-        data = yaml.safe_load(path.read_text())
+        try:
+            data = yaml.safe_load(path.read_text())
+        except yaml.YAMLError:
+            continue
         if not isinstance(data, dict):
             continue
         profile_key = data.get("ticket_source", {}).get("project_key", "")

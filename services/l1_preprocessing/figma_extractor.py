@@ -346,16 +346,20 @@ class FigmaExtractor:
             if pattern not in layouts:
                 layouts.append(pattern)
 
-        # Colors from fills
+        # Colors from fills (values are 0-1 floats, clamp to 0-255)
         for fill in node.get("fills", []):
             if fill.get("type") == "SOLID" and "color" in fill:
                 c = fill["color"]
-                r = int(c["r"] * 255)
-                g = int(c["g"] * 255)
-                b = int(c["b"] * 255)
+                try:
+                    r = max(0, min(255, int(c.get("r", 0) * 255)))
+                    g = max(0, min(255, int(c.get("g", 0) * 255)))
+                    b = max(0, min(255, int(c.get("b", 0) * 255)))
+                except (TypeError, KeyError):
+                    continue
                 hex_color = f"#{r:02x}{g:02x}{b:02x}"
-                if name and hex_color not in colors.values():
-                    colors[name] = hex_color
+                key = name or f"fill-{len(colors)}"
+                if hex_color not in colors.values():
+                    colors[key] = hex_color
 
         # Typography from text nodes
         if node_type == "TEXT":

@@ -136,11 +136,15 @@ class AutonomyEngine:
         outcomes = self._load()
         cutoff = datetime.now(UTC) - timedelta(days=window_days)
 
-        # Filter to window
-        windowed = [
-            o for o in outcomes
-            if o.created_at >= cutoff.isoformat()
-        ]
+        # Filter to window — parse created_at to datetime for reliable comparison
+        windowed = []
+        for o in outcomes:
+            try:
+                if datetime.fromisoformat(o.created_at) >= cutoff:
+                    windowed.append(o)
+            except (ValueError, TypeError):
+                # Malformed created_at — skip this outcome
+                pass
 
         if not windowed:
             return {
