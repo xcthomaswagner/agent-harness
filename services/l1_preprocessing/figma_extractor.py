@@ -21,7 +21,7 @@ logger = structlog.get_logger()
 FIGMA_URL_PATTERN = re.compile(
     r"https?://(?:www\.)?figma\.com/"
     r"(?:file|design|proto)/"
-    r"([a-zA-Z0-9]+)"  # file_key
+    r"([a-zA-Z0-9_-]+)"  # file_key (may contain hyphens/underscores)
     r"(?:/([^?\s]*))?"  # file_name (optional)
     r"(?:\?.*?node-id=([^&\s]+))?"  # node_id (optional)
 )
@@ -131,17 +131,35 @@ class FigmaExtractor:
             log.error("figma_api_error", error=str(exc))
             return None
 
+    async def _fetch_with_retry(
+        self, url: str, label: str, max_retries: int = 2,
+    ) -> httpx.Response | None:
+        """Fetch a Figma API URL with retry on 429 rate limit."""
+        import asyncio
+
+        for attempt in range(max_retries + 1):
+            response = await self._client.get(url)
+            if response.status_code == 429:
+                wait = int(response.headers.get("Retry-After", 2 ** attempt))
+                logger.warning("figma_rate_limited", url=url, wait=wait,
+                               attempt=attempt + 1)
+                if attempt < max_retries:
+                    await asyncio.sleep(wait)
+                    continue
+            if response.status_code != 200:
+                logger.error(f"figma_{label}_failed", status=response.status_code)
+                return None
+            return response
+        return None
+
     async def _fetch_file(
         self, file_key: str
     ) -> dict[str, Any] | None:
         """Fetch file metadata from Figma API."""
-        response = await self._client.get(
-            f"/v1/files/{file_key}?depth=4"
+        response = await self._fetch_with_retry(
+            f"/v1/files/{file_key}?depth=4", "file_fetch"
         )
-        if response.status_code != 200:
-            logger.error(
-                "figma_file_fetch_failed", status=response.status_code
-            )
+        if not response:
             return None
         result: dict[str, Any] = response.json()
         return result
@@ -150,13 +168,10 @@ class FigmaExtractor:
         self, file_key: str, node_id: str
     ) -> dict[str, Any] | None:
         """Fetch a specific node from a Figma file."""
-        response = await self._client.get(
-            f"/v1/files/{file_key}/nodes?ids={node_id}"
+        response = await self._fetch_with_retry(
+            f"/v1/files/{file_key}/nodes?ids={node_id}", "node_fetch"
         )
-        if response.status_code != 200:
-            logger.error(
-                "figma_node_fetch_failed", status=response.status_code
-            )
+        if not response:
             return None
         result: dict[str, Any] = response.json()
         return result

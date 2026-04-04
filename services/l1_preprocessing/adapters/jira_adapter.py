@@ -180,6 +180,35 @@ class JiraAdapter:
             except (ValueError, TypeError):
                 level = 1
             return "#" * level + " " + joined + "\n"
+        if node_type == "codeBlock":
+            lang = node.get("attrs", {}).get("language", "")
+            return f"```{lang}\n{joined}```\n"
+        if node_type == "inlineCode":
+            return f"`{joined}`"
+        if node_type == "blockquote":
+            lines = joined.splitlines(keepends=True)
+            return "".join(f"> {line}" for line in lines) + "\n"
+        if node_type == "rule":
+            return "---\n"
+        if node_type == "mention":
+            return "@" + node.get("attrs", {}).get("text", joined)
+        if node_type in ("table", "tableRow"):
+            return joined + "\n"
+        if node_type == "tableCell":
+            return joined + " | "
+        if node_type == "tableHeader":
+            return "**" + joined + "** | "
+        if node_type == "panel":
+            return f"> **Note:** {joined}\n"
+        if node_type == "expand":
+            title = node.get("attrs", {}).get("title", "Details")
+            return f"**{title}:** {joined}\n"
+        if node_type == "status":
+            return f"[{node.get('attrs', {}).get('text', joined)}]"
+        if node_type == "date":
+            return node.get("attrs", {}).get("timestamp", joined)
+        if node_type in ("media", "mediaGroup", "mediaSingle"):
+            return "[attachment]\n"
 
         return joined
 
