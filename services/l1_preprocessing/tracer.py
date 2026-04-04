@@ -636,7 +636,18 @@ def consolidate_worktree_logs(
     """Import pipeline.jsonl and artifacts from a worktree into the persistent trace.
 
     Called by the completion callback after the agent finishes.
+    Idempotent — skips if agent entries for this trace_id are already consolidated.
     """
+    # Guard: check if this trace_id's agent entries already exist
+    existing = read_trace(ticket_id)
+    if any(
+        e.get("trace_id") == trace_id and e.get("source") == "agent"
+        for e in existing
+    ):
+        logger.info("consolidation_skipped_already_imported",
+                     ticket_id=ticket_id, trace_id=trace_id)
+        return
+
     wt = Path(worktree_path)
 
     # Import pipeline.jsonl entries

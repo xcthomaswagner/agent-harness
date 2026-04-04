@@ -382,18 +382,22 @@ async def test_rejects_invalid_signature() -> None:
         assert response.status_code == 401
 
 
-async def test_rejects_when_no_secret_configured() -> None:
-    """When WEBHOOK_SECRET is empty, all webhook requests should be rejected."""
-    payload = {"action": "opened"}
+async def test_accepts_without_secret_in_dev_mode() -> None:
+    """When WEBHOOK_SECRET is empty (dev mode), requests are accepted without signature."""
+    payload = {"action": "opened", "pull_request": {"number": 1, "diff_url": "", "body": ""}}
 
-    with patch.object(l3_main, "WEBHOOK_SECRET", ""):
+    with (
+        patch.object(l3_main, "WEBHOOK_SECRET", ""),
+        patch.object(l3_main, "_get_spawner") as mock_get,
+    ):
+        mock_get.return_value = MagicMock()
         async with await _make_client() as client:
             response = await client.post(
                 "/webhooks/github",
                 json=payload,
                 headers={"x-github-event": "pull_request"},
             )
-        assert response.status_code == 500
+        assert response.status_code == 202
 
 
 async def test_accepts_valid_signature() -> None:

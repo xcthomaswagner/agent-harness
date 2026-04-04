@@ -104,11 +104,26 @@ def _get_pipeline() -> Pipeline:
 # --- Idempotency: prevent duplicate processing ---
 
 _active_tickets: set[str] = set()
+_active_tickets_lock = __import__("threading").Lock()
 
 
-def _is_ticket_active(ticket_id: str) -> bool:
-    """Check if a ticket is already being processed."""
-    return ticket_id in _active_tickets
+def _try_claim_ticket(ticket_id: str) -> bool:
+    """Atomically check if a ticket is active and claim it if not.
+
+    Returns True if claimed (caller should process), False if already active.
+    Thread-safe via lock — prevents TOCTOU race between check and add.
+    """
+    with _active_tickets_lock:
+        if ticket_id in _active_tickets:
+            return False
+        _active_tickets.add(ticket_id)
+        return True
+
+
+def _release_ticket(ticket_id: str) -> None:
+    """Release a ticket from the active set."""
+    with _active_tickets_lock:
+        _active_tickets.discard(ticket_id)
 
 
 # --- Pipeline processing (background) ---
@@ -122,7 +137,7 @@ def _enqueue_or_background(
 
     Returns "queued", "background", or "duplicate".
     """
-    if _is_ticket_active(ticket.id):
+    if not _try_claim_ticket(ticket.id):
         logger.info("ticket_duplicate_skipped", ticket_id=ticket.id)
         return "duplicate"
 
@@ -130,11 +145,9 @@ def _enqueue_or_background(
 
     job_id = enqueue_ticket(ticket)
     if job_id:
-        _active_tickets.add(ticket.id)
         logger.info("ticket_queued", ticket_id=ticket.id, job_id=job_id)
         return "queued"
 
-    _active_tickets.add(ticket.id)
     background_tasks.add_task(_process_ticket, ticket, trace_id)
     return "background"
 
@@ -160,7 +173,7 @@ async def _process_ticket(ticket: TicketPayload, trace_id: str = "") -> None:
             error_message=str(exc)[:500],
         )
     finally:
-        _active_tickets.discard(ticket.id)
+        _release_ticket(ticket.id)
 
 
 # --- Endpoints ---
@@ -418,7 +431,7 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
     log.info("agent_completion_received", pr_url=payload.pr_url)
 
     # Clear idempotency guard so ticket can be reprocessed if needed
-    _active_tickets.discard(payload.ticket_id)
+    _release_ticket(payload.ticket_id)
 
     # Trace: record completion and consolidate worktree logs
     trace_id = generate_trace_id()

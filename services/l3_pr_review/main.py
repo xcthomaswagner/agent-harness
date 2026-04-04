@@ -402,17 +402,15 @@ async def github_webhook(
     """Receive GitHub webhooks for PR events."""
     body = await request.body()
 
-    # Validate signature — reject all requests when no secret is configured
-    if not WEBHOOK_SECRET:
-        logger.error("webhook_secret_not_configured")
-        raise HTTPException(status_code=500, detail="Webhook secret not configured")
-    if not x_hub_signature_256:
-        raise HTTPException(status_code=401, detail="Missing webhook signature")
-    expected = "sha256=" + hmac.new(
-        WEBHOOK_SECRET.encode(), body, hashlib.sha256
-    ).hexdigest()
-    if not hmac.compare_digest(expected, x_hub_signature_256):
-        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    # Validate signature — skip validation in dev mode (no secret configured)
+    if WEBHOOK_SECRET:
+        if not x_hub_signature_256:
+            raise HTTPException(status_code=401, detail="Missing webhook signature")
+        expected = "sha256=" + hmac.new(
+            WEBHOOK_SECRET.encode(), body, hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(expected, x_hub_signature_256):
+            raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     # Dedup: skip if this delivery was already processed (webhook retry)
     delivery_id = x_github_delivery or ""

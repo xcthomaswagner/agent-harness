@@ -633,7 +633,7 @@ def _render_board_column(title: str, color: str, traces: list[dict], count: int)
 
         extra = ""
         if status in _FAILED_STATUSES or status in _STUCK_THRESHOLDS:
-            entries = read_trace(t["ticket_id"])
+            entries = t.pop("_raw_entries", None) or read_trace(t["ticket_id"])
             diag = extract_diagnostic_info(entries)
             hint = diag.get("hint", "")
             if hint:
