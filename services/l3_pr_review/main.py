@@ -127,11 +127,13 @@ async def _handle_pr_opened(payload: dict[str, Any]) -> None:
                      "pr_review_spawned", pr_number=pr_number)
 
     branch = pr.get("head", {}).get("ref", "")
+    repo = payload.get("repository", {}).get("full_name", "")
     _get_spawner().spawn_pr_review(
         pr_number=pr_number,
         pr_diff=f"Diff available at: {pr_diff_url}",
         ticket_context=pr_body,
         branch=branch,
+        repo=repo,
     )
 
 
@@ -219,6 +221,7 @@ async def _handle_ci_failed(payload: dict[str, Any]) -> None:
             pr_number=pr_number,
             branch=branch,
             failure_logs=failure_logs,
+            repo=repo,
         )
 
 

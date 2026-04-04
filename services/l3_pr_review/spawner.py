@@ -30,12 +30,35 @@ class SessionSpawner:
     def __init__(self, repo_path: str = "") -> None:
         self._repo_path = repo_path
 
-    def _ensure_branch_current(self, branch: str, log: Any) -> None:
-        """Fetch and checkout the PR branch so the agent works on current code."""
+    def _ensure_branch_current(
+        self, branch: str, log: Any, expected_repo: str = "",
+    ) -> None:
+        """Fetch and checkout the PR branch so the agent works on current code.
+
+        Args:
+            expected_repo: If provided (e.g., "owner/repo"), verify the local
+                repo's origin matches before operating. Prevents L3 from
+                reviewing/pushing to the wrong repo.
+        """
         cwd = self._repo_path or os.getenv("CLIENT_REPO_PATH", "")
         if not cwd or not branch:
             return
         try:
+            # Verify repo identity if expected_repo provided
+            if expected_repo:
+                result = subprocess.run(
+                    ["git", "remote", "get-url", "origin"],
+                    cwd=cwd, capture_output=True, text=True, timeout=5,
+                )
+                origin_url = result.stdout.strip()
+                if expected_repo not in origin_url:
+                    log.error(
+                        "repo_mismatch",
+                        expected=expected_repo,
+                        actual_origin=origin_url,
+                    )
+                    return  # Do NOT operate on wrong repo
+
             subprocess.run(
                 ["git", "fetch", "origin", branch],
                 cwd=cwd, capture_output=True, timeout=30,
@@ -54,7 +77,7 @@ class SessionSpawner:
 
     def spawn_pr_review(
         self, pr_number: int, pr_diff: str, ticket_context: str,
-        branch: str = "",
+        branch: str = "", repo: str = "",
     ) -> bool:
         """Spawn an Opus session for AI PR review.
 
@@ -63,7 +86,7 @@ class SessionSpawner:
         """
         log = logger.bind(pr_number=pr_number, session_type="pr-review")
         if branch:
-            self._ensure_branch_current(branch, log)
+            self._ensure_branch_current(branch, log, expected_repo=repo)
         prompt = (
             f"You are an AI architecture reviewer for PR #{pr_number}.\n\n"
             f"1. Run: git diff main...HEAD\n"
@@ -98,11 +121,12 @@ class SessionSpawner:
         return self._spawn("pr-review", prompt, model="opus", pr_number=pr_number)
 
     def spawn_ci_fix(
-        self, pr_number: int, branch: str, failure_logs: str
+        self, pr_number: int, branch: str, failure_logs: str,
+        repo: str = "",
     ) -> bool:
         """Spawn a Sonnet session to fix CI failures."""
         log = logger.bind(pr_number=pr_number, session_type="ci-fix")
-        self._ensure_branch_current(branch, log)
+        self._ensure_branch_current(branch, log, expected_repo=repo)
         prompt = (
             f"CI failed on PR #{pr_number}, branch {branch}.\n\n"
             f"1. Read the failure logs below\n"

@@ -57,9 +57,13 @@ Log start: `{"phase": "code_review", "ticket_id": "<id>", "timestamp": "<ISO>", 
 
 Spawn a reviewer (see Code Review section below).
 
+**Post-review integrity check:** After the reviewer finishes, verify no files were modified: `git diff --stat`. If the reviewer changed any tracked files, revert with `git checkout .` and log a warning. The code reviewer is a read-only role — any file changes indicate a role violation.
+
 ### Step 4: QA Validation
 
 Spawn QA (see QA Validation section below).
+
+**Post-QA integrity check:** After QA finishes, verify no source files were modified: `git diff --stat`. QA may create files in `.harness/` (screenshots, logs) but must not modify source code. If source files were changed, revert with `git checkout -- ':(exclude).harness'` and log a warning.
 
 ### Step 5: Simplify
 

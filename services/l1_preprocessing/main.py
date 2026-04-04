@@ -256,6 +256,7 @@ async def manual_process_ticket(
 
 
 _TICKET_ID_PATTERN = re.compile(r"^[A-Za-z0-9]+-[0-9]+$")
+_BRANCH_PATTERN = re.compile(r"^[A-Za-z0-9/_.-]+$")  # No shell metacharacters
 _VALID_PHASES = {"qa", "e2e", "review"}
 
 
@@ -292,11 +293,22 @@ async def retest(payload: RetestPayload, background_tasks: BackgroundTasks) -> d
         )
 
     branch = payload.branch or f"ai/{payload.ticket_id}"
+    if not _BRANCH_PATTERN.match(branch):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid branch name (alphanumeric, slashes, dots, hyphens only)",
+        )
+
     client_repo = settings.default_client_repo
     if not client_repo:
         return {"status": "error", "detail": "No default_client_repo configured"}
 
-    worktree_dir = f"{client_repo}/../worktrees/{branch}"
+    worktree_dir = str(Path(client_repo).parent / "worktrees" / branch)
+    # Ensure resolved path is under the expected worktrees parent (path traversal guard)
+    worktree_resolved = Path(worktree_dir).resolve()
+    worktrees_parent = (Path(client_repo).parent / "worktrees").resolve()
+    if not str(worktree_resolved).startswith(str(worktrees_parent)):
+        raise HTTPException(status_code=400, detail="Branch resolves outside worktree directory")
 
     log = logger.bind(ticket_id=payload.ticket_id, phase=payload.phase)
     log.info("retest_requested", branch=branch)
