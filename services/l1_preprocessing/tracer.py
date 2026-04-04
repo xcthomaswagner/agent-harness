@@ -180,6 +180,7 @@ def list_traces(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
             "pipeline_mode": pipeline_mode,
             "phases": total_phases,
             "entries": len(entries),
+            "_raw_entries": entries,  # cached for dashboard; excluded from JSON API
         })
 
     return traces

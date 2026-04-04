@@ -244,6 +244,7 @@ def main() -> None:
 
     print(f"[spawn] Notifying L1: ticket={ticket_id} status={status} pr={pr_url}")
     try:
+        import urllib.error
         import urllib.request
 
         data = json.dumps(completion_data).encode()
@@ -253,11 +254,18 @@ def main() -> None:
             headers={"Content-Type": "application/json"},
         )
         urllib.request.urlopen(req, timeout=10)
-    except Exception:
-        # Write to file so L1 can pick it up later on restart/poll
+    except urllib.error.HTTPError as exc:
+        # L1 responded with an error — likely a code bug, not transient
+        print(f"[spawn] ERROR: L1 returned HTTP {exc.code}: {exc.reason}")
         backlog = worktree_dir / ".harness" / "completion-pending.json"
         backlog.write_text(json.dumps(completion_data, indent=2))
-        print(f"[spawn] WARNING: Could not notify L1 — saved to {backlog}")
+        print(f"[spawn] Saved completion data to {backlog}")
+    except (urllib.error.URLError, OSError) as exc:
+        # Network/connection error — transient, L1 may be down
+        print(f"[spawn] WARNING: Could not reach L1: {exc}")
+        backlog = worktree_dir / ".harness" / "completion-pending.json"
+        backlog.write_text(json.dumps(completion_data, indent=2))
+        print(f"[spawn] Saved completion data to {backlog}")
 
     sys.exit(exit_code)
 

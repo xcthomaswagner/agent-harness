@@ -105,6 +105,9 @@ def _lookup_trace_id(ticket_id: str) -> str:
             return entry.get("trace_id", generate_trace_id())
     if entries:
         return entries[-1].get("trace_id", generate_trace_id())
+    # No trace exists — L3 event will start a new trace chain
+    logger.warning("trace_id_lookup_miss", ticket_id=ticket_id,
+                   hint="No existing trace found; L3 event will have a new trace ID")
     return generate_trace_id()
 
 

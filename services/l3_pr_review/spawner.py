@@ -59,18 +59,30 @@ class SessionSpawner:
                     )
                     return  # Do NOT operate on wrong repo
 
-            subprocess.run(
+            fetch = subprocess.run(
                 ["git", "fetch", "origin", branch],
-                cwd=cwd, capture_output=True, timeout=30,
+                cwd=cwd, capture_output=True, text=True, timeout=30,
             )
-            subprocess.run(
+            if fetch.returncode != 0:
+                log.error("git_fetch_failed", branch=branch, stderr=fetch.stderr[:200])
+                return
+
+            checkout = subprocess.run(
                 ["git", "checkout", branch],
-                cwd=cwd, capture_output=True, timeout=15,
+                cwd=cwd, capture_output=True, text=True, timeout=15,
             )
-            subprocess.run(
+            if checkout.returncode != 0:
+                log.error("git_checkout_failed", branch=branch, stderr=checkout.stderr[:200])
+                return
+
+            pull = subprocess.run(
                 ["git", "pull", "--ff-only", "origin", branch],
-                cwd=cwd, capture_output=True, timeout=30,
+                cwd=cwd, capture_output=True, text=True, timeout=30,
             )
+            if pull.returncode != 0:
+                log.warning("git_pull_failed", branch=branch, stderr=pull.stderr[:200])
+                # Non-fatal — checkout succeeded, local may just be ahead
+
             log.info("branch_synced", branch=branch)
         except (subprocess.TimeoutExpired, OSError) as exc:
             log.warning("branch_sync_failed", branch=branch, error=str(exc)[:200])

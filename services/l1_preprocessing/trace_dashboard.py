@@ -134,10 +134,10 @@ def _fmt_ts(ts: str) -> str:
 
 def _render_trace_table(traces: list[dict], total: int, page: int, per_page: int) -> str:
     """Render the Langfuse-style trace list table."""
-    # Enrich each trace with phase dots
+    # Enrich each trace with phase dots (use cached entries from list_traces)
     enriched: list[dict] = []
     for t in traces:
-        entries = read_trace(t["ticket_id"])
+        entries = t.pop("_raw_entries", None) or read_trace(t["ticket_id"])
         enriched.append(build_trace_list_row(t, entries))
 
     # Compute stats
@@ -748,7 +748,9 @@ async def traces_api(
         total = count_traces()
         offset = (page - 1) * per_page
         traces = list_traces(offset=offset, limit=per_page)
-    return {"total": total, "page": page, "per_page": per_page, "traces": traces}
+    # Strip cached entries from JSON response (internal dashboard field)
+    clean = [{k: v for k, v in t.items() if k != "_raw_entries"} for t in traces]
+    return {"total": total, "page": page, "per_page": per_page, "traces": clean}
 
 
 @router.get("/api/traces/{ticket_id}", response_model=None)
