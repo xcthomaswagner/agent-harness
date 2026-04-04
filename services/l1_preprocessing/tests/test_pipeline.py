@@ -303,6 +303,28 @@ class TestRouteInfoRequest:
         mock_jira.transition_status.assert_not_called()
 
 
+    async def test_info_request_continues_on_write_failure(
+        self,
+        pipeline: Pipeline,
+        mock_analyst: AsyncMock,
+        mock_jira: AsyncMock,
+        sample_ticket: TicketPayload,
+    ) -> None:
+        """Write-back failures should not crash the pipeline."""
+        info_req = InfoRequest(
+            ticket_id="PIPE-10",
+            source=TicketSource.JIRA,
+            questions=["What?"],
+            context="Need clarification",
+            callback=sample_ticket.callback,
+        )
+        mock_analyst.analyze.return_value = info_req
+        mock_jira.write_comment.side_effect = RuntimeError("Jira 403")
+
+        result = await pipeline.process(sample_ticket)
+        assert result["status"] == "info_request"  # Doesn't crash
+
+
 # --- Route: Decomposition ---
 
 
@@ -396,14 +418,14 @@ class TestPipelineErrors:
         with pytest.raises(RuntimeError, match="API connection failed"):
             await pipeline.process(sample_ticket)
 
-    async def test_jira_write_error_propagates(
+    async def test_jira_write_error_does_not_crash(
         self,
         pipeline: Pipeline,
         mock_analyst: AsyncMock,
         mock_jira: AsyncMock,
         sample_ticket: TicketPayload,
     ) -> None:
-        """Jira adapter failures during write-back should propagate."""
+        """Jira adapter failures during enrichment write-back are caught gracefully."""
         enriched = EnrichedTicket(
             **sample_ticket.model_dump(),
             generated_acceptance_criteria=["AC 1"],
@@ -417,8 +439,9 @@ class TestPipelineErrors:
         mock_analyst.analyze.return_value = enriched
         mock_jira.write_comment.side_effect = RuntimeError("Jira unavailable")
 
-        with pytest.raises(RuntimeError, match="Jira unavailable"):
-            await pipeline.process(sample_ticket)
+        # Should NOT raise — error is caught and logged
+        result = await pipeline.process(sample_ticket)
+        assert result["status"] == "enriched"
 
 
 # --- Ticket JSON writing ---

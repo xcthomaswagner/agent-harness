@@ -243,8 +243,11 @@ class Pipeline:
                 ec_text = "\n".join(f"- {ec}" for ec in enriched.edge_cases)
                 parts.append(f"*Edge Cases:*\n{ec_text}")
             comment = "\n\n".join(parts)
-            await adapter.write_comment(enriched.id, comment)
-            log.info("enrichment_written_to_jira")
+            try:
+                await adapter.write_comment(enriched.id, comment)
+                log.info("enrichment_written_to_jira")
+            except Exception as exc:
+                log.warning("enrichment_comment_failed", error=str(exc)[:200])
 
         ticket_path = self._write_ticket_json(enriched)
         pipeline_mode = "quick" if "ai-quick" in enriched.labels else "multi"
@@ -286,11 +289,15 @@ class Pipeline:
         )
 
         if info_req.callback:
-            await self._jira_adapter.write_comment(info_req.ticket_id, comment)
-            await self._jira_adapter.transition_status(
-                info_req.ticket_id, "Needs Clarification"
-            )
-            log.info("info_request_posted_to_jira")
+            adapter = self._get_adapter(info_req)
+            try:
+                await adapter.write_comment(info_req.ticket_id, comment)
+                await adapter.transition_status(
+                    info_req.ticket_id, "Needs Clarification"
+                )
+                log.info("info_request_posted")
+            except Exception as exc:
+                log.warning("info_request_write_failed", error=str(exc)[:200])
 
         return {
             "status": "info_request",
@@ -314,9 +321,13 @@ class Pipeline:
         )
 
         if decomp.callback:
-            await self._jira_adapter.write_comment(decomp.ticket_id, comment)
-            await self._jira_adapter.add_label(decomp.ticket_id, "needs-splitting")
-            log.info("decomposition_flagged_for_pm")
+            adapter = self._get_adapter(decomp)
+            try:
+                await adapter.write_comment(decomp.ticket_id, comment)
+                await adapter.add_label(decomp.ticket_id, "needs-splitting")
+                log.info("decomposition_flagged")
+            except Exception as exc:
+                log.warning("decomposition_write_failed", error=str(exc)[:200])
 
         return {
             "status": "decomposition",
