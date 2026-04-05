@@ -120,6 +120,7 @@ def _lookup_trace_id(ticket_id: str) -> str:
 
 
 _AUTONOMY_EVENTS_PATH = "/api/internal/autonomy/events"
+_HUMAN_ISSUES_PATH = "/api/internal/autonomy/human-issues"
 
 
 async def _forward_autonomy_event(event: dict[str, Any]) -> None:
@@ -175,6 +176,67 @@ async def _forward_autonomy_event(event: dict[str, Any]) -> None:
         ticket_id=event.get("ticket_id"),
         url=url,
     )
+
+
+async def _forward_human_issue(payload: dict[str, Any]) -> None:
+    """POST normalized human issue to L1. Retries once on transient failure.
+
+    Logs and returns on final failure — does not raise.
+    Short-circuits with log if L1_INTERNAL_API_TOKEN is unset.
+    """
+    if not L1_INTERNAL_API_TOKEN:
+        logger.info(
+            "l1_human_issue_forward_skipped",
+            reason="L1_INTERNAL_API_TOKEN unset",
+            event_type=payload.get("event_type"),
+        )
+        return
+
+    url = f"{L1_SERVICE_URL.rstrip('/')}{_HUMAN_ISSUES_PATH}"
+    headers = {"X-Internal-Api-Token": L1_INTERNAL_API_TOKEN}
+
+    last_error: str = ""
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code >= 500:
+                last_error = f"HTTP {resp.status_code}"
+                if attempt == 0:
+                    await asyncio.sleep(1)
+                    continue
+            elif resp.status_code >= 400:
+                logger.error(
+                    "l1_human_issue_forward_failed",
+                    status_code=resp.status_code,
+                    body=resp.text[:500],
+                    event_type=payload.get("event_type"),
+                    ticket_id=payload.get("ticket_id"),
+                )
+                return
+            else:
+                return
+        except httpx.RequestError as exc:
+            last_error = f"RequestError: {exc}"
+            if attempt == 0:
+                await asyncio.sleep(1)
+                continue
+
+    logger.error(
+        "l1_human_issue_forward_failed",
+        error=last_error,
+        event_type=payload.get("event_type"),
+        ticket_id=payload.get("ticket_id"),
+        url=url,
+    )
+
+
+def _is_bot_user(user: dict[str, Any]) -> bool:
+    """Return True if the GitHub user looks like a bot."""
+    if not isinstance(user, dict):
+        return False
+    login = (user.get("login") or "").lower()
+    return user.get("type") == "Bot" or login.endswith("[bot]")
 
 
 def _truncate(value: str | None, limit: int = 2000) -> str | None:
@@ -259,6 +321,47 @@ def _build_autonomy_event(
 
     # Strip empty-string optionals for a cleaner payload
     return {k: v for k, v in event.items() if v is not None and v != ""}
+
+
+async def _forward_review_body_human_issue(
+    event_type: str, payload: dict[str, Any]
+) -> None:
+    """Forward the top-level review body as a human issue, if present and non-bot."""
+    review = payload.get("review") or {}
+    body = review.get("body") or ""
+    if not body.strip():
+        return
+    user = review.get("user") or {}
+    if _is_bot_user(user):
+        return
+
+    ticket_id = _ticket_id_from_payload(payload)
+    if not ticket_id:
+        logger.info("review_body_no_ticket_id", event_type=event_type)
+        return
+
+    pr = payload.get("pull_request", {}) or {}
+    repo = payload.get("repository", {}) or {}
+    repo_full_name = repo.get("full_name", "") or (
+        pr.get("base", {}).get("repo", {}).get("full_name", "")
+    )
+    human_issue = {
+        "repo_full_name": repo_full_name,
+        "pr_number": pr.get("number", 0),
+        "head_sha": pr.get("head", {}).get("sha", ""),
+        "ticket_id": ticket_id,
+        "external_id": str(review.get("id", "")),
+        "event_type": event_type,
+        "file_path": "",
+        "line_start": 0,
+        "line_end": 0,
+        "summary": _truncate(body, 500) or "",
+        "details": _truncate(body, 4000) or "",
+        "reviewer_login": user.get("login", ""),
+        "event_at": review.get("submitted_at") or datetime.now(UTC).isoformat(),
+        "comment_url": review.get("html_url", ""),
+    }
+    await _forward_human_issue(human_issue)
 
 
 # --- Event handlers ---
@@ -418,6 +521,11 @@ async def _handle_review_comment(payload: dict[str, Any]) -> None:
     if autonomy_event:
         await _forward_autonomy_event(autonomy_event)
 
+    # Forward the top-level review body as a human issue, if present.
+    # (issue_comment events have no 'review' key, so this no-ops there.)
+    if review:
+        await _forward_review_body_human_issue("review_comment", payload)
+
     ticket_id = _ticket_id_from_payload(payload)
     if ticket_id:
         append_trace(ticket_id, _lookup_trace_id(ticket_id), "l3_comment",
@@ -455,6 +563,9 @@ async def _handle_review_changes_requested(payload: dict[str, Any]) -> None:
     if autonomy_event:
         await _forward_autonomy_event(autonomy_event)
 
+    # Forward top-level review body as a human issue
+    await _forward_review_body_human_issue("review_changes_requested", payload)
+
     ticket_id = _ticket_id_from_payload(payload)
     if ticket_id:
         append_trace(ticket_id, _lookup_trace_id(ticket_id), "l3_changes_requested",
@@ -487,6 +598,9 @@ async def _handle_review_approved(payload: dict[str, Any]) -> None:
     autonomy_event = _build_autonomy_event("review_approved", payload)
     if autonomy_event:
         await _forward_autonomy_event(autonomy_event)
+
+    # Forward top-level review body as a human issue (only if body non-empty)
+    await _forward_review_body_human_issue("review_approved", payload)
 
     # Extract ticket type from branch name or PR labels
     labels = [label.get("name", "") for label in pr.get("labels", [])]
@@ -525,7 +639,8 @@ async def _handle_review_approved(payload: dict[str, Any]) -> None:
                 log.error("l1_notification_failed", url=l1_url,
                           ticket_id=completion_json["ticket_id"])
 
-    # TODO: Check autonomy.should_auto_merge() and merge if appropriate
+    # TODO: Phase 4 - check recommended mode from L1 /api/autonomy for this
+    # repo's client_profile and merge if semi/full_autonomous
     # For now, just log the approval
     log.info(
         "pr_approved",
@@ -533,6 +648,58 @@ async def _handle_review_approved(payload: dict[str, Any]) -> None:
         branch=branch,
         repo=repo,
     )
+
+
+async def _handle_review_comment_created(payload: dict[str, Any]) -> None:
+    """Handle line-anchored PR review comment — forward as a human issue to L1."""
+    comment = payload.get("comment") or {}
+    if not comment:
+        return
+    action = payload.get("action", "")
+    if action not in ("created", "edited"):
+        return
+    body = comment.get("body") or ""
+    if not body.strip():
+        return
+    user = comment.get("user") or {}
+    if _is_bot_user(user):
+        logger.debug("ignoring_bot_review_comment_created")
+        return
+    # Also honor the hidden marker guard used elsewhere
+    if BOT_COMMENT_MARKER and BOT_COMMENT_MARKER in body:
+        logger.debug("ignoring_marker_review_comment_created")
+        return
+
+    ticket_id = _ticket_id_from_payload(payload)
+    if not ticket_id:
+        logger.info("review_comment_no_ticket_id")
+        return
+
+    pr = payload.get("pull_request", {}) or {}
+    repo = payload.get("repository", {}) or {}
+    repo_full_name = repo.get("full_name", "") or (
+        pr.get("base", {}).get("repo", {}).get("full_name", "")
+    )
+    line_start = comment.get("line") or comment.get("original_line") or 0
+    line_end = line_start
+
+    human_issue = {
+        "repo_full_name": repo_full_name,
+        "pr_number": pr.get("number", 0),
+        "head_sha": pr.get("head", {}).get("sha", ""),
+        "ticket_id": ticket_id,
+        "external_id": str(comment.get("id", "")),
+        "event_type": "review_comment",
+        "file_path": comment.get("path", ""),
+        "line_start": int(line_start) if line_start else 0,
+        "line_end": int(line_end) if line_end else 0,
+        "summary": _truncate(body, 500) or "",
+        "details": _truncate(body, 4000) or "",
+        "reviewer_login": user.get("login", ""),
+        "event_at": comment.get("created_at") or datetime.now(UTC).isoformat(),
+        "comment_url": comment.get("html_url", ""),
+    }
+    await _forward_human_issue(human_issue)
 
 
 async def _handle_pr_merged(payload: dict[str, Any]) -> None:
@@ -578,6 +745,7 @@ _HANDLERS: dict[EventType, Any] = {
     EventType.REVIEW_APPROVED: _handle_review_approved,
     EventType.REVIEW_COMMENT: _handle_review_comment,
     EventType.REVIEW_CHANGES_REQUESTED: _handle_review_changes_requested,
+    EventType.REVIEW_COMMENT_CREATED: _handle_review_comment_created,
 }
 
 

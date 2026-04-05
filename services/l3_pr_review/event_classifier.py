@@ -22,6 +22,7 @@ class EventType(StrEnum):
     REVIEW_APPROVED = "review_approved"
     REVIEW_CHANGES_REQUESTED = "review_changes_requested"
     REVIEW_COMMENT = "review_comment"
+    REVIEW_COMMENT_CREATED = "review_comment_created"
     IGNORED = "ignored"
 
 
@@ -74,6 +75,12 @@ def classify_event(headers: dict[str, str], payload: dict[str, Any]) -> EventTyp
         if state == "dismissed":
             logger.info("review_dismissed", pr=payload.get("pull_request", {}).get("number"))
             return EventType.IGNORED  # Log but don't act — human decision
+        return EventType.IGNORED
+
+    # Line-anchored review comment on a PR (separate from top-level review)
+    if github_event == "pull_request_review_comment":
+        if action in ("created", "edited"):
+            return EventType.REVIEW_COMMENT_CREATED
         return EventType.IGNORED
 
     # Issue comment on a PR (only new comments, not edits or deletions)

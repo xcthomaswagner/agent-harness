@@ -437,7 +437,49 @@ class CompletionPayload(BaseModel):
     status: str  # "complete", "partial", "escalated"
     pr_url: str = ""
     branch: str = ""
+    repo_full_name: str = ""
+    head_sha: str = ""
     failed_units: list[FailedUnit] = []
+
+
+def _derive_head_sha(worktree_path: str) -> str:
+    """Run 'git rev-parse HEAD' in the worktree. Returns '' on any failure."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=worktree_path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (subprocess.SubprocessError, OSError):
+        pass
+    return ""
+
+
+def _derive_repo_full_name(worktree_path: str) -> str:
+    """Parse 'git config --get remote.origin.url' into 'owner/repo'.
+
+    Returns '' on any failure.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "config", "--get", "remote.origin.url"],
+            cwd=worktree_path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            url = result.stdout.strip()
+            m = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?$", url)
+            if m:
+                return m.group(1)
+    except (subprocess.SubprocessError, OSError):
+        pass
+    return ""
 
 
 @app.post("/api/agent-complete", status_code=200, dependencies=[Depends(_require_api_key)])
@@ -460,7 +502,15 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
     # Consolidate worktree artifacts into the persistent trace
     worktree_path = f"{settings.default_client_repo}/../worktrees/{payload.branch}"
     try:
-        consolidate_worktree_logs(payload.ticket_id, trace_id, worktree_path)
+        repo = payload.repo_full_name or _derive_repo_full_name(worktree_path)
+        sha = payload.head_sha or _derive_head_sha(worktree_path)
+        consolidate_worktree_logs(
+            payload.ticket_id,
+            trace_id,
+            worktree_path,
+            repo_full_name=repo,
+            head_sha=sha,
+        )
     except Exception:
         log.exception("worktree_consolidation_failed", worktree=worktree_path)
         # Continue — don't block Jira updates because consolidation failed

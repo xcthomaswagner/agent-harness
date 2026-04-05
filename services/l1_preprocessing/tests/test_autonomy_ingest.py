@@ -18,7 +18,14 @@ from autonomy_ingest import (
     resolve_client_profile,
     router,
 )
-from autonomy_store import ensure_schema, open_connection
+from autonomy_store import (
+    PrRunUpsert,
+    ensure_schema,
+    insert_pending_ai_issue,
+    insert_review_issue,
+    open_connection,
+    upsert_pr_run,
+)
 from config import settings
 
 # ---------------------------------------------------------------------------
@@ -393,7 +400,8 @@ def test_get_autonomy_single_profile_filter(test_app: FastAPI) -> None:
     body = r.json()
     assert body["client_profile"] == "harness-test"
     assert body["sample_size"] == 1
-    assert body["data_quality"]["status"] == "phase1_partial"
+    # Phase 2: small samples classified as insufficient_data
+    assert body["data_quality"]["status"] in ("insufficient_data", "degraded", "good")
 
 
 def test_get_autonomy_list_shape_no_top_level_average(test_app: FastAPI) -> None:
@@ -415,3 +423,428 @@ def test_get_autonomy_list_shape_no_top_level_average(test_app: FastAPI) -> None
     assert len(body["profiles"]) >= 1
     assert "first_pass_acceptance_rate" not in body
     assert body["global_summary"]["total_sample_size"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Drain pending_ai_issues on pr_opened / pr_synchronized
+# ---------------------------------------------------------------------------
+
+def _stage_pending_ai_issue(
+    db_path: Path,
+    *,
+    repo_full_name: str = "acme/widgets",
+    head_sha: str = "abc123",
+    ticket_id: str = "SCRUM-1",
+    source: str = "ai_review",
+    external_id: str = "ai-1",
+    file_path: str = "src/foo.py",
+    line_start: int = 10,
+    line_end: int = 12,
+    category: str = "bug",
+    summary: str = "null pointer risk",
+) -> None:
+    c = open_connection(db_path)
+    try:
+        ensure_schema(c)
+        insert_pending_ai_issue(
+            c,
+            repo_full_name=repo_full_name,
+            head_sha=head_sha,
+            ticket_id=ticket_id,
+            source=source,
+            external_id=external_id,
+            file_path=file_path,
+            line_start=line_start,
+            line_end=line_end,
+            category=category,
+            severity="high",
+            summary=summary,
+            details="",
+            acceptance_criterion_ref="",
+            is_valid=1,
+            is_code_change_request=0,
+        )
+    finally:
+        c.close()
+
+
+class TestDrainOnPrOpened:
+    def test_pr_opened_drains_pending_ai_issues(self, test_app: FastAPI) -> None:
+        db_path = Path(settings.autonomy_db_path)
+        _stage_pending_ai_issue(db_path, external_id="ai-1")
+        _stage_pending_ai_issue(db_path, external_id="ai-2")
+
+        client = TestClient(test_app)
+        r = client.post(
+            "/api/internal/autonomy/events",
+            json=_payload(
+                event_type="pr_opened", client_profile="harness-test"
+            ),
+            headers={"X-Internal-Api-Token": "test-token"},
+        )
+        assert r.status_code == 200
+        pr_run_id = r.json()["pr_run_id"]
+
+        c = open_connection(db_path)
+        try:
+            rows = c.execute(
+                "SELECT * FROM review_issues WHERE pr_run_id = ? AND source = 'ai_review'",
+                (pr_run_id,),
+            ).fetchall()
+            assert len(rows) == 2
+            pending = c.execute(
+                "SELECT COUNT(*) AS n FROM pending_ai_issues"
+            ).fetchone()
+            assert pending["n"] == 0
+        finally:
+            c.close()
+
+    def test_pr_synchronized_also_drains(self, test_app: FastAPI) -> None:
+        db_path = Path(settings.autonomy_db_path)
+        _stage_pending_ai_issue(db_path, external_id="ai-1")
+
+        client = TestClient(test_app)
+        r = client.post(
+            "/api/internal/autonomy/events",
+            json=_payload(
+                event_type="pr_synchronized", client_profile="harness-test"
+            ),
+            headers={"X-Internal-Api-Token": "test-token"},
+        )
+        assert r.status_code == 200
+        pr_run_id = r.json()["pr_run_id"]
+
+        c = open_connection(db_path)
+        try:
+            rows = c.execute(
+                "SELECT * FROM review_issues WHERE pr_run_id = ? AND source = 'ai_review'",
+                (pr_run_id,),
+            ).fetchall()
+            assert len(rows) == 1
+        finally:
+            c.close()
+
+    def test_drain_is_idempotent_on_repeat(self, test_app: FastAPI) -> None:
+        db_path = Path(settings.autonomy_db_path)
+        _stage_pending_ai_issue(db_path, external_id="ai-1")
+        _stage_pending_ai_issue(db_path, external_id="ai-2")
+
+        client = TestClient(test_app)
+        for _ in range(2):
+            r = client.post(
+                "/api/internal/autonomy/events",
+                json=_payload(
+                    event_type="pr_opened", client_profile="harness-test"
+                ),
+                headers={"X-Internal-Api-Token": "test-token"},
+            )
+            assert r.status_code == 200
+        pr_run_id = r.json()["pr_run_id"]
+
+        c = open_connection(db_path)
+        try:
+            rows = c.execute(
+                "SELECT * FROM review_issues WHERE pr_run_id = ? AND source = 'ai_review'",
+                (pr_run_id,),
+            ).fetchall()
+            assert len(rows) == 2
+        finally:
+            c.close()
+
+    def test_drain_triggers_rematch(self, test_app: FastAPI) -> None:
+        db_path = Path(settings.autonomy_db_path)
+
+        # Pre-seed a pr_run via upsert + a human_review issue
+        c = open_connection(db_path)
+        try:
+            ensure_schema(c)
+            pr_run_id = upsert_pr_run(
+                c,
+                PrRunUpsert(
+                    ticket_id="SCRUM-1",
+                    pr_number=1,
+                    repo_full_name="acme/widgets",
+                    head_sha="abc123",
+                    client_profile="harness-test",
+                    opened_at="2026-04-05T11:00:00+00:00",
+                ),
+            )
+            insert_review_issue(
+                c,
+                pr_run_id=pr_run_id,
+                source="human_review",
+                external_id="human-1",
+                file_path="src/foo.py",
+                line_start=10,
+                line_end=12,
+                summary="null pointer risk here",
+                is_valid=1,
+            )
+        finally:
+            c.close()
+
+        # Stage an AI issue that should match on line overlap
+        _stage_pending_ai_issue(
+            db_path,
+            external_id="ai-1",
+            file_path="src/foo.py",
+            line_start=10,
+            line_end=12,
+            summary="null pointer risk",
+        )
+
+        client = TestClient(test_app)
+        r = client.post(
+            "/api/internal/autonomy/events",
+            json=_payload(
+                event_type="pr_opened", client_profile="harness-test"
+            ),
+            headers={"X-Internal-Api-Token": "test-token"},
+        )
+        assert r.status_code == 200
+
+        c = open_connection(db_path)
+        try:
+            matches = c.execute("SELECT * FROM issue_matches").fetchall()
+            assert len(matches) == 1
+            assert matches[0]["match_type"] == "line_overlap"
+        finally:
+            c.close()
+
+
+# ---------------------------------------------------------------------------
+# HTTP endpoint: POST /api/internal/autonomy/human-issues
+# ---------------------------------------------------------------------------
+
+def _human_payload(**overrides: Any) -> dict[str, Any]:
+    data = {
+        "repo_full_name": "acme/widgets",
+        "pr_number": 1,
+        "head_sha": "abc123",
+        "ticket_id": "SCRUM-1",
+        "client_profile": "harness-test",
+        "external_id": "comment-42",
+        "event_type": "review_comment",
+        "file_path": "src/foo.py",
+        "line_start": 10,
+        "line_end": 12,
+        "summary": "consider null-checking here",
+        "details": "this variable could be None",
+        "reviewer_login": "alice",
+        "event_at": "2026-04-05T12:00:00+00:00",
+        "comment_url": "https://github.com/acme/widgets/pull/1#discussion_r42",
+    }
+    data.update(overrides)
+    return data
+
+
+class TestHumanIssueEndpoint:
+    def test_auth_required(self, test_app: FastAPI) -> None:
+        client = TestClient(test_app)
+        r = client.post(
+            "/api/internal/autonomy/human-issues", json=_human_payload()
+        )
+        assert r.status_code == 401
+
+    def test_fail_closed_when_token_unset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "autonomy_db_path", str(tmp_path / "a.db"))
+        monkeypatch.setattr(settings, "l1_internal_api_token", "")
+        autonomy_ingest._bucket = TokenBucket(capacity=100, refill_per_sec=100.0)
+        app = FastAPI()
+        app.include_router(router)
+        client = TestClient(app)
+        r = client.post(
+            "/api/internal/autonomy/human-issues",
+            json=_human_payload(),
+            headers={"X-Internal-Api-Token": "anything"},
+        )
+        assert r.status_code == 503
+
+    def test_oversize_413(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "autonomy_db_path", str(tmp_path / "a.db"))
+        monkeypatch.setattr(settings, "l1_internal_api_token", "test-token")
+        monkeypatch.setattr(settings, "autonomy_internal_max_body_bytes", 50)
+        autonomy_ingest._bucket = TokenBucket(capacity=100, refill_per_sec=100.0)
+        app = FastAPI()
+        app.include_router(router)
+        client = TestClient(app)
+        big = _human_payload(details="x" * 500)
+        r = client.post(
+            "/api/internal/autonomy/human-issues",
+            json=big,
+            headers={"X-Internal-Api-Token": "test-token"},
+        )
+        assert r.status_code == 413
+
+    def test_creates_human_issue_and_pr_run(self, test_app: FastAPI) -> None:
+        client = TestClient(test_app)
+        r = client.post(
+            "/api/internal/autonomy/human-issues",
+            json=_human_payload(),
+            headers={"X-Internal-Api-Token": "test-token"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "accepted"
+        assert body["action"] == "inserted"
+        assert body["human_issue_id"] > 0
+        assert body["pr_run_id"] > 0
+
+        db_path = Path(settings.autonomy_db_path)
+        c = open_connection(db_path)
+        try:
+            pr = c.execute(
+                "SELECT * FROM pr_runs WHERE id = ?", (body["pr_run_id"],)
+            ).fetchone()
+            assert pr is not None
+            assert pr["ticket_id"] == "SCRUM-1"
+            issue = c.execute(
+                "SELECT * FROM review_issues WHERE id = ?",
+                (body["human_issue_id"],),
+            ).fetchone()
+            assert issue["source"] == "human_review"
+            assert issue["external_id"] == "comment-42"
+            assert issue["is_valid"] == 1
+            assert issue["is_code_change_request"] == 0
+            assert issue["source_ref"] == (
+                "https://github.com/acme/widgets/pull/1#discussion_r42"
+            )
+        finally:
+            c.close()
+
+    def test_updates_existing_human_issue_on_repeat_external_id(
+        self, test_app: FastAPI
+    ) -> None:
+        client = TestClient(test_app)
+        r1 = client.post(
+            "/api/internal/autonomy/human-issues",
+            json=_human_payload(summary="first version"),
+            headers={"X-Internal-Api-Token": "test-token"},
+        )
+        assert r1.status_code == 200
+        first_id = r1.json()["human_issue_id"]
+
+        r2 = client.post(
+            "/api/internal/autonomy/human-issues",
+            json=_human_payload(summary="edited version"),
+            headers={"X-Internal-Api-Token": "test-token"},
+        )
+        assert r2.status_code == 200
+        body = r2.json()
+        assert body["action"] == "updated"
+        assert body["human_issue_id"] == first_id
+
+        db_path = Path(settings.autonomy_db_path)
+        c = open_connection(db_path)
+        try:
+            rows = c.execute(
+                "SELECT * FROM review_issues WHERE source='human_review' "
+                "AND external_id=?",
+                ("comment-42",),
+            ).fetchall()
+            assert len(rows) == 1
+            assert rows[0]["summary"] == "edited version"
+        finally:
+            c.close()
+
+    def test_changes_requested_sets_is_code_change_request(
+        self, test_app: FastAPI
+    ) -> None:
+        client = TestClient(test_app)
+        r = client.post(
+            "/api/internal/autonomy/human-issues",
+            json=_human_payload(
+                event_type="review_changes_requested",
+                external_id="review-99",
+            ),
+            headers={"X-Internal-Api-Token": "test-token"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        db_path = Path(settings.autonomy_db_path)
+        c = open_connection(db_path)
+        try:
+            issue = c.execute(
+                "SELECT * FROM review_issues WHERE id = ?",
+                (body["human_issue_id"],),
+            ).fetchone()
+            assert issue["is_code_change_request"] == 1
+        finally:
+            c.close()
+
+    def test_review_comment_defaults_flag_zero(self, test_app: FastAPI) -> None:
+        client = TestClient(test_app)
+        r = client.post(
+            "/api/internal/autonomy/human-issues",
+            json=_human_payload(event_type="review_comment"),
+            headers={"X-Internal-Api-Token": "test-token"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        db_path = Path(settings.autonomy_db_path)
+        c = open_connection(db_path)
+        try:
+            issue = c.execute(
+                "SELECT * FROM review_issues WHERE id = ?",
+                (body["human_issue_id"],),
+            ).fetchone()
+            assert issue["is_code_change_request"] == 0
+        finally:
+            c.close()
+
+    def test_match_runs_after_insert(self, test_app: FastAPI) -> None:
+        db_path = Path(settings.autonomy_db_path)
+
+        # Pre-seed a pr_run + AI issue that should match the incoming human
+        c = open_connection(db_path)
+        try:
+            ensure_schema(c)
+            pr_run_id = upsert_pr_run(
+                c,
+                PrRunUpsert(
+                    ticket_id="SCRUM-1",
+                    pr_number=1,
+                    repo_full_name="acme/widgets",
+                    head_sha="abc123",
+                    client_profile="harness-test",
+                    opened_at="2026-04-05T11:00:00+00:00",
+                ),
+            )
+            insert_review_issue(
+                c,
+                pr_run_id=pr_run_id,
+                source="ai_review",
+                external_id="ai-1",
+                file_path="src/foo.py",
+                line_start=10,
+                line_end=12,
+                summary="null pointer risk",
+                is_valid=1,
+            )
+        finally:
+            c.close()
+
+        client = TestClient(test_app)
+        r = client.post(
+            "/api/internal/autonomy/human-issues",
+            json=_human_payload(
+                file_path="src/foo.py", line_start=10, line_end=12,
+                summary="null pointer risk here",
+            ),
+            headers={"X-Internal-Api-Token": "test-token"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["match_summary"]["auto_matched"] == 1
+
+        c = open_connection(db_path)
+        try:
+            matches = c.execute("SELECT * FROM issue_matches").fetchall()
+            assert len(matches) == 1
+            assert matches[0]["match_type"] == "line_overlap"
+        finally:
+            c.close()

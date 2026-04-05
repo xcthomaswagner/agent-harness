@@ -647,7 +647,12 @@ def build_trace_list_row(
 
 
 def consolidate_worktree_logs(
-    ticket_id: str, trace_id: str, worktree_path: str
+    ticket_id: str,
+    trace_id: str,
+    worktree_path: str,
+    *,
+    repo_full_name: str = "",
+    head_sha: str = "",
 ) -> None:
     """Import pipeline.jsonl and artifacts from a worktree into the persistent trace.
 
@@ -716,5 +721,30 @@ def consolidate_worktree_logs(
             plan_version=plan_path.stem,
             content=plan_path.read_text()[:5000],
         )
+
+    # Autonomy sidecar ingest (best-effort; must never break consolidation)
+    if repo_full_name and head_sha:
+        try:
+            from autonomy_artifact_ingest import ingest_worktree_sidecars
+            result = ingest_worktree_sidecars(
+                worktree_path,
+                ticket_id=ticket_id,
+                repo_full_name=repo_full_name,
+                head_sha=head_sha,
+            )
+            logger.info(
+                "autonomy_sidecars_ingested",
+                ticket_id=ticket_id,
+                sidecars_present=result.sidecars_present,
+                code_review=result.code_review_issues_staged,
+                qa=result.qa_issues_staged,
+                validated=result.judge_validated,
+                rejected=result.judge_rejected,
+                failures=result.parse_failures,
+            )
+        except Exception:
+            logger.exception(
+                "autonomy_sidecar_ingest_failed", ticket_id=ticket_id
+            )
 
     logger.info("worktree_logs_consolidated", ticket_id=ticket_id, trace_id=trace_id)

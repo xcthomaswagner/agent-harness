@@ -17,6 +17,7 @@ import structlog
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
+from autonomy_metrics import compute_profile_metrics
 from autonomy_store import (
     ensure_schema,
     list_client_profiles,
@@ -104,29 +105,33 @@ def _fmt_pct(value: float | None) -> str:
 def _compute_profile_metrics(
     conn: sqlite3.Connection, profile: str, window_days: int
 ) -> dict[str, Any]:
-    """Compute Phase 1 metrics for a single client profile."""
-    cutoff = (datetime.now(UTC) - timedelta(days=window_days)).isoformat()
-    rows = list_pr_runs(conn, client_profile=profile, since_iso=cutoff)
-    sample_size = len(rows)
-    merged_count = sum(1 for r in rows if r["merged"])
-    first_pass = sum(1 for r in rows if r["first_pass_accepted"])
-    fpa_rate = first_pass / sample_size if sample_size else 0.0
-    return {
-        "client_profile": profile,
-        "sample_size": sample_size,
-        "merged_count": merged_count,
-        "first_pass_count": first_pass,
-        "first_pass_acceptance_rate": round(fpa_rate, 3),
-        "defect_escape_rate": None,  # phase 2
-        "self_review_catch_rate": None,  # phase 2
-        "recommended_mode": "conservative",
-        "data_quality_status": "phase1_partial",
-        "data_quality_notes": [
-            "defect_escape_not_yet_computed",
-            "self_review_catch_not_yet_computed",
-        ],
-        "recent_rows": rows[:20],
-    }
+    """Compute Phase 2 metrics for a single client profile (dashboard view)."""
+    return compute_profile_metrics(conn, profile, window_days)
+
+
+_DQ_STATUS_BADGE: dict[str, str] = {
+    "good": "badge-success",
+    "degraded": "badge-warning",
+    "insufficient_data": "badge-secondary",
+}
+
+
+def _catch_rate_badge_class(value: float | None) -> str:
+    if value is None:
+        return "badge-secondary"
+    if value >= 0.85:
+        return "badge-success"
+    if value >= 0.70:
+        return "badge-warning"
+    return "badge-error"
+
+
+def _sidecar_badge_class(value: float) -> str:
+    if value >= 0.8:
+        return "badge-success"
+    if value >= 0.5:
+        return "badge-warning"
+    return "badge-error"
 
 
 def _render_profile_card(metrics: dict[str, Any]) -> str:
@@ -137,12 +142,41 @@ def _render_profile_card(metrics: dict[str, Any]) -> str:
     merged = metrics["merged_count"]
     mode = metrics["recommended_mode"]
     mode_cls = _MODE_BADGE.get(mode, "badge-secondary")
+
+    catch = metrics["self_review_catch_rate"]
+    human_count = metrics["human_issue_count"]
+    matched_count = metrics["matched_human_issue_count"]
+    unmatched_count = metrics["unmatched_human_issue_count"]
+    sidecar_cov = metrics["sidecar_coverage"]
     dq_status = metrics["data_quality_status"]
-    dq_badge_cls = "badge-warning" if dq_status != "ok" else "badge-success"
+    dq_notes: list[str] = list(metrics["data_quality_notes"])
+
+    dq_badge_cls = _DQ_STATUS_BADGE.get(dq_status, "badge-warning")
 
     fpa_line = (
         f"{_fmt_pct(fpa)} ({first_pass} of {sample})" if sample else "— (no data)"
     )
+
+    catch_cls = _catch_rate_badge_class(catch)
+    catch_display = _fmt_pct(catch)
+    sidecar_cls = _sidecar_badge_class(sidecar_cov)
+    sidecar_display = _fmt_pct(sidecar_cov)
+
+    humans_line = (
+        f"{matched_count}/{human_count} matched"
+        + (f" ({unmatched_count} unmatched)" if unmatched_count > 0 else "")
+        if human_count > 0
+        else "— (no human issues)"
+    )
+
+    if dq_notes:
+        notes_html = " ".join(
+            f'<span class="badge badge-warning" '
+            f'style="margin-left:4px">{_e(n)}</span>'
+            for n in dq_notes
+        )
+    else:
+        notes_html = ""
 
     return (
         '<div class="card">'
@@ -155,10 +189,20 @@ def _render_profile_card(metrics: dict[str, Any]) -> str:
         f'<span class="metric-value">{merged}</span></div>'
         '<div class="metric-row">'
         '<span class="metric-label">Defect escape</span>'
-        '<span class="metric-value">— (phase 2)</span></div>'
+        '<span class="metric-value">— (phase 3)</span></div>'
         '<div class="metric-row">'
         '<span class="metric-label">Self-review catch</span>'
-        '<span class="metric-value">— (phase 2)</span></div>'
+        f'<span class="metric-value">'
+        f'<span class="badge {catch_cls}">{_e(catch_display)}</span>'
+        '</span></div>'
+        '<div class="metric-row">'
+        '<span class="metric-label">Sidecar coverage</span>'
+        f'<span class="metric-value">'
+        f'<span class="badge {sidecar_cls}">{_e(sidecar_display)}</span>'
+        '</span></div>'
+        '<div class="metric-row">'
+        '<span class="metric-label">Human issues</span>'
+        f'<span class="metric-value">{_e(humans_line)}</span></div>'
         '<div class="metric-row">'
         '<span class="metric-label">Sample size</span>'
         f'<span class="metric-value">{sample} PRs</span></div>'
@@ -169,8 +213,147 @@ def _render_profile_card(metrics: dict[str, Any]) -> str:
         '<div class="metric-row">'
         '<span class="metric-label">Data quality</span>'
         f'<span class="metric-value">'
-        f'<span class="badge {dq_badge_cls}">{_e(dq_status)}</span></span></div>'
+        f'<span class="badge {dq_badge_cls}">{_e(dq_status)}</span>'
+        f'{notes_html}'
+        '</span></div>'
         '</div>'
+    )
+
+
+# ---------------------------------------------------------------------------
+# Unmatched human issues + suggested matches sections
+# ---------------------------------------------------------------------------
+
+def _query_unmatched_human_issues(
+    conn: sqlite3.Connection,
+    pr_run_ids: list[int],
+    limit: int = 25,
+) -> list[sqlite3.Row]:
+    """Return up to `limit` human-review issues (pr_run_ids scope) that have
+    no qualifying issue_matches row (confidence >= 0.8 and not 'suggested').
+    """
+    if not pr_run_ids:
+        return []
+    placeholders = ",".join("?" * len(pr_run_ids))
+    sql = f"""
+        SELECT ri.id, ri.pr_run_id, ri.file_path, ri.line_start, ri.line_end,
+               ri.summary, ri.created_at,
+               p.pr_number, p.pr_url, p.client_profile, p.ticket_id
+        FROM review_issues ri
+        JOIN pr_runs p ON p.id = ri.pr_run_id
+        WHERE ri.pr_run_id IN ({placeholders})
+          AND ri.source = 'human_review'
+          AND ri.is_valid = 1
+          AND NOT EXISTS (
+              SELECT 1 FROM issue_matches m
+              WHERE m.human_issue_id = ri.id
+                AND m.confidence >= 0.8
+                AND m.matched_by != 'suggested'
+          )
+        ORDER BY ri.created_at DESC, ri.id DESC
+        LIMIT ?
+    """
+    return list(conn.execute(sql, [*pr_run_ids, limit]).fetchall())
+
+
+def _query_suggested_matches(
+    conn: sqlite3.Connection,
+    pr_run_ids: list[int],
+    limit: int = 25,
+) -> list[sqlite3.Row]:
+    """Return Tier-4 suggested matches (matched_by='suggested' and
+    confidence < 0.8) joined with both sides' summaries, scoped to
+    pr_runs in `pr_run_ids`.
+    """
+    if not pr_run_ids:
+        return []
+    placeholders = ",".join("?" * len(pr_run_ids))
+    sql = f"""
+        SELECT m.id AS match_id, m.confidence, m.matched_at,
+               h.id AS human_id, h.summary AS human_summary,
+               h.acceptance_criterion_ref AS ac_ref,
+               a.id AS ai_id, a.summary AS ai_summary,
+               p.pr_number, p.pr_url, p.client_profile, p.ticket_id
+        FROM issue_matches m
+        JOIN review_issues h ON h.id = m.human_issue_id
+        JOIN review_issues a ON a.id = m.ai_issue_id
+        JOIN pr_runs p ON p.id = h.pr_run_id
+        WHERE m.matched_by = 'suggested'
+          AND m.confidence < 0.8
+          AND h.pr_run_id IN ({placeholders})
+        ORDER BY m.matched_at DESC, m.id DESC
+        LIMIT ?
+    """
+    return list(conn.execute(sql, [*pr_run_ids, limit]).fetchall())
+
+
+def _truncate(text: str, max_len: int = 120) -> str:
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "…"
+
+
+def _render_unmatched_section(rows: list[sqlite3.Row]) -> str:
+    if not rows:
+        return ""
+    body_parts: list[str] = []
+    for r in rows:
+        pr_url = r["pr_url"] or ""
+        pr_num = r["pr_number"]
+        pr_cell = (
+            f'<a href="{_e(pr_url)}">#{pr_num}</a>' if pr_url else f"#{pr_num}"
+        )
+        profile = _e(r["client_profile"] or "—")
+        file_path = _e(r["file_path"] or "—")
+        line_start = int(r["line_start"] or 0)
+        line_end = int(r["line_end"] or 0)
+        if line_start == 0 and line_end == 0:
+            lines = "—"
+        elif line_start == line_end or line_end == 0:
+            lines = str(line_start)
+        else:
+            lines = f"{line_start}-{line_end}"
+        summary = _e(_truncate(r["summary"] or ""))
+        opened = _e((r["created_at"] or "")[:19])
+        body_parts.append(
+            f"<tr><td>{pr_cell}</td><td>{profile}</td><td>{file_path}</td>"
+            f"<td>{_e(lines)}</td><td>{summary}</td><td>{opened}</td></tr>"
+        )
+    body = "".join(body_parts)
+    return (
+        '<h2 style="margin-top:24px">Unmatched Human Issues</h2>'
+        '<table><thead><tr>'
+        '<th>PR</th><th>Profile</th><th>File</th><th>Lines</th>'
+        '<th>Summary</th><th>Opened</th>'
+        '</tr></thead>'
+        f'<tbody>{body}</tbody></table>'
+    )
+
+
+def _render_suggested_section(rows: list[sqlite3.Row]) -> str:
+    if not rows:
+        return ""
+    body_parts: list[str] = []
+    for r in rows:
+        human_summary = _e(_truncate(r["human_summary"] or ""))
+        ai_summary = _e(_truncate(r["ai_summary"] or ""))
+        ac_ref = _e(r["ac_ref"] or "—")
+        confidence = float(r["confidence"] or 0.0)
+        conf_cell = f"{confidence:.2f}"
+        body_parts.append(
+            f"<tr><td>{human_summary}</td><td>{ai_summary}</td>"
+            f"<td>{ac_ref}</td><td>{_e(conf_cell)}</td></tr>"
+        )
+    body = "".join(body_parts)
+    return (
+        '<h2 style="margin-top:24px">Suggested Matches (Tier 4)</h2>'
+        '<p class="meta">promote via POST /api/autonomy/manual-match '
+        '(Phase 3)</p>'
+        '<table><thead><tr>'
+        '<th>Human issue</th><th>AI issue</th><th>AC ref</th>'
+        '<th>Confidence</th>'
+        '</tr></thead>'
+        f'<tbody>{body}</tbody></table>'
     )
 
 
@@ -259,6 +442,18 @@ def autonomy_dashboard(
             )
         else:
             table_rows = list_pr_runs(conn, since_iso=cutoff)
+
+        # Scope for unmatched/suggested sections = all pr_runs shown in cards.
+        scoped_pr_run_ids: list[int] = []
+        for m in profile_metrics:
+            for r in m.get("recent_rows", []):
+                scoped_pr_run_ids.append(int(r["id"]))
+        # recent_rows on each card is capped at 20; for the issue sections
+        # we want the full window scope, so recompute via table_rows too.
+        scoped_pr_run_ids = [int(r["id"]) for r in table_rows]
+
+        unmatched_rows = _query_unmatched_human_issues(conn, scoped_pr_run_ids)
+        suggested_rows = _query_suggested_matches(conn, scoped_pr_run_ids)
     finally:
         conn.close()
 
@@ -281,6 +476,8 @@ def autonomy_dashboard(
 
     selector_html = _render_selector(all_profiles, client_profile)
     table_html = _render_pr_table(table_rows)
+    unmatched_html = _render_unmatched_section(unmatched_rows)
+    suggested_html = _render_suggested_section(suggested_rows)
 
     title_suffix = (
         f" — {_e(client_profile)}" if client_profile is not None else " — All"
@@ -301,6 +498,8 @@ def autonomy_dashboard(
 <div class="card-grid">{cards_html}</div>
 <h2 style="margin-top:24px">Recent PR Outcomes</h2>
 {table_html}
+{unmatched_html}
+{suggested_html}
 </div></body></html>"""
 
     return HTMLResponse(content=html_doc)

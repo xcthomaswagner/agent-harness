@@ -705,3 +705,347 @@ async def test_forwarder_succeeds_on_first_try() -> None:
     assert captured["json"]["event_type"] == "pr_opened"
 
 
+# --- Human issue forwarding ---
+
+
+class TestHumanIssueForwarding:
+    """Tests for L3 -> L1 human-issue forwarding."""
+
+    async def test_review_approved_with_body_forwards_human_issue(self) -> None:
+        payload = _base_pr_payload("submitted")
+        payload["review"] = {
+            "state": "approved",
+            "id": 9001,
+            "body": "LGTM with a few nits" * 40,  # long body to test truncation
+            "submitted_at": "2026-04-05T12:00:00Z",
+            "html_url": "https://github.com/org/repo/pull/42#pullrequestreview-9001",
+            "user": {"login": "lead-dev", "type": "User"},
+        }
+
+        with (
+            patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+            patch.object(
+                l3_main, "_forward_autonomy_event", new_callable=AsyncMock
+            ),
+            patch.object(
+                l3_main, "_forward_human_issue", new_callable=AsyncMock
+            ) as mock_forward,
+        ):
+            async with await _make_client() as client:
+                response = await _post_webhook(client, payload, "pull_request_review")
+
+            assert response.status_code == 202
+            import asyncio as _asyncio
+            await _asyncio.sleep(0.05)
+
+            assert mock_forward.await_count == 1
+            issue = mock_forward.await_args.args[0]
+            assert issue["event_type"] == "review_approved"
+            assert issue["reviewer_login"] == "lead-dev"
+            assert issue["external_id"] == "9001"
+            assert issue["ticket_id"] == "SCRUM-16"
+            assert issue["pr_number"] == 42
+            assert issue["repo_full_name"] == "org/repo"
+            assert issue["head_sha"] == "abc123"
+            assert issue["file_path"] == ""
+            assert issue["line_start"] == 0
+            assert issue["line_end"] == 0
+            assert len(issue["summary"]) <= 500
+            assert issue["comment_url"].endswith("9001")
+            assert issue["event_at"] == "2026-04-05T12:00:00Z"
+
+    async def test_review_approved_empty_body_no_forward(self) -> None:
+        payload = _base_pr_payload("submitted")
+        payload["review"] = {
+            "state": "approved",
+            "id": 9001,
+            "body": "",
+            "html_url": "https://github.com/org/repo/pull/42#pullrequestreview-9001",
+            "user": {"login": "lead-dev"},
+        }
+
+        with (
+            patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+            patch.object(
+                l3_main, "_forward_autonomy_event", new_callable=AsyncMock
+            ),
+            patch.object(
+                l3_main, "_forward_human_issue", new_callable=AsyncMock
+            ) as mock_forward,
+        ):
+            async with await _make_client() as client:
+                response = await _post_webhook(client, payload, "pull_request_review")
+
+            assert response.status_code == 202
+            import asyncio as _asyncio
+            await _asyncio.sleep(0.05)
+
+            assert mock_forward.await_count == 0
+
+    async def test_bot_review_not_forwarded(self) -> None:
+        payload = _base_pr_payload("submitted")
+        payload["review"] = {
+            "state": "approved",
+            "id": 9001,
+            "body": "Approved by bot",
+            "html_url": "https://github.com/org/repo/pull/42#pullrequestreview-9001",
+            "user": {"login": "automation-bot", "type": "Bot"},
+        }
+
+        with (
+            patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+            patch.object(
+                l3_main, "_forward_autonomy_event", new_callable=AsyncMock
+            ),
+            patch.object(
+                l3_main, "_forward_human_issue", new_callable=AsyncMock
+            ) as mock_forward,
+        ):
+            async with await _make_client() as client:
+                response = await _post_webhook(client, payload, "pull_request_review")
+
+            assert response.status_code == 202
+            import asyncio as _asyncio
+            await _asyncio.sleep(0.05)
+
+            assert mock_forward.await_count == 0
+
+    async def test_review_changes_requested_forwards_with_flag_event_type(self) -> None:
+        payload = _base_pr_payload("submitted")
+        payload["review"] = {
+            "state": "changes_requested",
+            "id": 7777,
+            "body": "Please fix error handling",
+            "submitted_at": "2026-04-05T13:00:00Z",
+            "html_url": "https://github.com/org/repo/pull/42#pullrequestreview-7777",
+            "user": {"login": "lead-dev", "type": "User"},
+        }
+
+        with (
+            patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+            patch.object(l3_main, "_get_spawner") as mock_get,
+            patch.object(
+                l3_main, "_forward_autonomy_event", new_callable=AsyncMock
+            ),
+            patch.object(
+                l3_main, "_forward_human_issue", new_callable=AsyncMock
+            ) as mock_forward,
+        ):
+            mock_get.return_value = MagicMock()
+            async with await _make_client() as client:
+                response = await _post_webhook(client, payload, "pull_request_review")
+
+            assert response.status_code == 202
+            import asyncio as _asyncio
+            await _asyncio.sleep(0.05)
+
+            assert mock_forward.await_count == 1
+            issue = mock_forward.await_args.args[0]
+            assert issue["event_type"] == "review_changes_requested"
+            assert issue["external_id"] == "7777"
+            assert issue["summary"] == "Please fix error handling"
+
+    async def test_pull_request_review_comment_created_forwards_with_path_and_line(
+        self,
+    ) -> None:
+        payload = {
+            "action": "created",
+            "repository": {"full_name": "org/repo"},
+            "pull_request": {
+                "number": 42,
+                "head": {"ref": "ai/SCRUM-16", "sha": "abc123"},
+                "base": {"sha": "def456", "repo": {"full_name": "org/repo"}},
+            },
+            "comment": {
+                "id": 555,
+                "path": "src/app.py",
+                "line": 42,
+                "original_line": 40,
+                "body": "Consider using a set here",
+                "created_at": "2026-04-05T14:00:00Z",
+                "html_url": "https://github.com/org/repo/pull/42#discussion_r555",
+                "user": {"login": "reviewer", "type": "User"},
+            },
+        }
+
+        with (
+            patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+            patch.object(
+                l3_main, "_forward_human_issue", new_callable=AsyncMock
+            ) as mock_forward,
+        ):
+            async with await _make_client() as client:
+                response = await _post_webhook(
+                    client, payload, "pull_request_review_comment"
+                )
+
+            assert response.status_code == 202
+            assert response.json()["event_type"] == "review_comment_created"
+            import asyncio as _asyncio
+            await _asyncio.sleep(0.05)
+
+            assert mock_forward.await_count == 1
+            issue = mock_forward.await_args.args[0]
+            assert issue["event_type"] == "review_comment"
+            assert issue["file_path"] == "src/app.py"
+            assert issue["line_start"] == 42
+            assert issue["line_end"] == 42
+            assert issue["external_id"] == "555"
+            assert issue["ticket_id"] == "SCRUM-16"
+            assert issue["comment_url"].endswith("r555")
+
+    async def test_review_comment_edited_also_forwards(self) -> None:
+        payload = {
+            "action": "edited",
+            "repository": {"full_name": "org/repo"},
+            "pull_request": {
+                "number": 42,
+                "head": {"ref": "ai/SCRUM-16", "sha": "abc123"},
+                "base": {"sha": "def456", "repo": {"full_name": "org/repo"}},
+            },
+            "comment": {
+                "id": 555,
+                "path": "src/app.py",
+                "line": 42,
+                "body": "Edited body",
+                "created_at": "2026-04-05T14:00:00Z",
+                "html_url": "https://github.com/org/repo/pull/42#discussion_r555",
+                "user": {"login": "reviewer"},
+            },
+        }
+
+        with (
+            patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+            patch.object(
+                l3_main, "_forward_human_issue", new_callable=AsyncMock
+            ) as mock_forward,
+        ):
+            async with await _make_client() as client:
+                response = await _post_webhook(
+                    client, payload, "pull_request_review_comment"
+                )
+
+            assert response.status_code == 202
+            import asyncio as _asyncio
+            await _asyncio.sleep(0.05)
+
+            assert mock_forward.await_count == 1
+
+    async def test_review_comment_deleted_does_not_forward(self) -> None:
+        payload = {
+            "action": "deleted",
+            "repository": {"full_name": "org/repo"},
+            "pull_request": {
+                "number": 42,
+                "head": {"ref": "ai/SCRUM-16", "sha": "abc123"},
+                "base": {"sha": "def456", "repo": {"full_name": "org/repo"}},
+            },
+            "comment": {
+                "id": 555,
+                "path": "src/app.py",
+                "line": 42,
+                "body": "Goodbye",
+                "html_url": "https://github.com/org/repo/pull/42#discussion_r555",
+                "user": {"login": "reviewer"},
+            },
+        }
+
+        with (
+            patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+            patch.object(
+                l3_main, "_forward_human_issue", new_callable=AsyncMock
+            ) as mock_forward,
+        ):
+            async with await _make_client() as client:
+                response = await _post_webhook(
+                    client, payload, "pull_request_review_comment"
+                )
+
+            assert response.status_code == 202
+            # deleted is classified as IGNORED, so no handler runs
+            import asyncio as _asyncio
+            await _asyncio.sleep(0.05)
+
+            assert mock_forward.await_count == 0
+
+    async def test_review_comment_no_ticket_id_skipped(self) -> None:
+        payload = {
+            "action": "created",
+            "repository": {"full_name": "org/repo"},
+            "pull_request": {
+                "number": 42,
+                "head": {"ref": "feature/other-branch", "sha": "abc123"},
+                "base": {"sha": "def456", "repo": {"full_name": "org/repo"}},
+            },
+            "comment": {
+                "id": 555,
+                "path": "src/app.py",
+                "line": 42,
+                "body": "Nit",
+                "html_url": "https://github.com/org/repo/pull/42#discussion_r555",
+                "user": {"login": "reviewer"},
+            },
+        }
+
+        with (
+            patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+            patch.object(
+                l3_main, "_forward_human_issue", new_callable=AsyncMock
+            ) as mock_forward,
+        ):
+            async with await _make_client() as client:
+                response = await _post_webhook(
+                    client, payload, "pull_request_review_comment"
+                )
+
+            assert response.status_code == 202
+            import asyncio as _asyncio
+            await _asyncio.sleep(0.05)
+
+            assert mock_forward.await_count == 0
+
+    async def test_human_issue_forwarder_retry_then_log_on_double_fail(self) -> None:
+        issue = {
+            "event_type": "review_comment",
+            "repo_full_name": "org/repo",
+            "pr_number": 1,
+            "head_sha": "abc",
+            "ticket_id": "SCRUM-1",
+            "external_id": "1",
+            "summary": "hi",
+            "event_at": "2026-04-05T00:00:00Z",
+        }
+
+        call_count = 0
+
+        class _FailingClient:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            async def __aenter__(self) -> _FailingClient:
+                return self
+
+            async def __aexit__(self, *args) -> None:
+                return None
+
+            async def post(self, *args, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                raise httpx.RequestError("boom")
+
+        with (
+            patch.object(l3_main, "L1_INTERNAL_API_TOKEN", "secret"),
+            patch("main.httpx.AsyncClient", _FailingClient),
+            patch.object(l3_main, "logger") as mock_logger,
+            patch("main.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await l3_main._forward_human_issue(issue)
+
+        assert call_count == 2
+        error_calls = [
+            c for c in mock_logger.error.call_args_list
+            if c.args and c.args[0] == "l1_human_issue_forward_failed"
+        ]
+        assert len(error_calls) == 1
+
+
