@@ -20,7 +20,7 @@ Implementation
 │                       hardcoded secrets │
 │  gitleaks          → committed secrets  │
 │                                         │
-│  Machine-verified. Zero false negatives │
+│  Machine-verified. High coverage │
 │  for covered patterns. Bypasses Judge.  │
 └─────────────────┬───────────────────────┘
                   │
@@ -97,7 +97,7 @@ Reviews for issues tools cannot detect:
 ### Judge (LLM — Validation)
 
 Filters Code Reviewer findings to prevent false positives. For security findings:
-- Uses **Opus model** (stronger reasoning than Sonnet)
+- Team lead spawns the Judge with **Opus model** when security issues are present (default model is Sonnet for non-security findings)
 - Lower threshold: **60+** (vs 80+ for non-security findings)
 - Evaluates: Is it real? Is the code path reachable? Is the fix correct? Is it pre-existing?
 
