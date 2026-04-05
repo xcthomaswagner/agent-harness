@@ -21,6 +21,8 @@ from shared.env_sanitize import sanitized_env
 
 from adapters.ado_adapter import AdoAdapter
 from adapters.jira_adapter import JiraAdapter
+from autonomy_dashboard import router as autonomy_dashboard_router
+from autonomy_ingest import router as autonomy_router
 from config import settings
 from models import TicketPayload
 from pipeline import Pipeline
@@ -47,6 +49,8 @@ app = FastAPI(
     version="0.1.0",
 )
 app.include_router(trace_router)
+app.include_router(autonomy_router)
+app.include_router(autonomy_dashboard_router)
 
 
 @app.on_event("startup")

@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 from httpx import ASGITransport, AsyncClient
 
 import main as l3_main
@@ -482,3 +483,225 @@ class TestLookupTraceId:
             result = l3_main._lookup_trace_id("PROJ-4")
         assert len(result) == 12
         int(result, 16)  # Should be valid hex
+
+
+# --- Autonomy event forwarding ---
+
+
+def _base_pr_payload(action: str = "opened", *, merged: bool = False) -> dict:
+    return {
+        "action": action,
+        "repository": {"full_name": "org/repo"},
+        "pull_request": {
+            "number": 42,
+            "html_url": "https://github.com/org/repo/pull/42",
+            "diff_url": "https://github.com/org/repo/pull/42.diff",
+            "body": "Implements SCRUM-16",
+            "merged": merged,
+            "merged_at": "2026-04-05T12:00:00Z" if merged else None,
+            "head": {"ref": "ai/SCRUM-16", "sha": "abc123"},
+            "base": {"sha": "def456", "repo": {"full_name": "org/repo"}},
+            "labels": [],
+        },
+    }
+
+
+async def test_pr_opened_forwards_autonomy_event() -> None:
+    payload = _base_pr_payload("opened")
+
+    with (
+        patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+        patch.object(l3_main, "_get_spawner") as mock_get,
+        patch.object(
+            l3_main, "_forward_autonomy_event", new_callable=AsyncMock
+        ) as mock_forward,
+    ):
+        mock_get.return_value = MagicMock()
+
+        async with await _make_client() as client:
+            response = await _post_webhook(client, payload, "pull_request")
+
+        assert response.status_code == 202
+        # Allow background task to run
+        import asyncio as _asyncio
+        await _asyncio.sleep(0.05)
+
+        assert mock_forward.await_count >= 1
+        event = mock_forward.await_args.args[0]
+        assert event["event_type"] == "pr_opened"
+        assert event["repo_full_name"] == "org/repo"
+        assert event["pr_number"] == 42
+        assert event["head_sha"] == "abc123"
+        assert event["ticket_id"] == "SCRUM-16"
+        assert event["head_ref"] == "ai/SCRUM-16"
+        assert event["base_sha"] == "def456"
+        assert event["pr_url"] == "https://github.com/org/repo/pull/42"
+        assert "event_at" in event
+
+
+async def test_review_approved_forwards_autonomy_event() -> None:
+    payload = _base_pr_payload("submitted")
+    payload["review"] = {
+        "state": "approved",
+        "id": 9001,
+        "body": "LGTM",
+        "html_url": "https://github.com/org/repo/pull/42#pullrequestreview-9001",
+        "user": {"login": "lead-dev"},
+    }
+
+    with (
+        patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+        patch.object(
+            l3_main, "_forward_autonomy_event", new_callable=AsyncMock
+        ) as mock_forward,
+    ):
+        async with await _make_client() as client:
+            response = await _post_webhook(client, payload, "pull_request_review")
+
+        assert response.status_code == 202
+        import asyncio as _asyncio
+        await _asyncio.sleep(0.05)
+
+        assert mock_forward.await_count >= 1
+        event = mock_forward.await_args.args[0]
+        assert event["event_type"] == "review_approved"
+        assert event["reviewer_login"] == "lead-dev"
+        assert event["review_id"] == "9001"
+        assert event["review_body"] == "LGTM"
+
+
+async def test_pr_merged_forwards_autonomy_event() -> None:
+    payload = _base_pr_payload("closed", merged=True)
+
+    with (
+        patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+        patch.object(l3_main, "_get_spawner") as mock_get,
+        patch.object(
+            l3_main, "_forward_autonomy_event", new_callable=AsyncMock
+        ) as mock_forward,
+    ):
+        mock_get.return_value = MagicMock()
+
+        async with await _make_client() as client:
+            response = await _post_webhook(client, payload, "pull_request")
+
+        assert response.status_code == 202
+        assert response.json()["event_type"] == "pr_merged"
+
+        import asyncio as _asyncio
+        await _asyncio.sleep(0.05)
+
+        assert mock_forward.await_count >= 1
+        event = mock_forward.await_args.args[0]
+        assert event["event_type"] == "pr_merged"
+        assert event["merged_at"] == "2026-04-05T12:00:00Z"
+        assert event["ticket_id"] == "SCRUM-16"
+
+
+async def test_forwarder_short_circuits_when_token_empty() -> None:
+    """When L1_INTERNAL_API_TOKEN is empty, forwarder should not make HTTP calls."""
+    event = {
+        "event_type": "pr_opened",
+        "repo_full_name": "org/repo",
+        "pr_number": 1,
+        "head_sha": "abc",
+        "ticket_id": "SCRUM-1",
+        "event_at": "2026-04-05T00:00:00Z",
+    }
+
+    with (
+        patch.object(l3_main, "L1_INTERNAL_API_TOKEN", ""),
+        patch("main.httpx.AsyncClient") as mock_client,
+    ):
+        await l3_main._forward_autonomy_event(event)
+        mock_client.assert_not_called()
+
+
+async def test_forwarder_retries_once_on_request_error() -> None:
+    """Forwarder should retry once on httpx.RequestError, then log on double failure."""
+    event = {
+        "event_type": "pr_opened",
+        "repo_full_name": "org/repo",
+        "pr_number": 1,
+        "head_sha": "abc",
+        "ticket_id": "SCRUM-1",
+        "event_at": "2026-04-05T00:00:00Z",
+    }
+
+    call_count = 0
+
+    class _FailingClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self) -> _FailingClient:
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def post(self, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise httpx.RequestError("boom")
+
+    with (
+        patch.object(l3_main, "L1_INTERNAL_API_TOKEN", "secret"),
+        patch("main.httpx.AsyncClient", _FailingClient),
+        patch.object(l3_main, "logger") as mock_logger,
+        patch("main.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        await l3_main._forward_autonomy_event(event)
+
+    assert call_count == 2  # original + 1 retry
+    # Verify error was logged
+    error_calls = [
+        c for c in mock_logger.error.call_args_list
+        if c.args and c.args[0] == "l1_autonomy_event_forward_failed"
+    ]
+    assert len(error_calls) == 1
+
+
+async def test_forwarder_succeeds_on_first_try() -> None:
+    """Forwarder should POST to L1 with correct headers and not retry on 2xx."""
+    event = {
+        "event_type": "pr_opened",
+        "repo_full_name": "org/repo",
+        "pr_number": 1,
+        "head_sha": "abc",
+        "ticket_id": "SCRUM-1",
+        "event_at": "2026-04-05T00:00:00Z",
+    }
+
+    captured: dict = {}
+
+    class _OkClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self) -> _OkClient:
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def post(self, url, json=None, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            resp = MagicMock()
+            resp.status_code = 200
+            return resp
+
+    with (
+        patch.object(l3_main, "L1_INTERNAL_API_TOKEN", "secret-token"),
+        patch.object(l3_main, "L1_SERVICE_URL", "http://l1.test"),
+        patch("main.httpx.AsyncClient", _OkClient),
+    ):
+        await l3_main._forward_autonomy_event(event)
+
+    assert captured["url"] == "http://l1.test/api/internal/autonomy/events"
+    assert captured["headers"] == {"X-Internal-Api-Token": "secret-token"}
+    assert captured["json"]["event_type"] == "pr_opened"
+
+

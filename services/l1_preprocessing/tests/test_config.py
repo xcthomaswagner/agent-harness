@@ -47,7 +47,9 @@ class TestSettings:
         missing = []
         for field_name in settings_fields:
             env_name = field_name.upper()
-            has_secret_keyword = any(kw in field_name.lower() for kw in secret_keywords)
+            # Match on word boundaries so e.g. "path" doesn't match "pat"
+            parts = set(field_name.lower().split("_"))
+            has_secret_keyword = bool(parts & secret_keywords)
             if has_secret_keyword and env_name not in SECRET_VARS:
                 missing.append(env_name)
         assert not missing, f"Secret fields missing from SECRET_VARS: {missing}"

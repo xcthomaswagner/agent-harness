@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -9,9 +10,11 @@ import os
 import re
 import sys
 from collections import OrderedDict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import structlog
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
@@ -28,6 +31,8 @@ load_dotenv()
 logger = structlog.get_logger()
 
 WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
+L1_SERVICE_URL = os.getenv("L1_SERVICE_URL", "http://localhost:8000")
+L1_INTERNAL_API_TOKEN = os.getenv("L1_INTERNAL_API_TOKEN", "")
 BOT_USERNAME = os.getenv("BOT_GITHUB_USERNAME", "github-actions[bot]")
 # Hidden marker injected into all agent-posted comments for self-detection.
 # This catches bot-loops even when the agent uses the same GitHub user as the human.
@@ -111,6 +116,151 @@ def _lookup_trace_id(ticket_id: str) -> str:
     return generate_trace_id()
 
 
+# --- Autonomy event forwarding (L3 → L1) ---
+
+
+_AUTONOMY_EVENTS_PATH = "/api/internal/autonomy/events"
+
+
+async def _forward_autonomy_event(event: dict[str, Any]) -> None:
+    """POST normalized event to L1. Retries once on transient failure.
+
+    Logs and returns on final failure — does not raise.
+    Short-circuits with log if L1_INTERNAL_API_TOKEN is unset.
+    """
+    # TODO(phase2): persist backlog to data/autonomy-backlog.jsonl for later replay
+    if not L1_INTERNAL_API_TOKEN:
+        logger.info(
+            "l1_autonomy_event_forward_skipped",
+            reason="L1_INTERNAL_API_TOKEN unset",
+            event_type=event.get("event_type"),
+        )
+        return
+
+    url = f"{L1_SERVICE_URL.rstrip('/')}{_AUTONOMY_EVENTS_PATH}"
+    headers = {"X-Internal-Api-Token": L1_INTERNAL_API_TOKEN}
+
+    last_error: str = ""
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, json=event, headers=headers)
+            if resp.status_code >= 500:
+                last_error = f"HTTP {resp.status_code}"
+                if attempt == 0:
+                    await asyncio.sleep(1)
+                    continue
+            elif resp.status_code >= 400:
+                # Non-retryable client error
+                logger.error(
+                    "l1_autonomy_event_forward_failed",
+                    status_code=resp.status_code,
+                    body=resp.text[:500],
+                    event_type=event.get("event_type"),
+                    ticket_id=event.get("ticket_id"),
+                )
+                return
+            else:
+                return
+        except httpx.RequestError as exc:
+            last_error = f"RequestError: {exc}"
+            if attempt == 0:
+                await asyncio.sleep(1)
+                continue
+
+    logger.error(
+        "l1_autonomy_event_forward_failed",
+        error=last_error,
+        event_type=event.get("event_type"),
+        ticket_id=event.get("ticket_id"),
+        url=url,
+    )
+
+
+def _truncate(value: str | None, limit: int = 2000) -> str | None:
+    if value is None:
+        return None
+    return value if len(value) <= limit else value[:limit]
+
+
+def _build_autonomy_event(
+    event_type: str,
+    payload: dict[str, Any],
+    *,
+    event_at: str | None = None,
+) -> dict[str, Any] | None:
+    """Build a normalized AutonomyEventIn payload from a GitHub webhook payload.
+
+    Returns None if required fields are missing (no ticket_id, no PR number, etc.).
+    """
+    pr = payload.get("pull_request", {}) or {}
+    repo = payload.get("repository", {}) or {}
+    repo_full_name = repo.get("full_name", "") or (
+        pr.get("base", {}).get("repo", {}).get("full_name", "")
+    )
+    pr_number = pr.get("number", 0)
+    head = pr.get("head", {}) or {}
+    base = pr.get("base", {}) or {}
+    head_sha = head.get("sha", "")
+    ticket_id = _ticket_id_from_payload(payload)
+
+    if not (repo_full_name and pr_number and head_sha and ticket_id):
+        logger.debug(
+            "autonomy_event_missing_required_fields",
+            event_type=event_type,
+            repo_full_name=repo_full_name,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            ticket_id=ticket_id,
+        )
+        return None
+
+    event: dict[str, Any] = {
+        "event_type": event_type,
+        "repo_full_name": repo_full_name,
+        "pr_number": pr_number,
+        "head_sha": head_sha,
+        "ticket_id": ticket_id,
+        "event_at": event_at or datetime.now(UTC).isoformat(),
+        "pr_url": pr.get("html_url", "") or None,
+        "head_ref": head.get("ref", "") or None,
+        "base_sha": base.get("sha", "") or None,
+    }
+
+    if event_type == "pr_merged":
+        merged_at = pr.get("merged_at")
+        if merged_at:
+            event["merged_at"] = merged_at
+
+    review = payload.get("review") or {}
+    if review:
+        user = review.get("user") or {}
+        reviewer_login = user.get("login")
+        if reviewer_login:
+            event["reviewer_login"] = reviewer_login
+        review_id = review.get("id")
+        if review_id is not None:
+            event["review_id"] = str(review_id)
+        body = _truncate(review.get("body"))
+        if body is not None:
+            event["review_body"] = body
+        review_url = review.get("html_url")
+        if review_url:
+            event["comment_url"] = review_url
+
+    comment = payload.get("comment") or {}
+    if comment:
+        comment_id = comment.get("id")
+        if comment_id is not None:
+            event["comment_id"] = str(comment_id)
+        comment_url = comment.get("html_url")
+        if comment_url and "comment_url" not in event:
+            event["comment_url"] = comment_url
+
+    # Strip empty-string optionals for a cleaner payload
+    return {k: v for k, v in event.items() if v is not None and v != ""}
+
+
 # --- Event handlers ---
 
 
@@ -128,6 +278,13 @@ async def _handle_pr_opened(payload: dict[str, Any]) -> None:
     if ticket_id:
         append_trace(ticket_id, _lookup_trace_id(ticket_id), "l3_pr_review",
                      "pr_review_spawned", pr_number=pr_number)
+
+    # Forward autonomy event to L1 (pr_opened or pr_synchronized based on action)
+    action = payload.get("action", "")
+    autonomy_event_type = "pr_synchronized" if action == "synchronize" else "pr_opened"
+    autonomy_event = _build_autonomy_event(autonomy_event_type, payload)
+    if autonomy_event:
+        await _forward_autonomy_event(autonomy_event)
 
     branch = pr.get("head", {}).get("ref", "")
     repo = payload.get("repository", {}).get("full_name", "")
@@ -256,6 +413,11 @@ async def _handle_review_comment(payload: dict[str, Any]) -> None:
     log = logger.bind(pr_number=pr_number, author=comment_author)
     log.info("handling_review_comment")
 
+    # Forward autonomy event to L1
+    autonomy_event = _build_autonomy_event("review_comment", payload)
+    if autonomy_event:
+        await _forward_autonomy_event(autonomy_event)
+
     ticket_id = _ticket_id_from_payload(payload)
     if ticket_id:
         append_trace(ticket_id, _lookup_trace_id(ticket_id), "l3_comment",
@@ -288,6 +450,11 @@ async def _handle_review_changes_requested(payload: dict[str, Any]) -> None:
     log = logger.bind(pr_number=pr_number, reviewer=reviewer)
     log.info("handling_changes_requested")
 
+    # Forward autonomy event to L1
+    autonomy_event = _build_autonomy_event("review_changes_requested", payload)
+    if autonomy_event:
+        await _forward_autonomy_event(autonomy_event)
+
     ticket_id = _ticket_id_from_payload(payload)
     if ticket_id:
         append_trace(ticket_id, _lookup_trace_id(ticket_id), "l3_changes_requested",
@@ -315,6 +482,11 @@ async def _handle_review_approved(payload: dict[str, Any]) -> None:
 
     log = logger.bind(pr_number=pr_number, reviewer=reviewer)
     log.info("handling_review_approved")
+
+    # Forward autonomy event to L1
+    autonomy_event = _build_autonomy_event("review_approved", payload)
+    if autonomy_event:
+        await _forward_autonomy_event(autonomy_event)
 
     # Extract ticket type from branch name or PR labels
     labels = [label.get("name", "") for label in pr.get("labels", [])]
@@ -363,6 +535,22 @@ async def _handle_review_approved(payload: dict[str, Any]) -> None:
     )
 
 
+async def _handle_pr_merged(payload: dict[str, Any]) -> None:
+    """Handle PR merged — forward autonomy event to L1."""
+    pr = payload.get("pull_request", {})
+    pr_number = pr.get("number", 0)
+    merged_at = pr.get("merged_at")
+
+    log = logger.bind(pr_number=pr_number, merged_at=merged_at)
+    log.info("handling_pr_merged")
+
+    autonomy_event = _build_autonomy_event(
+        "pr_merged", payload, event_at=merged_at or None
+    )
+    if autonomy_event:
+        await _forward_autonomy_event(autonomy_event)
+
+
 async def _handle_ci_passed(payload: dict[str, Any]) -> None:
     """Handle CI passing — check if PR is approved and ready for auto-merge."""
     check = payload.get("check_suite", payload.get("check_run", {}))
@@ -384,6 +572,7 @@ _HANDLERS: dict[EventType, Any] = {
     EventType.PR_OPENED: _handle_pr_opened,
     EventType.PR_SYNCHRONIZE: _handle_pr_opened,  # Re-review on new commits
     EventType.PR_READY_FOR_REVIEW: _handle_pr_opened,
+    EventType.PR_MERGED: _handle_pr_merged,
     EventType.CI_FAILED: _handle_ci_failed,
     EventType.CI_PASSED: _handle_ci_passed,
     EventType.REVIEW_APPROVED: _handle_review_approved,

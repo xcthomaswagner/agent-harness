@@ -291,7 +291,7 @@ tbody tr:last-child td {{ border-bottom:none }}
 .view-btn:hover:not(.active) {{ background:#F1F5F9 }}
 </style></head><body><div class="page">
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-  <h1>Traces</h1>
+  <h1>Traces <span class="meta" style="margin-left:12px;font-weight:400"><a href="/autonomy">Autonomy</a></span></h1>
   <div class="view-toggle">
     <button class="view-btn active" onclick="location.href='/traces'">Table</button>
     <button class="view-btn" onclick="location.href='/traces?view=board'">Board</button>

@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     # Queue (optional — falls back to in-process background tasks if empty)
     redis_url: str = ""  # e.g., redis://localhost:6379/0
 
+    # Autonomy metrics
+    l1_internal_api_token: str = ""
+    autonomy_admin_token: str = ""  # Phase 3 — admin write endpoints (env plumbing only in Phase 1)
+    autonomy_db_path: str = ""  # Empty = defaults to <repo>/data/autonomy.db
+    autonomy_internal_rate_bucket_capacity: int = 20
+    autonomy_internal_rate_refill_per_sec: float = 1.0
+    autonomy_internal_max_body_bytes: int = 262_144  # 256 KB
+
     # Service
     log_level: str = "INFO"
 
