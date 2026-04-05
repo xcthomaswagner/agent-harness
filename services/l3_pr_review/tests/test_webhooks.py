@@ -1049,3 +1049,73 @@ class TestHumanIssueForwarding:
         assert len(error_calls) == 1
 
 
+# --- Backlog integration ---
+
+
+async def test_forward_failure_appends_to_backlog(tmp_path) -> None:
+    """On final forward failure, event is persisted to the backlog."""
+    import backlog as backlog_mod
+
+    backlog_path = tmp_path / "backlog.jsonl"
+
+    event = {
+        "event_type": "pr_opened",
+        "repo_full_name": "org/repo",
+        "pr_number": 1,
+        "head_sha": "abc",
+        "ticket_id": "SCRUM-1",
+        "event_at": "2026-04-05T00:00:00Z",
+    }
+
+    class _FailingClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self) -> _FailingClient:
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def post(self, *args, **kwargs):
+            raise httpx.RequestError("boom")
+
+    with (
+        patch.object(l3_main, "L1_INTERNAL_API_TOKEN", "secret"),
+        patch("main.httpx.AsyncClient", _FailingClient),
+        patch("main.asyncio.sleep", new_callable=AsyncMock),
+        patch.object(backlog_mod, "BACKLOG_PATH", backlog_path),
+    ):
+        await l3_main._forward_autonomy_event(event)
+
+    assert backlog_path.exists()
+    lines = backlog_path.read_text().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["endpoint"] == "autonomy_event"
+    assert entry["payload"]["ticket_id"] == "SCRUM-1"
+    assert entry["attempts"] == 1
+
+
+async def test_forward_skip_when_no_token_does_not_backlog(tmp_path) -> None:
+    """When L1_INTERNAL_API_TOKEN is unset, short-circuit without backlog append."""
+    import backlog as backlog_mod
+
+    backlog_path = tmp_path / "backlog.jsonl"
+
+    event = {
+        "event_type": "pr_opened",
+        "repo_full_name": "org/repo",
+        "pr_number": 1,
+        "head_sha": "abc",
+        "ticket_id": "SCRUM-1",
+        "event_at": "2026-04-05T00:00:00Z",
+    }
+
+    with (
+        patch.object(l3_main, "L1_INTERNAL_API_TOKEN", ""),
+        patch.object(backlog_mod, "BACKLOG_PATH", backlog_path),
+    ):
+        await l3_main._forward_autonomy_event(event)
+
+    assert not backlog_path.exists()

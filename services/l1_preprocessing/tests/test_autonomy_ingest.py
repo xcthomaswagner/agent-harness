@@ -1104,3 +1104,170 @@ def test_defect_sweep_heartbeat_happy_path(admin_app: FastAPI) -> None:
     )
     assert r.status_code == 200
     assert r.json()["status"] == "accepted"
+
+
+# ---------------------------------------------------------------------------
+# ingest_jira_bug
+# ---------------------------------------------------------------------------
+
+class TestIngestJiraBug:
+    def _make_bug(self, **overrides: Any) -> Any:
+        from autonomy_jira_bug import NormalizedBug
+        base: dict[str, Any] = {
+            "bug_key": "BUG-1",
+            "issuetype": "Bug",
+            "created_at": "2026-04-03T00:00:00+00:00",
+            "severity": "high",
+            "labels": [],
+            "summary": "boom",
+            "description": "details",
+            "candidate_parent_keys": ["PROJ-1"],
+            "qa_confirmed": True,
+            "category": "escaped",
+        }
+        base.update(overrides)
+        return NormalizedBug(**base)
+
+    def _seed_merged_pr(
+        self, db_path: Path, *, ticket_id: str, pr_number: int,
+        head_sha: str, merged_at: str,
+    ) -> int:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            return upsert_pr_run(
+                conn,
+                PrRunUpsert(
+                    ticket_id=ticket_id,
+                    pr_number=pr_number,
+                    repo_full_name="acme/app",
+                    head_sha=head_sha,
+                    client_profile="default",
+                    opened_at=merged_at,
+                    merged=1,
+                    merged_at=merged_at,
+                ),
+            )
+        finally:
+            conn.close()
+
+    def test_ignores_when_not_a_bug(self, tmp_path: Path) -> None:
+        from autonomy_ingest import ingest_jira_bug
+        db_path = tmp_path / "a.db"
+        bug = self._make_bug(issuetype="Story")
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            result = ingest_jira_bug(conn, bug)
+        finally:
+            conn.close()
+        assert result["status"] == "ignored"
+        assert result["reason"] == "not_a_bug"
+
+    def test_ignores_when_no_candidates(self, tmp_path: Path) -> None:
+        from autonomy_ingest import ingest_jira_bug
+        db_path = tmp_path / "a.db"
+        bug = self._make_bug(candidate_parent_keys=[])
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            result = ingest_jira_bug(conn, bug)
+        finally:
+            conn.close()
+        assert result["status"] == "ignored"
+        assert result["reason"] == "no_parent_link"
+
+    def test_deferred_when_no_merged_pr_creates_override(
+        self, tmp_path: Path
+    ) -> None:
+        from autonomy_ingest import ingest_jira_bug
+        db_path = tmp_path / "a.db"
+        bug = self._make_bug(candidate_parent_keys=["PROJ-999"])
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            result = ingest_jira_bug(conn, bug)
+            overrides = conn.execute(
+                "SELECT * FROM manual_overrides WHERE override_type = ?",
+                ("unresolved_defect_link",),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert result["status"] == "deferred"
+        assert result["reason"] == "no_merged_pr_for_candidates"
+        assert len(overrides) == 1
+        assert overrides[0]["target_id"] == "BUG-1"
+
+    def test_accepted_when_merged_pr_exists(self, tmp_path: Path) -> None:
+        from autonomy_ingest import ingest_jira_bug
+        db_path = tmp_path / "a.db"
+        pr_id = self._seed_merged_pr(
+            db_path, ticket_id="PROJ-1", pr_number=1,
+            head_sha="sha1", merged_at="2026-03-01T00:00:00+00:00",
+        )
+        bug = self._make_bug(candidate_parent_keys=["PROJ-1"])
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            result = ingest_jira_bug(conn, bug)
+            defects = conn.execute(
+                "SELECT * FROM defect_links WHERE pr_run_id = ?", (pr_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+        assert result["status"] == "accepted"
+        assert result["pr_run_id"] == pr_id
+        assert result["parent_ticket_id"] == "PROJ-1"
+        assert len(defects) == 1
+        assert defects[0]["defect_key"] == "BUG-1"
+        assert defects[0]["source"] == "jira"
+        assert defects[0]["severity"] == "high"
+        assert defects[0]["category"] == "escaped"
+
+    def test_picks_latest_merged_across_multiple_candidates(
+        self, tmp_path: Path
+    ) -> None:
+        from autonomy_ingest import ingest_jira_bug
+        db_path = tmp_path / "a.db"
+        pr_a = self._seed_merged_pr(
+            db_path, ticket_id="PROJ-1", pr_number=1,
+            head_sha="sha_a", merged_at="2026-02-01T00:00:00+00:00",
+        )
+        pr_b = self._seed_merged_pr(
+            db_path, ticket_id="PROJ-2", pr_number=2,
+            head_sha="sha_b", merged_at="2026-03-10T00:00:00+00:00",
+        )
+        bug = self._make_bug(candidate_parent_keys=["PROJ-1", "PROJ-2"])
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            result = ingest_jira_bug(conn, bug)
+        finally:
+            conn.close()
+        assert result["status"] == "accepted"
+        assert result["pr_run_id"] == pr_b
+        assert result["parent_ticket_id"] == "PROJ-2"
+        assert pr_a != pr_b
+
+    def test_idempotent_on_same_bug_key(self, tmp_path: Path) -> None:
+        from autonomy_ingest import ingest_jira_bug
+        db_path = tmp_path / "a.db"
+        self._seed_merged_pr(
+            db_path, ticket_id="PROJ-1", pr_number=1,
+            head_sha="sha1", merged_at="2026-03-01T00:00:00+00:00",
+        )
+        bug = self._make_bug(candidate_parent_keys=["PROJ-1"])
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            r1 = ingest_jira_bug(conn, bug)
+            r2 = ingest_jira_bug(conn, bug)
+            count = conn.execute(
+                "SELECT COUNT(*) AS c FROM defect_links"
+            ).fetchone()["c"]
+        finally:
+            conn.close()
+        assert r1["status"] == "accepted"
+        assert r2["status"] == "accepted"
+        assert r1["defect_link_id"] == r2["defect_link_id"]
+        assert count == 1

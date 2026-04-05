@@ -12,6 +12,7 @@ from autonomy_store import (
     create_manual_match,
     drain_pending_ai_issues,
     ensure_schema,
+    find_latest_merged_pr_run_by_ticket,
     get_defect_link,
     get_latest_defect_sweep_heartbeat,
     get_pr_run_by_unique,
@@ -1235,5 +1236,73 @@ class TestHeartbeat:
         try:
             ensure_schema(conn)
             assert get_latest_defect_sweep_heartbeat(conn, "acme") is None
+        finally:
+            conn.close()
+
+
+class TestFindLatestMergedPrRunByTicket:
+    def test_returns_none_when_no_rows(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            assert find_latest_merged_pr_run_by_ticket(conn, "PROJ-1") is None
+        finally:
+            conn.close()
+
+    def test_returns_none_when_unmerged(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            upsert_pr_run(
+                conn,
+                _base_upsert(
+                    ticket_id="PROJ-1",
+                    pr_number=1,
+                    head_sha="sha1",
+                    merged=0,
+                    opened_at="2026-03-01T12:00:00+00:00",
+                ),
+            )
+            assert find_latest_merged_pr_run_by_ticket(conn, "PROJ-1") is None
+        finally:
+            conn.close()
+
+    def test_picks_latest_by_merged_at(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            upsert_pr_run(
+                conn,
+                _base_upsert(
+                    ticket_id="PROJ-1",
+                    pr_number=1,
+                    head_sha="sha_old",
+                    merged=1,
+                    merged_at="2026-02-01T12:00:00+00:00",
+                ),
+            )
+            upsert_pr_run(
+                conn,
+                _base_upsert(
+                    ticket_id="PROJ-1",
+                    pr_number=2,
+                    head_sha="sha_new",
+                    merged=1,
+                    merged_at="2026-03-10T12:00:00+00:00",
+                ),
+            )
+            upsert_pr_run(
+                conn,
+                _base_upsert(
+                    ticket_id="PROJ-1",
+                    pr_number=3,
+                    head_sha="sha_mid",
+                    merged=1,
+                    merged_at="2026-03-05T12:00:00+00:00",
+                ),
+            )
+            row = find_latest_merged_pr_run_by_ticket(conn, "PROJ-1")
+            assert row is not None
+            assert row["head_sha"] == "sha_new"
         finally:
             conn.close()

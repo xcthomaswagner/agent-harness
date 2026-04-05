@@ -455,6 +455,18 @@ def get_pr_run_by_unique(
     return row
 
 
+def find_latest_merged_pr_run_by_ticket(
+    conn: sqlite3.Connection, ticket_id: str
+) -> sqlite3.Row | None:
+    """Return the most recently merged pr_run for this ticket, or None."""
+    row: sqlite3.Row | None = conn.execute(
+        "SELECT * FROM pr_runs WHERE ticket_id = ? AND merged = 1 "
+        "ORDER BY datetime(merged_at) DESC, id DESC LIMIT 1",
+        (ticket_id,),
+    ).fetchone()
+    return row
+
+
 def list_pr_runs(
     conn: sqlite3.Connection,
     *,

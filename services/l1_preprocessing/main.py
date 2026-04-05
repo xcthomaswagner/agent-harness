@@ -22,7 +22,10 @@ from shared.env_sanitize import sanitized_env
 from adapters.ado_adapter import AdoAdapter
 from adapters.jira_adapter import JiraAdapter
 from autonomy_dashboard import router as autonomy_dashboard_router
+from autonomy_ingest import ingest_jira_bug
 from autonomy_ingest import router as autonomy_router
+from autonomy_jira_bug import normalize_jira_bug
+from autonomy_store import ensure_schema, open_connection, resolve_db_path
 from config import settings
 from models import TicketPayload
 from pipeline import Pipeline
@@ -242,6 +245,61 @@ async def jira_webhook(
     if dispatch == "duplicate":
         return {"status": "skipped", "ticket_id": ticket.id, "reason": "already processing"}
     return {"status": "accepted", "ticket_id": ticket.id, "dispatch": dispatch}
+
+
+@app.post("/webhooks/jira-bug", status_code=202)
+async def jira_bug_webhook(
+    request: Request,
+    x_hub_signature: str | None = Header(default=None, alias="x-hub-signature"),
+    x_jira_bug_token: str | None = Header(default=None, alias="x-jira-bug-token"),
+) -> dict[str, Any]:
+    """Receive a Jira bug-created webhook and record a defect_link.
+
+    Accepts EITHER HMAC signature (webhook_secret) OR bearer token
+    (jira_bug_webhook_token), since Jira Automation cannot compute HMAC.
+    """
+    body = await request.body()
+
+    # Auth: try HMAC first, fallback to bearer token
+    auth_ok = False
+    if settings.webhook_secret and x_hub_signature:
+        expected = hmac.new(
+            settings.webhook_secret.encode(), body, hashlib.sha256
+        ).hexdigest()
+        sig = x_hub_signature.removeprefix("sha256=")
+        if hmac.compare_digest(expected, sig):
+            auth_ok = True
+    if (
+        not auth_ok
+        and settings.jira_bug_webhook_token
+        and x_jira_bug_token
+        and x_jira_bug_token == settings.jira_bug_webhook_token
+    ):
+        auth_ok = True
+    if not auth_ok:
+        # If neither secret configured, fail closed
+        if not settings.webhook_secret and not settings.jira_bug_webhook_token:
+            raise HTTPException(status_code=503, detail="Bug webhook not configured")
+        raise HTTPException(status_code=401, detail="Invalid webhook auth")
+
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON body: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Webhook payload must be a JSON object")
+
+    bug = normalize_jira_bug(payload, settings)
+
+    conn = open_connection(resolve_db_path(settings.autonomy_db_path))
+    try:
+        ensure_schema(conn)
+        result = ingest_jira_bug(conn, bug)
+    finally:
+        conn.close()
+
+    logger.info("jira_bug_webhook_processed", **result)
+    return result
 
 
 @app.post("/webhooks/ado", status_code=202)

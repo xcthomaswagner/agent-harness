@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     jira_ac_field_id: str = "customfield_10429"
     jira_story_points_field_id: str = "customfield_10040"
 
+    # Jira bug webhook
+    jira_implemented_ticket_field_id: str = ""  # e.g. "customfield_10050"
+    jira_bug_link_types: str = "is caused by,relates to,is blocked by"
+    jira_qa_confirmed_field_id: str = ""
+    # Fallback bearer auth for Jira Automation (can't compute HMAC)
+    jira_bug_webhook_token: str = ""
+
     # ADO (Phase 2)
     ado_org_url: str = ""
     ado_pat: str = ""

@@ -10,6 +10,7 @@ import os
 import re
 import sys
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -23,12 +24,16 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "l1_preprocessing"))
 from tracer import append_trace, generate_trace_id, read_trace
 
+from backlog import append_backlog, backlog_status, drain_backlog
 from event_classifier import EventType, classify_event
 from spawner import SessionSpawner
 
 load_dotenv()
 
 logger = structlog.get_logger()
+
+# Hold references to fire-and-forget startup tasks so they aren't GC'd.
+_startup_tasks: set[asyncio.Task[None]] = set()
 
 WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 L1_SERVICE_URL = os.getenv("L1_SERVICE_URL", "http://localhost:8000")
@@ -123,21 +128,12 @@ _AUTONOMY_EVENTS_PATH = "/api/internal/autonomy/events"
 _HUMAN_ISSUES_PATH = "/api/internal/autonomy/human-issues"
 
 
-async def _forward_autonomy_event(event: dict[str, Any]) -> None:
-    """POST normalized event to L1. Retries once on transient failure.
+async def _forward_autonomy_event_once(event: dict[str, Any]) -> bool:
+    """POST event to L1 with retry-once on transient failure.
 
-    Logs and returns on final failure — does not raise.
-    Short-circuits with log if L1_INTERNAL_API_TOKEN is unset.
+    Returns True on success (2xx), False on double-fail or non-retryable 4xx.
+    Assumes L1_INTERNAL_API_TOKEN is set (caller must short-circuit otherwise).
     """
-    # TODO(phase2): persist backlog to data/autonomy-backlog.jsonl for later replay
-    if not L1_INTERNAL_API_TOKEN:
-        logger.info(
-            "l1_autonomy_event_forward_skipped",
-            reason="L1_INTERNAL_API_TOKEN unset",
-            event_type=event.get("event_type"),
-        )
-        return
-
     url = f"{L1_SERVICE_URL.rstrip('/')}{_AUTONOMY_EVENTS_PATH}"
     headers = {"X-Internal-Api-Token": L1_INTERNAL_API_TOKEN}
 
@@ -151,6 +147,7 @@ async def _forward_autonomy_event(event: dict[str, Any]) -> None:
                 if attempt == 0:
                     await asyncio.sleep(1)
                     continue
+                return False
             elif resp.status_code >= 400:
                 # Non-retryable client error
                 logger.error(
@@ -160,15 +157,17 @@ async def _forward_autonomy_event(event: dict[str, Any]) -> None:
                     event_type=event.get("event_type"),
                     ticket_id=event.get("ticket_id"),
                 )
-                return
+                return False
             else:
-                return
+                return True
         except httpx.RequestError as exc:
             last_error = f"RequestError: {exc}"
             if attempt == 0:
                 await asyncio.sleep(1)
                 continue
+            return False
 
+    # Unreachable, but defensive
     logger.error(
         "l1_autonomy_event_forward_failed",
         error=last_error,
@@ -176,22 +175,38 @@ async def _forward_autonomy_event(event: dict[str, Any]) -> None:
         ticket_id=event.get("ticket_id"),
         url=url,
     )
+    return False
 
 
-async def _forward_human_issue(payload: dict[str, Any]) -> None:
-    """POST normalized human issue to L1. Retries once on transient failure.
+async def _forward_autonomy_event(event: dict[str, Any]) -> None:
+    """Forward autonomy event to L1; persist to backlog on final failure.
 
-    Logs and returns on final failure — does not raise.
-    Short-circuits with log if L1_INTERNAL_API_TOKEN is unset.
+    Short-circuits (without backlog) if L1_INTERNAL_API_TOKEN is unset.
     """
     if not L1_INTERNAL_API_TOKEN:
         logger.info(
-            "l1_human_issue_forward_skipped",
+            "l1_autonomy_event_forward_skipped",
             reason="L1_INTERNAL_API_TOKEN unset",
-            event_type=payload.get("event_type"),
+            event_type=event.get("event_type"),
         )
         return
+    ok = await _forward_autonomy_event_once(event)
+    if not ok:
+        logger.error(
+            "l1_autonomy_event_forward_failed",
+            event_type=event.get("event_type"),
+            ticket_id=event.get("ticket_id"),
+            backlogged=True,
+        )
+        await append_backlog("autonomy_event", event)
 
+
+async def _forward_human_issue_once(payload: dict[str, Any]) -> bool:
+    """POST human issue to L1 with retry-once on transient failure.
+
+    Returns True on success (2xx), False on double-fail or non-retryable 4xx.
+    Assumes L1_INTERNAL_API_TOKEN is set (caller must short-circuit otherwise).
+    """
     url = f"{L1_SERVICE_URL.rstrip('/')}{_HUMAN_ISSUES_PATH}"
     headers = {"X-Internal-Api-Token": L1_INTERNAL_API_TOKEN}
 
@@ -205,6 +220,7 @@ async def _forward_human_issue(payload: dict[str, Any]) -> None:
                 if attempt == 0:
                     await asyncio.sleep(1)
                     continue
+                return False
             elif resp.status_code >= 400:
                 logger.error(
                     "l1_human_issue_forward_failed",
@@ -213,14 +229,15 @@ async def _forward_human_issue(payload: dict[str, Any]) -> None:
                     event_type=payload.get("event_type"),
                     ticket_id=payload.get("ticket_id"),
                 )
-                return
+                return False
             else:
-                return
+                return True
         except httpx.RequestError as exc:
             last_error = f"RequestError: {exc}"
             if attempt == 0:
                 await asyncio.sleep(1)
                 continue
+            return False
 
     logger.error(
         "l1_human_issue_forward_failed",
@@ -229,6 +246,30 @@ async def _forward_human_issue(payload: dict[str, Any]) -> None:
         ticket_id=payload.get("ticket_id"),
         url=url,
     )
+    return False
+
+
+async def _forward_human_issue(payload: dict[str, Any]) -> None:
+    """Forward human issue to L1; persist to backlog on final failure.
+
+    Short-circuits (without backlog) if L1_INTERNAL_API_TOKEN is unset.
+    """
+    if not L1_INTERNAL_API_TOKEN:
+        logger.info(
+            "l1_human_issue_forward_skipped",
+            reason="L1_INTERNAL_API_TOKEN unset",
+            event_type=payload.get("event_type"),
+        )
+        return
+    ok = await _forward_human_issue_once(payload)
+    if not ok:
+        logger.error(
+            "l1_human_issue_forward_failed",
+            event_type=payload.get("event_type"),
+            ticket_id=payload.get("ticket_id"),
+            backlogged=True,
+        )
+        await append_backlog("human_issue", payload)
 
 
 def _is_bot_user(user: dict[str, Any]) -> bool:
@@ -750,6 +791,52 @@ _HANDLERS: dict[EventType, Any] = {
 
 
 # --- Endpoints ---
+
+
+@app.on_event("startup")
+async def _drain_backlog_on_startup() -> None:
+    async def _drain() -> None:
+        forwarders: dict[str, Callable[[dict[str, Any]], Awaitable[bool]]] = {
+            "autonomy_event": _forward_autonomy_event_once,
+            "human_issue": _forward_human_issue_once,
+        }
+        try:
+            await drain_backlog(forwarders)
+        except Exception:
+            logger.exception("l3_backlog_startup_drain_failed")
+
+    # Fire-and-forget so startup isn't blocked on L1 being down.
+    # Store reference so asyncio doesn't GC the task mid-flight.
+    _startup_tasks.add(asyncio.create_task(_drain()))
+
+
+@app.post("/admin/backlog/drain")
+async def post_drain_backlog(
+    x_internal_api_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    expected = os.getenv("L1_INTERNAL_API_TOKEN", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="Admin API not configured")
+    if not x_internal_api_token or x_internal_api_token != expected:
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+    forwarders: dict[str, Callable[[dict[str, Any]], Awaitable[bool]]] = {
+        "autonomy_event": _forward_autonomy_event_once,
+        "human_issue": _forward_human_issue_once,
+    }
+    result = await drain_backlog(forwarders)
+    return {"status": "ok", **result}
+
+
+@app.get("/admin/backlog/status")
+async def get_backlog_status(
+    x_internal_api_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    expected = os.getenv("L1_INTERNAL_API_TOKEN", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="Admin API not configured")
+    if not x_internal_api_token or x_internal_api_token != expected:
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+    return backlog_status()
 
 
 @app.get("/health")

@@ -17,6 +17,7 @@ import structlog
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
+from autonomy_jira_bug import NormalizedBug
 from autonomy_matching import match_human_issues_for_pr_run
 from autonomy_metrics import compute_profile_metrics
 from autonomy_store import (
@@ -24,6 +25,7 @@ from autonomy_store import (
     create_manual_match,
     drain_pending_ai_issues,
     ensure_schema,
+    find_latest_merged_pr_run_by_ticket,
     get_pr_run_by_unique,
     insert_defect_link,
     insert_manual_override,
@@ -277,6 +279,98 @@ def apply_event(
             )
 
     return pr_run_id
+
+
+# ---------------------------------------------------------------------------
+# Jira bug webhook ingestion
+# ---------------------------------------------------------------------------
+
+def _now_iso_utc() -> str:
+    from datetime import UTC, datetime
+    return datetime.now(UTC).isoformat()
+
+
+def ingest_jira_bug(
+    conn: sqlite3.Connection, bug: NormalizedBug
+) -> dict[str, Any]:
+    """Record a Jira bug as a defect_link against the best-matching merged PR.
+
+    Returns a dict with status: 'ignored' | 'deferred' | 'accepted'.
+    """
+    if bug.issuetype.lower() != "bug":
+        return {
+            "status": "ignored",
+            "reason": "not_a_bug",
+            "issuetype": bug.issuetype,
+        }
+    if not bug.candidate_parent_keys:
+        return {
+            "status": "ignored",
+            "reason": "no_parent_link",
+            "bug_key": bug.bug_key,
+        }
+
+    # Try candidates, pick the one with the latest merged_at
+    best_pr_run: sqlite3.Row | None = None
+    best_parent = ""
+    for candidate in bug.candidate_parent_keys:
+        row = find_latest_merged_pr_run_by_ticket(conn, candidate)
+        if row is None:
+            continue
+        if best_pr_run is None or str(row["merged_at"] or "") > str(
+            best_pr_run["merged_at"] or ""
+        ):
+            best_pr_run = row
+            best_parent = candidate
+
+    if best_pr_run is None:
+        # Record for later reconciliation
+        insert_manual_override(
+            conn,
+            override_type="unresolved_defect_link",
+            target_id=bug.bug_key,
+            payload_json=json.dumps(bug.model_dump()),
+            created_by="jira_bug_webhook",
+        )
+        return {
+            "status": "deferred",
+            "reason": "no_merged_pr_for_candidates",
+            "bug_key": bug.bug_key,
+            "candidates": bug.candidate_parent_keys,
+        }
+
+    defect_id = insert_defect_link(
+        conn,
+        pr_run_id=int(best_pr_run["id"]),
+        defect_key=bug.bug_key,
+        source="jira",
+        severity=bug.severity,
+        reported_at=bug.created_at or _now_iso_utc(),
+        confirmed=1 if bug.qa_confirmed else 0,
+        notes=bug.summary[:500],
+        category=bug.category,
+    )
+    insert_manual_override(
+        conn,
+        override_type="defect_link",
+        target_id=str(defect_id),
+        payload_json=json.dumps(
+            {
+                "source": "jira_webhook",
+                "bug_key": bug.bug_key,
+                "parent_ticket_id": best_parent,
+                "category": bug.category,
+            }
+        ),
+        created_by="jira_bug_webhook",
+    )
+    return {
+        "status": "accepted",
+        "defect_link_id": defect_id,
+        "pr_run_id": int(best_pr_run["id"]),
+        "parent_ticket_id": best_parent,
+        "bug_key": bug.bug_key,
+    }
 
 
 # ---------------------------------------------------------------------------
