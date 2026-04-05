@@ -51,7 +51,40 @@ Agent(
 
 Log: `{"phase": "implementation", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Implementation complete", "commit": "<sha>", "files_changed": N, "tests_passed": N, "tests_added": N}`
 
-### Step 3: Code Review
+### Step 3: Security Scan (Deterministic)
+
+Before code review, run deterministic security gates. These are NOT LLM-based — they use machine-verified tools and bypass the Judge.
+
+**3a. Dependency Audit** — detect the package manager and run the appropriate audit:
+```bash
+# Detect and run (skip gracefully if tool not installed)
+if [ -f package-lock.json ] || [ -f package.json ]; then
+  npm audit --audit-level=critical --json 2>/dev/null || true
+elif [ -f requirements.txt ] || [ -f pyproject.toml ]; then
+  pip-audit --format=json 2>/dev/null || true
+elif [ -f "*.csproj" ] || [ -f "*.sln" ]; then
+  dotnet list package --vulnerable 2>/dev/null || true
+fi
+```
+If critical CVEs are found in **newly added** dependencies (not pre-existing), route to developer for fix or dependency replacement. If the audit tool is not installed, log a warning and proceed.
+
+**3b. SAST Scanner (Semgrep)** — run on changed files only:
+```bash
+git diff --name-only main...HEAD | xargs semgrep --config auto --json --severity ERROR 2>/dev/null || true
+```
+If Semgrep is not installed, skip with warning. If ERROR-severity findings are found, route directly to developer for fix — do NOT send through the Judge (these are machine-verified pattern matches, not LLM opinions).
+
+**3c. Secrets Scanner** — check for committed secrets:
+```bash
+gitleaks detect --source . --no-git --json 2>/dev/null || true
+```
+If gitleaks is not installed, skip with warning. Any finding = developer must remove the secret before proceeding.
+
+Log: `{"phase": "security_scan", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Security scan complete", "semgrep_findings": N, "dependency_cves": N, "secrets_found": N}`
+
+If any tool found critical issues, the developer fixes them before code review begins. If all tools are missing (not installed), proceed to code review with a logged warning — the LLM-based reviewer is the fallback.
+
+### Step 4: Code Review
 
 Log start: `{"phase": "code_review", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "phase_started"}`
 
@@ -59,17 +92,17 @@ Spawn a reviewer (see Code Review section below).
 
 **Post-review integrity check:** After the reviewer finishes, verify no files were modified: `git diff --stat`. If the reviewer changed any tracked files, revert with `git checkout .` and log a warning. The code reviewer is a read-only role — any file changes indicate a role violation.
 
-### Step 4: QA Validation
+### Step 5: QA Validation
 
 Spawn QA (see QA Validation section below).
 
 **Post-QA integrity check:** After QA finishes, verify no source files were modified: `git diff --stat`. QA may create files in `.harness/` (screenshots, logs) but must not modify source code. If source files were changed, revert with `git checkout -- ':(exclude).harness'` and log a warning.
 
-### Step 5: Simplify
+### Step 6: Simplify
 
 Run /simplify (see Code Simplification section below).
 
-### Step 6: Push + PR
+### Step 7: Push + PR
 
 Push and open PR (see PR Creation section below).
 
@@ -295,6 +328,7 @@ Agent(
          X of Y issues validated. Rejected issues are false positives or out of scope.",
   description="Judge <ticket-id>",
   mode="bypassPermissions"
+  # If any findings are security-related, use model="opus" for stronger reasoning
 )
 ```
 

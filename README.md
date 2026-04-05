@@ -26,6 +26,7 @@ Jira label → L1 analyst enriches → L2 agents implement + review + QA → PR 
 | [Operational runbook](docs/operational-runbook.md) | Monitoring, troubleshooting, retest |
 | [Jira automation](docs/jira-automation-setup.md) | Webhook setup with screenshots |
 | [How it works](docs/how-it-works.md) | End-to-end pipeline walkthrough |
+| [Security scanning](docs/security-scanning.md) | Two-layer defense, tool coverage, adding new languages |
 
 ## Dashboard
 
