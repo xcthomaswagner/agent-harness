@@ -17,6 +17,8 @@ from autonomy_store import (
     insert_issue_match,
     insert_review_issue,
     open_connection,
+    record_auto_merge_decision,
+    set_auto_merge_toggle,
     upsert_pr_run,
 )
 from config import settings
@@ -703,3 +705,186 @@ def test_sparkline_renders_with_points() -> None:
     assert "<svg" in svg
     # Two visible points (one None → skipped)
     assert svg.count("<circle") == 2
+
+
+# ---------------------------------------------------------------------------
+# Auto-merge decisions section (Task 1)
+# ---------------------------------------------------------------------------
+
+def _seed_auto_merge_decision(
+    db_path: Path,
+    *,
+    repo_full_name: str = "acme/widgets",
+    pr_number: int = 42,
+    decision: str = "dry_run",
+    reason: str = "policy says dry-run",
+    client_profile: str = "rockwell",
+    dry_run: bool = True,
+    recommended_mode: str = "conservative",
+    gates: dict | None = None,
+) -> int:
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+        return record_auto_merge_decision(
+            conn,
+            repo_full_name=repo_full_name,
+            pr_number=pr_number,
+            decision=decision,
+            reason=reason,
+            payload={
+                "client_profile": client_profile,
+                "dry_run": dry_run,
+                "recommended_mode": recommended_mode,
+                "gates": gates or {"ci": True, "review": True},
+                "ticket_id": "RW-1",
+                "ticket_type": "feature",
+                "evaluated_at": "2026-04-05T10:00:00+00:00",
+            },
+        )
+    finally:
+        conn.close()
+
+
+def test_auto_merge_decisions_section_renders_when_rows_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    _seed_pr_run(db_path, profile="rockwell", ticket_id="RW-1")
+    _seed_auto_merge_decision(
+        db_path,
+        repo_full_name="acme/widgets",
+        pr_number=42,
+        decision="dry_run",
+        reason="policy says dry-run",
+        client_profile="rockwell",
+    )
+    c = TestClient(_mk_app())
+    r = c.get("/autonomy")
+    assert r.status_code == 200
+    assert "Auto-merge Decisions" in r.text
+    assert "acme/widgets#42" in r.text
+    assert "policy says dry-run" in r.text
+    # Links to GitHub PR
+    assert "https://github.com/acme/widgets/pull/42" in r.text
+
+
+def test_auto_merge_decisions_empty_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    c = TestClient(_mk_app())
+    r = c.get("/autonomy")
+    assert r.status_code == 200
+    assert "Auto-merge Decisions" in r.text
+    assert "No auto-merge decisions in the last 7 days" in r.text
+
+
+def test_auto_merge_decisions_shows_dry_run_badge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    _seed_auto_merge_decision(
+        db_path, decision="dry_run", client_profile="rockwell", pr_number=7
+    )
+    c = TestClient(_mk_app())
+    r = c.get("/autonomy")
+    assert r.status_code == 200
+    # badge-blue wraps dry_run decisions
+    assert "badge-blue" in r.text
+    assert "dry_run" in r.text
+
+
+def test_auto_merge_decisions_shows_merged_badge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    _seed_auto_merge_decision(
+        db_path, decision="merged", client_profile="rockwell", pr_number=8
+    )
+    c = TestClient(_mk_app())
+    r = c.get("/autonomy")
+    assert r.status_code == 200
+    assert "badge-success" in r.text
+    # The word "merged" should appear in an auto-merge decision badge
+    assert ">merged<" in r.text
+
+
+def test_auto_merge_decisions_filters_by_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    _seed_pr_run(db_path, profile="rockwell", ticket_id="RW-1")
+    _seed_pr_run(db_path, profile="harness-test", ticket_id="HT-1", pr_number=2, head_sha="s2")
+    _seed_auto_merge_decision(
+        db_path,
+        pr_number=111,
+        decision="merged",
+        reason="rockwell reason only",
+        client_profile="rockwell",
+    )
+    _seed_auto_merge_decision(
+        db_path,
+        pr_number=222,
+        decision="dry_run",
+        reason="harness-test reason only",
+        client_profile="harness-test",
+    )
+    c = TestClient(_mk_app())
+    r = c.get("/autonomy?client_profile=rockwell")
+    assert r.status_code == 200
+    assert "rockwell reason only" in r.text
+    assert "harness-test reason only" not in r.text
+
+
+def test_profile_card_shows_auto_merge_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no runtime toggle and yaml default False → DRY-RUN (source: yaml)."""
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    _seed_pr_run(db_path, profile="rockwell", ticket_id="RW-1")
+    c = TestClient(_mk_app())
+    r = c.get("/autonomy?client_profile=rockwell")
+    assert r.status_code == 200
+    assert "Auto-merge" in r.text
+    assert "DRY-RUN" in r.text
+    assert "source: yaml" in r.text
+
+
+def test_profile_card_shows_toggle_curl_snippet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    _seed_pr_run(db_path, profile="rockwell", ticket_id="RW-1")
+    c = TestClient(_mk_app())
+    r = c.get("/autonomy?client_profile=rockwell")
+    assert r.status_code == 200
+    assert "/api/autonomy/auto-merge-toggle" in r.text
+    assert "X-Autonomy-Admin-Token" in r.text
+    assert "rockwell" in r.text
+
+
+def test_profile_card_auto_merge_state_runtime_toggle_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    _seed_pr_run(db_path, profile="rockwell", ticket_id="RW-1")
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+        set_auto_merge_toggle(conn, client_profile="rockwell", enabled=True)
+    finally:
+        conn.close()
+    c = TestClient(_mk_app())
+    r = c.get("/autonomy?client_profile=rockwell")
+    assert r.status_code == 200
+    assert "ENABLED" in r.text
+    assert "source: runtime_toggle" in r.text

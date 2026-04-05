@@ -1249,3 +1249,187 @@ class TestAutoMergeTrigger:
 
             await _asyncio.sleep(0.1)
             assert mock_eval.await_count == 1
+
+
+# --- GitHub defect (issue labeled) handling ---
+
+
+class TestGithubDefectHandler:
+    def test_extract_pr_ref_full_url(self) -> None:
+        body = "Regression from https://github.com/acme/widgets/pull/123 — see details."
+        assert l3_main._extract_pr_ref(body, "acme/widgets") == ("acme/widgets", 123)
+
+    def test_extract_pr_ref_owner_repo_form(self) -> None:
+        body = "Broken by other-org/other-repo#55."
+        assert l3_main._extract_pr_ref(body, "acme/widgets") == (
+            "other-org/other-repo", 55,
+        )
+
+    def test_extract_pr_ref_same_repo_hash(self) -> None:
+        body = "See PR #42 for context."
+        assert l3_main._extract_pr_ref(body, "acme/widgets") == ("acme/widgets", 42)
+
+    def test_extract_pr_ref_none_when_absent(self) -> None:
+        body = "Something is broken. No references here."
+        assert l3_main._extract_pr_ref(body, "acme/widgets") is None
+
+    def test_extract_pr_ref_full_url_beats_bare(self) -> None:
+        # Full URL should win over a trailing bare #N
+        body = "See https://github.com/foo/bar/pull/9 and also #1"
+        assert l3_main._extract_pr_ref(body, "acme/widgets") == ("foo/bar", 9)
+
+    def test_category_from_labels_maps_correctly(self) -> None:
+        assert l3_main._category_from_labels(["defect"]) == "escaped"
+        assert l3_main._category_from_labels(["bug", "pre-existing"]) == "pre_existing"
+        assert l3_main._category_from_labels(["infrastructure"]) == "infra"
+        assert l3_main._category_from_labels(["enhancement"]) == "feature_request"
+        assert l3_main._category_from_labels(["feature-request"]) == "feature_request"
+        assert l3_main._category_from_labels([]) == "escaped"
+
+    def _issue_payload(
+        self,
+        *,
+        action: str = "labeled",
+        labels: list[str] | None = None,
+        body: str | None = None,
+        issue_number: int = 42,
+    ) -> dict[str, object]:
+        if labels is None:
+            labels = ["defect"]
+        if body is None:
+            body = "Regression caused by #7."
+        return {
+            "action": action,
+            "issue": {
+                "number": issue_number,
+                "html_url": f"https://github.com/acme/widgets/issues/{issue_number}",
+                "title": "Cart total wrong",
+                "body": body,
+                "labels": [{"name": name} for name in labels],
+                "created_at": "2026-04-04T12:00:00Z",
+                "user": {"login": "alice"},
+            },
+            "repository": {"full_name": "acme/widgets"},
+        }
+
+    async def test_issue_labeled_with_defect_label_forwards(self) -> None:
+        payload = self._issue_payload(labels=["defect"])
+        mock_forward = AsyncMock()
+        with patch.object(l3_main, "_forward_github_defect", mock_forward):
+            await l3_main._handle_issue_labeled(payload)
+        assert mock_forward.await_count == 1
+        fwd_payload = mock_forward.await_args.args[0]
+        assert fwd_payload["issue_number"] == 42
+        assert fwd_payload["pr_repo_full_name"] == "acme/widgets"
+        assert fwd_payload["pr_number"] == 7
+        assert fwd_payload["category"] == "escaped"
+        assert "defect" in fwd_payload["labels"]
+
+    async def test_issue_labeled_without_defect_label_skipped(self) -> None:
+        payload = self._issue_payload(labels=["question", "documentation"])
+        mock_forward = AsyncMock()
+        with patch.object(l3_main, "_forward_github_defect", mock_forward):
+            await l3_main._handle_issue_labeled(payload)
+        assert mock_forward.await_count == 0
+
+    async def test_issue_labeled_no_pr_ref_skipped(self) -> None:
+        payload = self._issue_payload(
+            labels=["defect"], body="Something broke, no PR reference."
+        )
+        mock_forward = AsyncMock()
+        with patch.object(l3_main, "_forward_github_defect", mock_forward):
+            await l3_main._handle_issue_labeled(payload)
+        assert mock_forward.await_count == 0
+
+    async def test_issue_labeled_action_filter(self) -> None:
+        payload = self._issue_payload(action="opened", labels=["defect"])
+        mock_forward = AsyncMock()
+        with patch.object(l3_main, "_forward_github_defect", mock_forward):
+            await l3_main._handle_issue_labeled(payload)
+        assert mock_forward.await_count == 0
+
+    async def test_issue_labeled_custom_defect_labels_env(
+        self, monkeypatch,
+    ) -> None:
+        # Env override — "bug" is no longer a defect label, only "crash"
+        monkeypatch.setenv("GITHUB_DEFECT_LABELS", "crash")
+        payload = self._issue_payload(labels=["bug"])
+        mock_forward = AsyncMock()
+        with patch.object(l3_main, "_forward_github_defect", mock_forward):
+            await l3_main._handle_issue_labeled(payload)
+        assert mock_forward.await_count == 0
+
+        payload2 = self._issue_payload(labels=["crash"])
+        with patch.object(l3_main, "_forward_github_defect", mock_forward):
+            await l3_main._handle_issue_labeled(payload2)
+        assert mock_forward.await_count == 1
+
+
+async def test_github_defect_forward_appends_to_backlog_on_double_failure(
+    tmp_path,
+) -> None:
+    """On final forward failure, payload is persisted to the backlog under github_defect."""
+    import backlog as backlog_mod
+
+    backlog_path = tmp_path / "backlog.jsonl"
+
+    payload = {
+        "issue_number": 1,
+        "issue_url": "https://github.com/o/r/issues/1",
+        "issue_title": "t",
+        "issue_body": "b",
+        "labels": ["defect"],
+        "reported_at": "2026-04-04T12:00:00Z",
+        "reporter_login": "alice",
+        "pr_repo_full_name": "o/r",
+        "pr_number": 3,
+        "category": "escaped",
+        "severity": "",
+    }
+
+    class _FailingClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self) -> _FailingClient:
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def post(self, *args, **kwargs):
+            raise httpx.RequestError("boom")
+
+    with (
+        patch.object(l3_main, "L1_INTERNAL_API_TOKEN", "secret"),
+        patch("main.httpx.AsyncClient", _FailingClient),
+        patch("main.asyncio.sleep", new_callable=AsyncMock),
+        patch.object(backlog_mod, "BACKLOG_PATH", backlog_path),
+    ):
+        await l3_main._forward_github_defect(payload)
+
+    assert backlog_path.exists()
+    lines = backlog_path.read_text().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["endpoint"] == "github_defect"
+    assert entry["payload"]["issue_number"] == 1
+    assert entry["payload"]["pr_number"] == 3
+
+
+async def test_github_defect_forward_skip_when_no_token(tmp_path) -> None:
+    """When L1_INTERNAL_API_TOKEN is unset, short-circuit without backlog."""
+    import backlog as backlog_mod
+
+    backlog_path = tmp_path / "backlog.jsonl"
+    payload = {
+        "issue_number": 1,
+        "pr_repo_full_name": "o/r",
+        "pr_number": 3,
+    }
+    with (
+        patch.object(l3_main, "L1_INTERNAL_API_TOKEN", ""),
+        patch.object(backlog_mod, "BACKLOG_PATH", backlog_path),
+    ):
+        await l3_main._forward_github_defect(payload)
+    assert not backlog_path.exists()

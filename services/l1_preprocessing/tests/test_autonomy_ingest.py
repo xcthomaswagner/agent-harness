@@ -1529,3 +1529,406 @@ def test_get_profile_by_repo_auth_required(test_app: FastAPI) -> None:
         params={"repo_full_name": "a/b"},
     )
     assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Follow-up-commit signal + concurrent-comment attribution
+# ---------------------------------------------------------------------------
+
+
+def _insert_human_comment(
+    conn: Any,
+    *,
+    pr_run_id: int,
+    external_id: str,
+    created_at: str,
+) -> int:
+    """Insert a human_review review_issues row with an explicit created_at."""
+    cur = conn.execute(
+        "INSERT INTO review_issues (pr_run_id, source, external_id, "
+        "created_at, summary, is_code_change_request) "
+        "VALUES (?, 'human_review', ?, ?, ?, 0)",
+        (pr_run_id, external_id, created_at, "comment"),
+    )
+    conn.commit()
+    return int(cur.lastrowid or 0)
+
+
+def test_apply_event_pr_opened_records_commit(conn: Any) -> None:
+    event = _base_event(
+        event_type="pr_opened",
+        event_at="2026-04-05T12:00:00+00:00",
+    )
+    pr_run_id = apply_event(conn, event, "harness-test")
+    rows = conn.execute(
+        "SELECT * FROM pr_commits WHERE pr_run_id = ?", (pr_run_id,)
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["sha"] == "abc123"
+    assert rows[0]["committed_at"] == "2026-04-05T12:00:00+00:00"
+
+
+def test_apply_event_pr_synchronized_records_commit(conn: Any) -> None:
+    apply_event(
+        conn,
+        _base_event(event_type="pr_opened", event_at="2026-04-05T12:00:00+00:00"),
+        "harness-test",
+    )
+    # Synchronize with a NEW head_sha — must create a second pr_run row.
+    event = _base_event(
+        event_type="pr_synchronized",
+        head_sha="def789",
+        event_at="2026-04-05T12:30:00+00:00",
+    )
+    pr_run_id = apply_event(conn, event, "harness-test")
+    rows = conn.execute(
+        "SELECT * FROM pr_commits WHERE pr_run_id = ?", (pr_run_id,)
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["sha"] == "def789"
+
+
+def test_apply_event_commit_insert_idempotent_on_same_sha(conn: Any) -> None:
+    apply_event(
+        conn,
+        _base_event(event_type="pr_opened", event_at="2026-04-05T12:00:00+00:00"),
+        "harness-test",
+    )
+    apply_event(
+        conn,
+        _base_event(
+            event_type="pr_synchronized",
+            event_at="2026-04-05T12:05:00+00:00",
+        ),
+        "harness-test",
+    )
+    rows = conn.execute("SELECT * FROM pr_commits").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["sha"] == "abc123"
+
+
+def test_review_approved_marks_code_change_request_on_prior_commented_issue(
+    conn: Any,
+) -> None:
+    # T1: comment. T2: synchronize (new commit). T3: approve.
+    apply_event(
+        conn,
+        _base_event(event_type="pr_opened", event_at="2026-04-05T11:00:00+00:00"),
+        "harness-test",
+    )
+    pr_run_id = conn.execute(
+        "SELECT id FROM pr_runs WHERE head_sha = 'abc123'"
+    ).fetchone()["id"]
+    issue_id = _insert_human_comment(
+        conn,
+        pr_run_id=pr_run_id,
+        external_id="c1",
+        created_at="2026-04-05T12:00:00+00:00",
+    )
+    # New commit arrives AFTER the comment — synchronize with new head_sha.
+    sync_event = _base_event(
+        event_type="pr_synchronized",
+        head_sha="newsha",
+        event_at="2026-04-05T12:30:00+00:00",
+    )
+    apply_event(conn, sync_event, "harness-test")
+    # Approval lands against the new head_sha.
+    approve = _base_event(
+        event_type="review_approved",
+        head_sha="newsha",
+        event_at="2026-04-05T13:00:00+00:00",
+    )
+    # Copy the human comment onto the newsha pr_run so attribution can find it
+    # (new head_sha → new pr_run_id in this test model).
+    new_pr_run_id = conn.execute(
+        "SELECT id FROM pr_runs WHERE head_sha = 'newsha'"
+    ).fetchone()["id"]
+    # Move the comment to the new pr_run row for this test.
+    conn.execute(
+        "UPDATE review_issues SET pr_run_id = ? WHERE id = ?",
+        (new_pr_run_id, issue_id),
+    )
+    conn.commit()
+    # Also insert a commit row matching the sync event (already done by the
+    # synchronize event). Now re-apply approval.
+    apply_event(conn, approve, "harness-test")
+    row = conn.execute(
+        "SELECT * FROM pr_runs WHERE head_sha = 'newsha'"
+    ).fetchone()
+    assert row["first_pass_accepted"] == 0
+    flag_row = conn.execute(
+        "SELECT is_code_change_request FROM review_issues WHERE id = ?",
+        (issue_id,),
+    ).fetchone()
+    assert int(flag_row["is_code_change_request"]) == 1
+
+
+def test_review_approved_keeps_fpa_1_when_no_followup_commit(
+    conn: Any,
+) -> None:
+    # Comment posted but NO commit lands before approval.
+    apply_event(
+        conn,
+        _base_event(event_type="pr_opened", event_at="2026-04-05T11:00:00+00:00"),
+        "harness-test",
+    )
+    pr_run_id = conn.execute(
+        "SELECT id FROM pr_runs WHERE head_sha = 'abc123'"
+    ).fetchone()["id"]
+    issue_id = _insert_human_comment(
+        conn,
+        pr_run_id=pr_run_id,
+        external_id="c1",
+        created_at="2026-04-05T12:00:00+00:00",
+    )
+    apply_event(
+        conn,
+        _base_event(
+            event_type="review_approved",
+            event_at="2026-04-05T13:00:00+00:00",
+        ),
+        "harness-test",
+    )
+    row = conn.execute(
+        "SELECT * FROM pr_runs WHERE head_sha = 'abc123'"
+    ).fetchone()
+    assert row["first_pass_accepted"] == 1
+    flag_row = conn.execute(
+        "SELECT is_code_change_request FROM review_issues WHERE id = ?",
+        (issue_id,),
+    ).fetchone()
+    assert int(flag_row["is_code_change_request"]) == 0
+
+
+def test_review_approved_after_changes_requested_keeps_fpa_0(
+    conn: Any,
+) -> None:
+    apply_event(
+        conn,
+        _base_event(event_type="pr_opened", event_at="2026-04-05T11:00:00+00:00"),
+        "harness-test",
+    )
+    apply_event(
+        conn,
+        _base_event(
+            event_type="review_changes_requested",
+            event_at="2026-04-05T12:00:00+00:00",
+        ),
+        "harness-test",
+    )
+    apply_event(
+        conn,
+        _base_event(
+            event_type="review_approved",
+            event_at="2026-04-05T13:00:00+00:00",
+        ),
+        "harness-test",
+    )
+    row = conn.execute(
+        "SELECT * FROM pr_runs WHERE head_sha = 'abc123'"
+    ).fetchone()
+    assert row["first_pass_accepted"] == 0
+
+
+def test_concurrent_comments_only_latest_flagged(conn: Any) -> None:
+    # Two comments within minutes; one commit after both → only later flagged.
+    apply_event(
+        conn,
+        _base_event(event_type="pr_opened", event_at="2026-04-05T11:00:00+00:00"),
+        "harness-test",
+    )
+    pr_run_id = conn.execute(
+        "SELECT id FROM pr_runs WHERE head_sha = 'abc123'"
+    ).fetchone()["id"]
+    c1 = _insert_human_comment(
+        conn,
+        pr_run_id=pr_run_id,
+        external_id="c1",
+        created_at="2026-04-05T12:00:00+00:00",
+    )
+    c2 = _insert_human_comment(
+        conn,
+        pr_run_id=pr_run_id,
+        external_id="c2",
+        created_at="2026-04-05T12:05:00+00:00",
+    )
+    # Manually record a commit on this pr_run.
+    conn.execute(
+        "INSERT INTO pr_commits (pr_run_id, sha, committed_at) VALUES (?, ?, ?)",
+        (pr_run_id, "sha2", "2026-04-05T12:30:00+00:00"),
+    )
+    conn.commit()
+    apply_event(
+        conn,
+        _base_event(
+            event_type="review_approved",
+            event_at="2026-04-05T13:00:00+00:00",
+        ),
+        "harness-test",
+    )
+    row = conn.execute(
+        "SELECT * FROM pr_runs WHERE head_sha = 'abc123'"
+    ).fetchone()
+    assert row["first_pass_accepted"] == 0
+    r1 = conn.execute(
+        "SELECT is_code_change_request FROM review_issues WHERE id = ?", (c1,)
+    ).fetchone()
+    r2 = conn.execute(
+        "SELECT is_code_change_request FROM review_issues WHERE id = ?", (c2,)
+    ).fetchone()
+    assert int(r1["is_code_change_request"]) == 0
+    assert int(r2["is_code_change_request"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# POST /api/internal/autonomy/github-defect-link
+# ---------------------------------------------------------------------------
+
+def _github_defect_payload(**overrides: Any) -> dict[str, Any]:
+    data = {
+        "issue_number": 42,
+        "issue_url": "https://github.com/acme/widgets/issues/42",
+        "issue_title": "Cart total wrong after promo",
+        "issue_body": "Repro: apply promo, total incorrect. See #1.",
+        "labels": ["defect"],
+        "reported_at": "2026-04-04T12:00:00+00:00",
+        "reporter_login": "alice",
+        "pr_repo_full_name": "acme/widgets",
+        "pr_number": 1,
+        "category": "escaped",
+        "severity": "",
+    }
+    data.update(overrides)
+    return data
+
+
+def test_github_defect_link_auth_required(test_app: FastAPI) -> None:
+    client = TestClient(test_app)
+    r = client.post(
+        "/api/internal/autonomy/github-defect-link",
+        json=_github_defect_payload(),
+    )
+    assert r.status_code == 401
+
+
+def test_github_defect_link_fail_closed_when_token_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "autonomy_db_path", str(tmp_path / "a.db"))
+    monkeypatch.setattr(settings, "l1_internal_api_token", "")
+    autonomy_ingest._bucket = TokenBucket(capacity=100, refill_per_sec=100.0)
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+    r = client.post(
+        "/api/internal/autonomy/github-defect-link",
+        json=_github_defect_payload(),
+        headers={"X-Internal-Api-Token": "anything"},
+    )
+    assert r.status_code == 503
+
+
+def test_github_defect_link_creates_defect_when_pr_found(
+    test_app: FastAPI,
+) -> None:
+    _seed_pr_for_admin(Path(settings.autonomy_db_path))
+    client = TestClient(test_app)
+    r = client.post(
+        "/api/internal/autonomy/github-defect-link",
+        json=_github_defect_payload(),
+        headers={"X-Internal-Api-Token": "test-token"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["defect_link_id"] > 0
+    assert body["pr_run_id"] > 0
+    assert body["defect_key"] == "gh-issue:42"
+
+    # Verify defect row has source='github' and correct category
+    conn = open_connection(Path(settings.autonomy_db_path))
+    try:
+        row = conn.execute(
+            "SELECT * FROM defect_links WHERE id = ?",
+            (body["defect_link_id"],),
+        ).fetchone()
+        assert row is not None
+        assert row["source"] == "github"
+        assert row["defect_key"] == "gh-issue:42"
+        assert row["category"] == "escaped"
+        assert int(row["confirmed"]) == 1
+    finally:
+        conn.close()
+
+
+def test_github_defect_link_deferred_when_pr_not_found(
+    test_app: FastAPI,
+) -> None:
+    # No PR seeded — should return deferred status
+    client = TestClient(test_app)
+    r = client.post(
+        "/api/internal/autonomy/github-defect-link",
+        json=_github_defect_payload(),
+        headers={"X-Internal-Api-Token": "test-token"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "deferred"
+    assert body["defect_key"] == "gh-issue:42"
+
+    # Verify manual_override recorded
+    conn = open_connection(Path(settings.autonomy_db_path))
+    try:
+        row = conn.execute(
+            "SELECT * FROM manual_overrides WHERE override_type = "
+            "'unresolved_defect_link' AND target_id = 'gh-issue:42'"
+        ).fetchone()
+        assert row is not None
+        assert row["created_by"] == "github_defect_webhook"
+    finally:
+        conn.close()
+
+
+def test_github_defect_link_idempotent_on_repeat_issue(
+    test_app: FastAPI,
+) -> None:
+    _seed_pr_for_admin(Path(settings.autonomy_db_path))
+    client = TestClient(test_app)
+    r1 = client.post(
+        "/api/internal/autonomy/github-defect-link",
+        json=_github_defect_payload(),
+        headers={"X-Internal-Api-Token": "test-token"},
+    )
+    assert r1.status_code == 200
+    r2 = client.post(
+        "/api/internal/autonomy/github-defect-link",
+        json=_github_defect_payload(severity="high"),
+        headers={"X-Internal-Api-Token": "test-token"},
+    )
+    assert r2.status_code == 200
+    # Same defect_link_id on upsert via (pr_run_id, defect_key, source) unique
+    assert r1.json()["defect_link_id"] == r2.json()["defect_link_id"]
+
+    conn = open_connection(Path(settings.autonomy_db_path))
+    try:
+        rows = conn.execute(
+            "SELECT * FROM defect_links WHERE defect_key = 'gh-issue:42'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["severity"] == "high"  # updated via upsert
+    finally:
+        conn.close()
+
+
+def test_github_defect_link_uses_gh_issue_prefix_for_defect_key(
+    test_app: FastAPI,
+) -> None:
+    _seed_pr_for_admin(Path(settings.autonomy_db_path))
+    client = TestClient(test_app)
+    r = client.post(
+        "/api/internal/autonomy/github-defect-link",
+        json=_github_defect_payload(issue_number=777),
+        headers={"X-Internal-Api-Token": "test-token"},
+    )
+    assert r.status_code == 200
+    assert r.json()["defect_key"] == "gh-issue:777"

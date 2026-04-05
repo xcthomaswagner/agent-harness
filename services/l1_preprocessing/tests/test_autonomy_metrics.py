@@ -8,9 +8,11 @@ from pathlib import Path
 import pytest
 
 from autonomy_metrics import (
+    _chunks,
     _recommend_mode,
     compute_daily_trend,
     compute_profile_metrics,
+    compute_rolling_trend,
     compute_ticket_type_breakdown,
 )
 from autonomy_store import (
@@ -456,3 +458,192 @@ def test_ticket_type_breakdown_groups_correctly(tmp_path: Path) -> None:
         assert by_type["feature"]["sample_size"] == 1
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Chunking helper (Task 5)
+# ---------------------------------------------------------------------------
+
+def test_chunks_empty() -> None:
+    assert list(_chunks([], 10)) == []
+
+
+def test_chunks_under_size() -> None:
+    assert list(_chunks([1, 2, 3], 10)) == [[1, 2, 3]]
+
+
+def test_chunks_over_size_splits() -> None:
+    out = list(_chunks([1, 2, 3, 4, 5], 2))
+    assert out == [[1, 2], [3, 4], [5]]
+
+
+def test_chunks_exact_multiple() -> None:
+    out = list(_chunks([1, 2, 3, 4], 2))
+    assert out == [[1, 2], [3, 4]]
+
+
+def test_chunks_rejects_zero_size() -> None:
+    with pytest.raises(ValueError):
+        list(_chunks([1, 2], 0))
+
+
+def test_chunked_queries_return_same_as_unchunked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seed 100 PRs and verify compute_profile_metrics is stable when
+    chunk size is artificially tiny (forcing many chunk iterations)."""
+    import autonomy_metrics as am
+
+    conn = _mk_conn(tmp_path / "a.db")
+    try:
+        for i in range(100):
+            pr = _seed_pr(
+                conn,
+                ticket_id=f"RW-{i}",
+                pr_number=i + 1,
+                head_sha=f"sha{i}",
+                first_pass_accepted=1 if (i % 2) == 0 else 0,
+                merged=1 if (i % 3) == 0 else 0,
+            )
+            # Seed some review_issues to exercise the IN queries
+            if i % 4 == 0:
+                insert_review_issue(
+                    conn,
+                    pr_run_id=pr,
+                    source="ai_review",
+                    external_id=f"a{i}",
+                    summary="ai",
+                    is_valid=1,
+                )
+            if i % 5 == 0:
+                insert_review_issue(
+                    conn,
+                    pr_run_id=pr,
+                    source="human_review",
+                    external_id=f"h{i}",
+                    summary="human",
+                    is_valid=1,
+                )
+        # Baseline with default chunk size
+        baseline = compute_profile_metrics(conn, "rockwell", 30)
+        # Force tiny chunk size
+        monkeypatch.setattr(am, "_SQLITE_IN_CHUNK_SIZE", 7)
+        with_small_chunks = compute_profile_metrics(conn, "rockwell", 30)
+    finally:
+        conn.close()
+    # Metric-bearing fields must match
+    for key in (
+        "sample_size",
+        "first_pass_count",
+        "merged_count",
+        "human_issue_count",
+        "matched_human_issue_count",
+        "ai_issue_count",
+        "sidecar_coverage",
+        "first_pass_acceptance_rate",
+        "self_review_catch_rate",
+    ):
+        assert baseline[key] == with_small_chunks[key], (
+            f"mismatch at {key}: {baseline[key]} vs {with_small_chunks[key]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Rolling trend smoothing (Task 6)
+# ---------------------------------------------------------------------------
+
+
+def _seed_pr_on_day(
+    conn,
+    *,
+    ticket_id: str,
+    pr_number: int,
+    head_sha: str,
+    opened_at: str,
+    first_pass_accepted: int,
+) -> int:
+    return upsert_pr_run(
+        conn,
+        PrRunUpsert(
+            ticket_id=ticket_id,
+            pr_number=pr_number,
+            repo_full_name="acme/widgets",
+            head_sha=head_sha,
+            client_profile="rockwell",
+            opened_at=opened_at,
+            first_pass_accepted=first_pass_accepted,
+            merged=0,
+        ),
+    )
+
+
+def test_rolling_trend_smooths_spikes(tmp_path: Path) -> None:
+    """Three consecutive days each with 1 PR: FPA=0, 100, 0.
+    Rolling avg over the window of size 3 ending on day 3 is 1/3 ≈ 0.333.
+    """
+    conn = _mk_conn(tmp_path / "a.db")
+    try:
+        today = datetime.now(UTC).date()
+        d0 = (today - timedelta(days=2)).isoformat() + "T12:00:00+00:00"
+        d1 = (today - timedelta(days=1)).isoformat() + "T12:00:00+00:00"
+        d2 = today.isoformat() + "T12:00:00+00:00"
+        _seed_pr_on_day(
+            conn, ticket_id="T0", pr_number=1, head_sha="s0",
+            opened_at=d0, first_pass_accepted=0,
+        )
+        _seed_pr_on_day(
+            conn, ticket_id="T1", pr_number=2, head_sha="s1",
+            opened_at=d1, first_pass_accepted=1,
+        )
+        _seed_pr_on_day(
+            conn, ticket_id="T2", pr_number=3, head_sha="s2",
+            opened_at=d2, first_pass_accepted=0,
+        )
+        trend = compute_rolling_trend(
+            conn, "rockwell", window_days=1, metric="fpa", smoothing_window=3
+        )
+    finally:
+        conn.close()
+    assert len(trend) == 1
+    date_str, value, n = trend[0]
+    assert value is not None
+    assert 0.30 <= value <= 0.36
+    assert n == 3
+
+
+def test_rolling_trend_none_when_window_empty(tmp_path: Path) -> None:
+    conn = _mk_conn(tmp_path / "a.db")
+    try:
+        trend = compute_rolling_trend(
+            conn, "rockwell", window_days=5, metric="fpa", smoothing_window=7
+        )
+    finally:
+        conn.close()
+    # No samples at all → all None
+    assert len(trend) == 5
+    for _d, v, n in trend:
+        assert v is None
+        assert n == 0
+
+
+def test_rolling_trend_handles_gaps(tmp_path: Path) -> None:
+    """Days with no PRs contribute 0 to denominator (not phantom samples)."""
+    conn = _mk_conn(tmp_path / "a.db")
+    try:
+        today = datetime.now(UTC).date()
+        # Only seed today with 1 first-pass PR; prior days empty.
+        d = today.isoformat() + "T12:00:00+00:00"
+        _seed_pr_on_day(
+            conn, ticket_id="T1", pr_number=1, head_sha="s1",
+            opened_at=d, first_pass_accepted=1,
+        )
+        trend = compute_rolling_trend(
+            conn, "rockwell", window_days=1, metric="fpa", smoothing_window=7
+        )
+    finally:
+        conn.close()
+    assert len(trend) == 1
+    _date, value, n = trend[0]
+    # Window spans 7 days, only one has a sample, so n=1 and value=1.0
+    assert value == 1.0
+    assert n == 1

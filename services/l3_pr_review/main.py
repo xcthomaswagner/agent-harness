@@ -274,6 +274,118 @@ async def _forward_human_issue(payload: dict[str, Any]) -> None:
         await append_backlog("human_issue", payload)
 
 
+_GITHUB_DEFECT_LINK_PATH = "/api/internal/autonomy/github-defect-link"
+
+# Match (in order): full PR URL, owner/repo#N, bare #N (same-repo).
+_PR_REF_URL_PATTERN = re.compile(
+    r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/(\d+)"
+)
+_PR_REF_OWNER_REPO_PATTERN = re.compile(
+    r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)"
+)
+_PR_REF_BARE_PATTERN = re.compile(r"(?<![A-Za-z0-9/#])#(\d+)(?![A-Za-z0-9/])")
+
+
+def _extract_pr_ref(body: str, same_repo: str) -> tuple[str, int] | None:
+    """Return (repo_full_name, pr_number) from first PR reference in body, else None.
+
+    same_repo is used when the body contains a bare same-repo '#N' reference.
+    """
+    if not body:
+        return None
+    m = _PR_REF_URL_PATTERN.search(body)
+    if m:
+        return m.group(1), int(m.group(2))
+    m = _PR_REF_OWNER_REPO_PATTERN.search(body)
+    if m:
+        return m.group(1), int(m.group(2))
+    m = _PR_REF_BARE_PATTERN.search(body)
+    if m and same_repo:
+        return same_repo, int(m.group(1))
+    return None
+
+
+def _category_from_labels(labels: list[str]) -> str:
+    """Map GitHub issue labels to defect_links.category."""
+    lower = {(label_name or "").lower() for label_name in labels}
+    if "pre-existing" in lower or "pre_existing" in lower:
+        return "pre_existing"
+    if "infra" in lower or "infrastructure" in lower:
+        return "infra"
+    if "feature-request" in lower or "feature_request" in lower or "enhancement" in lower:
+        return "feature_request"
+    return "escaped"
+
+
+async def _forward_github_defect_once(payload: dict[str, Any]) -> bool:
+    """POST GitHub defect-link payload to L1 with retry-once on transient failure.
+
+    Returns True on success (2xx), False on double-fail or non-retryable 4xx.
+    Assumes L1_INTERNAL_API_TOKEN is set (caller must short-circuit otherwise).
+    """
+    url = f"{L1_SERVICE_URL.rstrip('/')}{_GITHUB_DEFECT_LINK_PATH}"
+    headers = {"X-Internal-Api-Token": L1_INTERNAL_API_TOKEN}
+
+    last_error: str = ""
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code >= 500:
+                last_error = f"HTTP {resp.status_code}"
+                if attempt == 0:
+                    await asyncio.sleep(1)
+                    continue
+                return False
+            elif resp.status_code >= 400:
+                logger.error(
+                    "l1_github_defect_forward_failed",
+                    status_code=resp.status_code,
+                    body=resp.text[:500],
+                    issue_number=payload.get("issue_number"),
+                    pr_number=payload.get("pr_number"),
+                )
+                return False
+            else:
+                return True
+        except httpx.RequestError as exc:
+            last_error = f"RequestError: {exc}"
+            if attempt == 0:
+                await asyncio.sleep(1)
+                continue
+            return False
+
+    logger.error(
+        "l1_github_defect_forward_failed",
+        error=last_error,
+        issue_number=payload.get("issue_number"),
+        url=url,
+    )
+    return False
+
+
+async def _forward_github_defect(payload: dict[str, Any]) -> None:
+    """Forward GitHub defect-link to L1; persist to backlog on final failure.
+
+    Short-circuits (without backlog) if L1_INTERNAL_API_TOKEN is unset.
+    """
+    if not L1_INTERNAL_API_TOKEN:
+        logger.info(
+            "l1_github_defect_forward_skipped",
+            reason="L1_INTERNAL_API_TOKEN unset",
+            issue_number=payload.get("issue_number"),
+        )
+        return
+    ok = await _forward_github_defect_once(payload)
+    if not ok:
+        logger.error(
+            "l1_github_defect_forward_failed",
+            issue_number=payload.get("issue_number"),
+            backlogged=True,
+        )
+        await append_backlog("github_defect", payload)
+
+
 def _is_bot_user(user: dict[str, Any]) -> bool:
     """Return True if the GitHub user looks like a bot."""
     if not isinstance(user, dict):
@@ -821,6 +933,76 @@ async def _handle_ci_passed(payload: dict[str, Any]) -> None:
             log.exception("auto_merge_evaluation_failed", pr_number=pr_number)
 
 
+async def _handle_issue_labeled(payload: dict[str, Any]) -> None:
+    """Handle GitHub issues.labeled event — forward as defect-link if applicable.
+
+    Checks if any label matches the configured defect labels
+    (GITHUB_DEFECT_LABELS env var, default: defect,bug,regression).
+    If so, parses the issue body for a PR reference and forwards the
+    normalized payload to L1.
+    """
+    if payload.get("action", "") != "labeled":
+        return
+    issue = payload.get("issue") or {}
+    if not issue:
+        return
+
+    defect_labels_env = os.getenv(
+        "GITHUB_DEFECT_LABELS", "defect,bug,regression"
+    )
+    defect_labels = [
+        label.strip().lower()
+        for label in defect_labels_env.split(",")
+        if label.strip()
+    ]
+    labels = [
+        (label_obj or {}).get("name", "")
+        for label_obj in (issue.get("labels") or [])
+    ]
+    lower_labels = {label_name.lower() for label_name in labels}
+    if not any(defect_label in lower_labels for defect_label in defect_labels):
+        logger.debug(
+            "github_issue_labeled_not_defect",
+            issue_number=issue.get("number"),
+            labels=labels,
+        )
+        return
+
+    repo_full_name = (payload.get("repository") or {}).get("full_name", "")
+    body = issue.get("body") or ""
+    pr_ref = _extract_pr_ref(body, repo_full_name)
+    if not pr_ref:
+        logger.info(
+            "github_defect_no_pr_ref",
+            issue_number=issue.get("number"),
+            repo=repo_full_name,
+        )
+        return
+    pr_repo, pr_number = pr_ref
+
+    forward_payload = {
+        "issue_number": int(issue.get("number") or 0),
+        "issue_url": issue.get("html_url", "") or "",
+        "issue_title": (issue.get("title") or "")[:500],
+        "issue_body": body[:2000],
+        "labels": labels,
+        "reported_at": issue.get("created_at", "") or "",
+        "reporter_login": (issue.get("user") or {}).get("login", "") or "",
+        "pr_repo_full_name": pr_repo,
+        "pr_number": pr_number,
+        "category": _category_from_labels(labels),
+        "severity": "",
+    }
+    logger.info(
+        "github_defect_forwarding",
+        issue_number=forward_payload["issue_number"],
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        category=forward_payload["category"],
+    )
+    await _forward_github_defect(forward_payload)
+
+
 # Route map
 _HANDLERS: dict[EventType, Any] = {
     EventType.PR_OPENED: _handle_pr_opened,
@@ -833,6 +1015,7 @@ _HANDLERS: dict[EventType, Any] = {
     EventType.REVIEW_COMMENT: _handle_review_comment,
     EventType.REVIEW_CHANGES_REQUESTED: _handle_review_changes_requested,
     EventType.REVIEW_COMMENT_CREATED: _handle_review_comment_created,
+    EventType.ISSUE_LABELED: _handle_issue_labeled,
 }
 
 
@@ -845,6 +1028,7 @@ async def _drain_backlog_on_startup() -> None:
         forwarders: dict[str, Callable[[dict[str, Any]], Awaitable[bool]]] = {
             "autonomy_event": _forward_autonomy_event_once,
             "human_issue": _forward_human_issue_once,
+            "github_defect": _forward_github_defect_once,
         }
         try:
             await drain_backlog(forwarders)
@@ -868,6 +1052,7 @@ async def post_drain_backlog(
     forwarders: dict[str, Callable[[dict[str, Any]], Awaitable[bool]]] = {
         "autonomy_event": _forward_autonomy_event_once,
         "human_issue": _forward_human_issue_once,
+        "github_defect": _forward_github_defect_once,
     }
     result = await drain_backlog(forwarders)
     return {"status": "ok", **result}

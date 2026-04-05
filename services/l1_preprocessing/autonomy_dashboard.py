@@ -9,6 +9,7 @@ cards side-by-side and MUST NOT display a single averaged headline metric
 from __future__ import annotations
 
 import html
+import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -17,16 +18,19 @@ import structlog
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
-from autonomy_metrics import compute_profile_metrics
+from autonomy_metrics import _chunks, compute_profile_metrics
 from autonomy_store import (
     ensure_schema,
+    get_auto_merge_toggle,
     list_client_profiles,
     list_defect_links_for_profile,
     list_pr_runs,
+    list_recent_auto_merge_decisions,
     list_review_issues_by_pr_run,
     open_connection,
     resolve_db_path,
 )
+from client_profile import load_profile
 from config import settings
 
 logger = structlog.get_logger()
@@ -152,6 +156,47 @@ def _sidecar_badge_class(value: float) -> str:
     return "badge-error"
 
 
+def _resolve_auto_merge_state(
+    conn: sqlite3.Connection, profile: str
+) -> tuple[bool, str]:
+    """Return (enabled, source) for a profile's effective auto-merge state.
+
+    Precedence: runtime toggle (if ever set) > YAML auto_merge_enabled > False.
+    """
+    runtime_toggle = get_auto_merge_toggle(conn, profile)
+    if runtime_toggle is not None:
+        return bool(runtime_toggle), "runtime_toggle"
+    yaml_profile = load_profile(profile)
+    if yaml_profile is not None:
+        return bool(yaml_profile.auto_merge_enabled), "yaml"
+    return False, "yaml"
+
+
+def _render_auto_merge_state_block(profile: str, enabled: bool, source: str) -> str:
+    label = "ENABLED" if enabled else "DRY-RUN"
+    badge_cls = "badge-success" if enabled else "badge-blue"
+    curl_snippet = (
+        "curl -X POST localhost:8000/api/autonomy/auto-merge-toggle \\\n"
+        "  -H 'X-Autonomy-Admin-Token: $TOKEN' \\\n"
+        "  -H 'Content-Type: application/json' \\\n"
+        f"  -d '{{\"client_profile\":\"{profile}\",\"enabled\":true}}'"
+    )
+    curl_html = (
+        '<pre style="font-size:10.5px;background:#F8FAFC;padding:4px 8px;'
+        'border-radius:4px;margin:4px 0 0 0;white-space:pre-wrap;'
+        f'word-break:break-all">{_e(curl_snippet)}</pre>'
+    )
+    return (
+        '<div class="metric-row">'
+        '<span class="metric-label">Auto-merge</span>'
+        f'<span class="metric-value">'
+        f'<span class="badge {badge_cls}">{_e(label)}</span>'
+        f' <span class="meta">(source: {_e(source)})</span>'
+        f'</span></div>'
+        f'{curl_html}'
+    )
+
+
 def _render_profile_card(metrics: dict[str, Any]) -> str:
     profile = metrics["client_profile"]
     fpa = metrics["first_pass_acceptance_rate"]
@@ -184,6 +229,7 @@ def _render_profile_card(metrics: dict[str, Any]) -> str:
     defect_escape_cls = _defect_escape_badge_class(defect_escape)
     defect_escape_text = _defect_escape_display(defect_escape)
     sparkline_html = metrics.get("_sparkline_html", "")
+    auto_merge_html = metrics.get("_auto_merge_html", "")
 
     humans_line = (
         f"{matched_count}/{human_count} matched"
@@ -241,6 +287,7 @@ def _render_profile_card(metrics: dict[str, Any]) -> str:
         f'<span class="badge {dq_badge_cls}">{_e(dq_status)}</span>'
         f'{notes_html}'
         '</span></div>'
+        f'{auto_merge_html}'
         f'{sparkline_html}'
         '</div>'
     )
@@ -260,26 +307,32 @@ def _query_unmatched_human_issues(
     """
     if not pr_run_ids:
         return []
-    placeholders = ",".join("?" * len(pr_run_ids))
-    sql = f"""
-        SELECT ri.id, ri.pr_run_id, ri.file_path, ri.line_start, ri.line_end,
-               ri.summary, ri.created_at,
-               p.pr_number, p.pr_url, p.client_profile, p.ticket_id
-        FROM review_issues ri
-        JOIN pr_runs p ON p.id = ri.pr_run_id
-        WHERE ri.pr_run_id IN ({placeholders})
-          AND ri.source = 'human_review'
-          AND ri.is_valid = 1
-          AND NOT EXISTS (
-              SELECT 1 FROM issue_matches m
-              WHERE m.human_issue_id = ri.id
-                AND m.confidence >= 0.8
-                AND m.matched_by != 'suggested'
-          )
-        ORDER BY ri.created_at DESC, ri.id DESC
-        LIMIT ?
-    """
-    return list(conn.execute(sql, [*pr_run_ids, limit]).fetchall())
+    collected: list[sqlite3.Row] = []
+    for chunk in _chunks(pr_run_ids):
+        placeholders = ",".join("?" * len(chunk))
+        sql = f"""
+            SELECT ri.id, ri.pr_run_id, ri.file_path, ri.line_start, ri.line_end,
+                   ri.summary, ri.created_at,
+                   p.pr_number, p.pr_url, p.client_profile, p.ticket_id
+            FROM review_issues ri
+            JOIN pr_runs p ON p.id = ri.pr_run_id
+            WHERE ri.pr_run_id IN ({placeholders})
+              AND ri.source = 'human_review'
+              AND ri.is_valid = 1
+              AND NOT EXISTS (
+                  SELECT 1 FROM issue_matches m
+                  WHERE m.human_issue_id = ri.id
+                    AND m.confidence >= 0.8
+                    AND m.matched_by != 'suggested'
+              )
+            ORDER BY ri.created_at DESC, ri.id DESC
+            LIMIT ?
+        """
+        collected.extend(conn.execute(sql, [*chunk, limit]).fetchall())
+    collected.sort(
+        key=lambda r: ((r["created_at"] or ""), int(r["id"])), reverse=True
+    )
+    return collected[:limit]
 
 
 def _query_suggested_matches(
@@ -293,24 +346,30 @@ def _query_suggested_matches(
     """
     if not pr_run_ids:
         return []
-    placeholders = ",".join("?" * len(pr_run_ids))
-    sql = f"""
-        SELECT m.id AS match_id, m.confidence, m.matched_at,
-               h.id AS human_id, h.summary AS human_summary,
-               h.acceptance_criterion_ref AS ac_ref,
-               a.id AS ai_id, a.summary AS ai_summary,
-               p.pr_number, p.pr_url, p.client_profile, p.ticket_id
-        FROM issue_matches m
-        JOIN review_issues h ON h.id = m.human_issue_id
-        JOIN review_issues a ON a.id = m.ai_issue_id
-        JOIN pr_runs p ON p.id = h.pr_run_id
-        WHERE m.matched_by = 'suggested'
-          AND m.confidence < 0.8
-          AND h.pr_run_id IN ({placeholders})
-        ORDER BY m.matched_at DESC, m.id DESC
-        LIMIT ?
-    """
-    return list(conn.execute(sql, [*pr_run_ids, limit]).fetchall())
+    collected: list[sqlite3.Row] = []
+    for chunk in _chunks(pr_run_ids):
+        placeholders = ",".join("?" * len(chunk))
+        sql = f"""
+            SELECT m.id AS match_id, m.confidence, m.matched_at,
+                   h.id AS human_id, h.summary AS human_summary,
+                   h.acceptance_criterion_ref AS ac_ref,
+                   a.id AS ai_id, a.summary AS ai_summary,
+                   p.pr_number, p.pr_url, p.client_profile, p.ticket_id
+            FROM issue_matches m
+            JOIN review_issues h ON h.id = m.human_issue_id
+            JOIN review_issues a ON a.id = m.ai_issue_id
+            JOIN pr_runs p ON p.id = h.pr_run_id
+            WHERE m.matched_by = 'suggested'
+              AND m.confidence < 0.8
+              AND h.pr_run_id IN ({placeholders})
+            ORDER BY m.matched_at DESC, m.id DESC
+            LIMIT ?
+        """
+        collected.extend(conn.execute(sql, [*chunk, limit]).fetchall())
+    collected.sort(
+        key=lambda r: ((r["matched_at"] or ""), int(r["match_id"])), reverse=True
+    )
+    return collected[:limit]
 
 
 def _truncate(text: str, max_len: int = 120) -> str:
@@ -457,6 +516,117 @@ def _render_escaped_defects_section(
     )
 
 
+_AUTO_MERGE_DECISION_BADGE: dict[str, str] = {
+    "merged": "badge-success",
+    "dry_run": "badge-blue",
+    "skipped": "badge-secondary",
+    "failed": "badge-error",
+}
+
+
+def _query_auto_merge_decisions(
+    conn: sqlite3.Connection,
+    profile_filter: str | None,
+    limit: int = 25,
+    *,
+    since_days: int = 7,
+) -> list[sqlite3.Row]:
+    """Fetch recent auto-merge decisions, optionally scoped to one profile.
+
+    since_days: how far back to look (default 7 days).
+    """
+    since_iso = (datetime.now(UTC) - timedelta(days=since_days)).isoformat()
+    return list_recent_auto_merge_decisions(
+        conn,
+        limit=limit,
+        since_iso=since_iso,
+        client_profile=profile_filter,
+    )
+
+
+def _parse_decision_payload(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        payload = json.loads(row["payload_json"])
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return payload
+
+
+def _format_target_cell(target_id: str) -> str:
+    """Turn 'owner/repo#123' into a clickable GitHub PR link. Fallback to text."""
+    if not target_id or "#" not in target_id:
+        return _e(target_id or "—")
+    repo_part, _, pr_part = target_id.partition("#")
+    if not repo_part or not pr_part or not pr_part.isdigit():
+        return _e(target_id)
+    url = f"https://github.com/{repo_part}/pull/{pr_part}"
+    return f'<a href="{_e(url)}">{_e(target_id)}</a>'
+
+
+def _format_gates_summary(gates: Any) -> str:
+    """Turn a gates dict/list into a short human-readable summary."""
+    if not gates:
+        return "—"
+    if isinstance(gates, dict):
+        parts: list[str] = []
+        for key, val in gates.items():
+            if isinstance(val, bool):
+                mark = "✓" if val else "✗"
+                parts.append(f"{key}={mark}")
+            else:
+                parts.append(f"{key}={val}")
+        return ", ".join(parts)
+    if isinstance(gates, list):
+        return ", ".join(str(g) for g in gates)
+    return str(gates)
+
+
+def _render_auto_merge_decisions_section(
+    rows: list[sqlite3.Row], profile_filter: str | None
+) -> str:
+    header = '<h2 style="margin-top:24px">Auto-merge Decisions</h2>'
+    if not rows:
+        return (
+            header
+            + '<p class="meta">No auto-merge decisions in the last 7 days</p>'
+        )
+    body_parts: list[str] = []
+    for r in rows:
+        payload = _parse_decision_payload(r)
+        created_at = _e((r["created_at"] or "")[:19])
+        target_cell = _format_target_cell(str(r["target_id"] or ""))
+        decision = str(payload.get("decision") or "")
+        badge_cls = _AUTO_MERGE_DECISION_BADGE.get(decision, "badge-secondary")
+        decision_cell = (
+            f'<span class="badge {badge_cls}">{_e(decision or "—")}</span>'
+        )
+        reason = _e(_truncate(str(payload.get("reason") or ""), 100))
+        mode = _e(str(payload.get("recommended_mode") or "—"))
+        dry_run_val = payload.get("dry_run")
+        if isinstance(dry_run_val, bool):
+            dry_run_cell = "yes" if dry_run_val else "no"
+        else:
+            dry_run_cell = "—"
+        gates_cell = _e(_truncate(_format_gates_summary(payload.get("gates")), 120))
+        body_parts.append(
+            f"<tr><td>{created_at}</td><td>{target_cell}</td>"
+            f"<td>{decision_cell}</td><td>{reason}</td>"
+            f"<td>{mode}</td><td>{_e(dry_run_cell)}</td>"
+            f"<td>{gates_cell}</td></tr>"
+        )
+    body = "".join(body_parts)
+    return (
+        header
+        + '<table><thead><tr>'
+        '<th>Time</th><th>Target</th><th>Decision</th><th>Reason</th>'
+        '<th>Mode</th><th>Dry-run?</th><th>Gates</th>'
+        '</tr></thead>'
+        f'<tbody>{body}</tbody></table>'
+    )
+
+
 def _render_sparkline_svg(
     points: list[tuple[str, float | None]], *, label: str
 ) -> str:
@@ -526,38 +696,38 @@ def _render_ticket_type_breakdown(rows: list[dict[str, Any]]) -> str:
 def _build_sparklines_html(
     conn: sqlite3.Connection, profile: str, window_days: int
 ) -> str:
-    """Build stacked sparkline HTML for a profile card."""
-    from autonomy_metrics import compute_daily_trend
+    """Build stacked sparkline HTML for a profile card (7-day rolling avg)."""
+    from autonomy_metrics import compute_rolling_trend
 
     fpa_points = [
-        (d, v) for (d, v, _n) in compute_daily_trend(
-            conn, profile, window_days, "fpa"
+        (d, v) for (d, v, _n) in compute_rolling_trend(
+            conn, profile, window_days, "fpa", smoothing_window=7
         )
     ]
     esc_points = [
-        (d, v) for (d, v, _n) in compute_daily_trend(
-            conn, profile, window_days, "defect_escape"
+        (d, v) for (d, v, _n) in compute_rolling_trend(
+            conn, profile, window_days, "defect_escape", smoothing_window=7
         )
     ]
     catch_points = [
-        (d, v) for (d, v, _n) in compute_daily_trend(
-            conn, profile, window_days, "catch_rate"
+        (d, v) for (d, v, _n) in compute_rolling_trend(
+            conn, profile, window_days, "catch_rate", smoothing_window=7
         )
     ]
     return (
         '<div style="margin-top:8px;padding-top:8px;'
         'border-top:1px solid #E2E8F0">'
         '<div class="metric-row">'
-        '<span class="metric-label">FPA trend</span>'
-        f'<span>{_render_sparkline_svg(fpa_points, label="FPA trend")}</span>'
+        '<span class="metric-label">FPA trend <span class="meta">(7-day avg)</span></span>'
+        f'<span>{_render_sparkline_svg(fpa_points, label="FPA trend (7-day avg)")}</span>'
         '</div>'
         '<div class="metric-row">'
-        '<span class="metric-label">Defect escape trend</span>'
-        f'<span>{_render_sparkline_svg(esc_points, label="Defect escape trend")}</span>'
+        '<span class="metric-label">Defect escape trend <span class="meta">(7-day avg)</span></span>'
+        f'<span>{_render_sparkline_svg(esc_points, label="Defect escape trend (7-day avg)")}</span>'
         '</div>'
         '<div class="metric-row">'
-        '<span class="metric-label">Catch rate trend</span>'
-        f'<span>{_render_sparkline_svg(catch_points, label="Catch rate trend")}</span>'
+        '<span class="metric-label">Catch rate trend <span class="meta">(7-day avg)</span></span>'
+        f'<span>{_render_sparkline_svg(catch_points, label="Catch rate trend (7-day avg)")}</span>'
         '</div>'
         '</div>'
     )
@@ -641,10 +811,14 @@ def autonomy_dashboard(
         profile_metrics = [
             _compute_profile_metrics(conn, p, window_days) for p in profiles_to_show
         ]
-        # Attach sparkline HTML per card
+        # Attach sparkline HTML + auto-merge state per card
         for m in profile_metrics:
             m["_sparkline_html"] = _build_sparklines_html(
                 conn, m["client_profile"], window_days
+            )
+            enabled, source = _resolve_auto_merge_state(conn, m["client_profile"])
+            m["_auto_merge_html"] = _render_auto_merge_state_block(
+                m["client_profile"], enabled, source
             )
 
         # Build recent PR table scope
@@ -665,6 +839,10 @@ def autonomy_dashboard(
 
         escaped_html = _render_escaped_defects_section(
             conn, profiles_to_show, window_days
+        )
+
+        auto_merge_decision_rows = _query_auto_merge_decisions(
+            conn, client_profile, limit=25
         )
 
         # Ticket-type breakdown: only for single profile view
@@ -700,6 +878,9 @@ def autonomy_dashboard(
     table_html = _render_pr_table(table_rows)
     unmatched_html = _render_unmatched_section(unmatched_rows)
     suggested_html = _render_suggested_section(suggested_rows)
+    auto_merge_decisions_html = _render_auto_merge_decisions_section(
+        auto_merge_decision_rows, client_profile
+    )
 
     title_suffix = (
         f" — {_e(client_profile)}" if client_profile is not None else " — All"
@@ -722,6 +903,7 @@ def autonomy_dashboard(
 {table_html}
 {breakdown_html}
 {escaped_html}
+{auto_merge_decisions_html}
 {unmatched_html}
 {suggested_html}
 </div></body></html>"""

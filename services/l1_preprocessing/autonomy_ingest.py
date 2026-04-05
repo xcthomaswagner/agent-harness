@@ -17,6 +17,7 @@ import structlog
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
+from autonomy_attribution import attribute_human_issues_to_commits
 from autonomy_jira_bug import NormalizedBug
 from autonomy_matching import match_human_issues_for_pr_run
 from autonomy_metrics import compute_profile_metrics
@@ -30,8 +31,11 @@ from autonomy_store import (
     get_pr_run_by_unique,
     insert_defect_link,
     insert_manual_override,
+    insert_pr_commit,
     insert_review_issue,
     list_client_profiles,
+    list_human_issues_for_pr_run,
+    list_pr_commits,
     list_recent_auto_merge_decisions,
     open_connection,
     promote_match_to_counted,
@@ -39,6 +43,7 @@ from autonomy_store import (
     record_defect_sweep_heartbeat,
     resolve_db_path,
     set_auto_merge_toggle,
+    set_human_issue_code_change_flag,
     upsert_pr_run,
 )
 from client_profile import find_profile_by_project_key, find_profile_by_repo, load_profile
@@ -129,6 +134,28 @@ class HumanIssueIn(BaseModel):
     comment_url: str = ""
 
 
+class GithubDefectLinkIn(BaseModel):
+    """Payload forwarded by L3 when a GitHub issue is labeled as a defect
+    and its body references a previously-merged PR.
+    """
+
+    issue_number: int
+    issue_url: str
+    issue_title: str
+    issue_body: str = ""
+    labels: list[str] = []
+    reported_at: str  # ISO 8601 (issue.created_at)
+    reporter_login: str = ""
+    # PR reference extracted by L3
+    pr_repo_full_name: str  # "owner/repo" of the referenced PR
+    pr_number: int
+    # Classification hint from label
+    category: Literal[
+        "escaped", "feature_request", "pre_existing", "infra"
+    ] = "escaped"
+    severity: str = ""
+
+
 class AutonomyEventIn(BaseModel):
     """Incoming autonomy event posted by L3 (or backfill tooling)."""
 
@@ -216,6 +243,10 @@ def apply_event(
     )
 
     et = event.event_type
+    # Track whether review_approved should compute first_pass_accepted via
+    # the follow-up-commit signal (deferred until after the pr_run upsert).
+    approval_pending = False
+    prior_fpa_was_downgraded = False
     if et == "pr_opened":
         upsert.opened_at = event.event_at
     elif et == "pr_synchronized":
@@ -223,22 +254,13 @@ def apply_event(
         pass
     elif et == "review_approved":
         upsert.approved_at = event.event_at
-        if existing is None:
-            upsert.first_pass_accepted = 1
-        else:
+        if existing is not None:
             # If we've previously downgraded to 0, keep it there.
             prior_fpa = int(existing["first_pass_accepted"])
-            # Detect whether the 0 was actively set (row has been updated
-            # since creation) versus the default on an insert that had no
-            # approval signal. If updated_at == created_at AND fpa==0, then
-            # no prior event landed that explicitly downgraded — treat as
-            # first approval and flip to 1.
             was_updated = existing["updated_at"] != existing["created_at"]
             if prior_fpa == 0 and was_updated:
-                # Already downgraded by prior event — leave it.
-                pass
-            else:
-                upsert.first_pass_accepted = 1
+                prior_fpa_was_downgraded = True
+        approval_pending = True
     elif et == "review_changes_requested":
         upsert.first_pass_accepted = 0
     elif et == "review_comment":
@@ -248,6 +270,66 @@ def apply_event(
         upsert.merged_at = event.merged_at or event.event_at
 
     pr_run_id = upsert_pr_run(conn, upsert)
+
+    # Record commit history for follow-up-commit attribution. pr_opened and
+    # pr_synchronized both carry the current head_sha + a timestamp; insert
+    # is idempotent via UNIQUE (pr_run_id, sha).
+    if et in ("pr_opened", "pr_synchronized") and event.head_sha:
+        try:
+            insert_pr_commit(
+                conn,
+                pr_run_id=pr_run_id,
+                sha=event.head_sha,
+                committed_at=event.event_at,
+            )
+        except Exception:
+            logger.exception(
+                "autonomy_pr_commit_insert_failed",
+                pr_run_id=pr_run_id,
+                event_type=et,
+            )
+
+    # On review_approved, use the follow-up-commit signal to decide
+    # first_pass_accepted and flag human comments that triggered commits.
+    if approval_pending:
+        try:
+            humans = list_human_issues_for_pr_run(conn, pr_run_id)
+            commits = list_pr_commits(conn, pr_run_id)
+            triggering_ids = attribute_human_issues_to_commits(
+                [
+                    {"id": int(h["id"]), "created_at": h["created_at"]}
+                    for h in humans
+                ],
+                [
+                    {"sha": c["sha"], "committed_at": c["committed_at"]}
+                    for c in commits
+                ],
+                event.event_at,
+            )
+            for hid in triggering_ids:
+                set_human_issue_code_change_flag(conn, hid, 1)
+            # Prior changes_requested pins fpa=0; otherwise fpa=1 iff no
+            # comment drove a follow-up commit.
+            new_fpa = (
+                0
+                if prior_fpa_was_downgraded or triggering_ids
+                else 1
+            )
+            upsert_pr_run(
+                conn,
+                PrRunUpsert(
+                    ticket_id=event.ticket_id,
+                    pr_number=event.pr_number,
+                    repo_full_name=event.repo_full_name,
+                    head_sha=event.head_sha,
+                    first_pass_accepted=new_fpa,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "autonomy_approval_attribution_failed",
+                pr_run_id=pr_run_id,
+            )
 
     # Drain any pending AI issues that arrived via sidecar before the PR was
     # opened/synchronized. Idempotent — drain_pending_ai_issues checks for
@@ -615,6 +697,115 @@ async def post_autonomy_human_issue(
         "action": action,
         "client_profile": profile_name,
         "match_summary": match_summary,
+    }
+
+
+@router.post("/api/internal/autonomy/github-defect-link")
+async def post_github_defect_link(
+    request: Request,
+    x_internal_api_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Record a defect_link from a GitHub issue labeled as a defect.
+
+    L3 parses the issue body for a PR reference, then forwards the normalized
+    payload here. We look up the matching merged pr_run by (repo, pr_number)
+    and insert a defect_link with source='github' keyed on
+    defect_key="gh-issue:<issue_number>".
+
+    Fail-closed: 503 if L1_INTERNAL_API_TOKEN is unset.
+    """
+    body = await _guard_internal_request(request, x_internal_api_token)
+
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=422, detail="Body must be a JSON object")
+
+    try:
+        payload = GithubDefectLinkIn(**data)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    defect_key = f"gh-issue:{payload.issue_number}"
+
+    conn = _open_conn()
+    try:
+        # Find the most recently merged pr_run matching (repo, pr_number).
+        row = conn.execute(
+            "SELECT * FROM pr_runs WHERE repo_full_name = ? AND pr_number = ? "
+            "AND merged = 1 ORDER BY datetime(merged_at) DESC, id DESC LIMIT 1",
+            (payload.pr_repo_full_name, payload.pr_number),
+        ).fetchone()
+
+        if row is None:
+            # No merged PR found — record for later reconciliation.
+            insert_manual_override(
+                conn,
+                override_type="unresolved_defect_link",
+                target_id=defect_key,
+                payload_json=json.dumps(payload.model_dump()),
+                created_by="github_defect_webhook",
+            )
+            logger.info(
+                "autonomy_github_defect_deferred",
+                defect_key=defect_key,
+                pr_repo=payload.pr_repo_full_name,
+                pr_number=payload.pr_number,
+            )
+            return {
+                "status": "deferred",
+                "reason": "no_merged_pr_found",
+                "defect_key": defect_key,
+                "pr_repo_full_name": payload.pr_repo_full_name,
+                "pr_number": payload.pr_number,
+            }
+
+        pr_run_id = int(row["id"])
+        notes = (payload.issue_title or "")[:500]
+        defect_id = insert_defect_link(
+            conn,
+            pr_run_id=pr_run_id,
+            defect_key=defect_key,
+            source="github",
+            severity=payload.severity,
+            reported_at=payload.reported_at or _now_iso_utc(),
+            confirmed=1,
+            notes=notes,
+            category=payload.category,
+        )
+        insert_manual_override(
+            conn,
+            override_type="defect_link",
+            target_id=str(defect_id),
+            payload_json=json.dumps(
+                {
+                    "source": "github_webhook",
+                    "issue_number": payload.issue_number,
+                    "issue_url": payload.issue_url,
+                    "labels": payload.labels,
+                    "category": payload.category,
+                }
+            ),
+            created_by="github_defect_webhook",
+        )
+    finally:
+        conn.close()
+
+    logger.info(
+        "autonomy_github_defect_recorded",
+        pr_run_id=pr_run_id,
+        defect_link_id=defect_id,
+        defect_key=defect_key,
+        category=payload.category,
+    )
+
+    return {
+        "status": "accepted",
+        "defect_link_id": defect_id,
+        "pr_run_id": pr_run_id,
+        "defect_key": defect_key,
     }
 
 

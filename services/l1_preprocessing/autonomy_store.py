@@ -105,6 +105,15 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
             )
         version = 3
         logger.info("autonomy_schema_migrated", version=version)
+    if version < 4:
+        with conn:
+            _migrate_to_v4(conn)
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (4, _now_iso()),
+            )
+        version = 4
+        logger.info("autonomy_schema_migrated", version=version)
     return version
 
 
@@ -286,6 +295,25 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_defect_links_uniq "
         "ON defect_links (pr_run_id, defect_key, source)"
+    )
+
+
+def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+    """v4: record PR commit history for follow-up-commit acceptance signal."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pr_commits (
+            id INTEGER PRIMARY KEY,
+            pr_run_id INTEGER NOT NULL REFERENCES pr_runs(id),
+            sha TEXT NOT NULL,
+            committed_at TEXT NOT NULL,
+            UNIQUE (pr_run_id, sha)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pr_commits_pr_run_committed_at "
+        "ON pr_commits (pr_run_id, committed_at)"
     )
 
 
@@ -715,6 +743,68 @@ def list_review_issues_by_pr_run(
             (pr_run_id, source),
         ).fetchall()
     return list(rows)
+
+
+def insert_pr_commit(
+    conn: sqlite3.Connection,
+    *,
+    pr_run_id: int,
+    sha: str,
+    committed_at: str,
+) -> int:
+    """Idempotent insert into pr_commits keyed on (pr_run_id, sha).
+
+    Returns the row id (existing or new).
+    """
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO pr_commits (pr_run_id, sha, committed_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT (pr_run_id, sha) DO NOTHING
+            """,
+            (pr_run_id, sha, committed_at),
+        )
+    row = conn.execute(
+        "SELECT id FROM pr_commits WHERE pr_run_id = ? AND sha = ?",
+        (pr_run_id, sha),
+    ).fetchone()
+    return int(row["id"]) if row is not None else 0
+
+
+def list_pr_commits(
+    conn: sqlite3.Connection, pr_run_id: int
+) -> list[sqlite3.Row]:
+    """Return pr_commits rows for a pr_run, ordered by committed_at ASC, id ASC."""
+    rows = conn.execute(
+        "SELECT * FROM pr_commits WHERE pr_run_id = ? "
+        "ORDER BY committed_at ASC, id ASC",
+        (pr_run_id,),
+    ).fetchall()
+    return list(rows)
+
+
+def list_human_issues_for_pr_run(
+    conn: sqlite3.Connection, pr_run_id: int
+) -> list[sqlite3.Row]:
+    """Return human_review review_issues rows for a pr_run, ordered by created_at ASC, id ASC."""
+    rows = conn.execute(
+        "SELECT * FROM review_issues WHERE pr_run_id = ? AND source = 'human_review' "
+        "ORDER BY created_at ASC, id ASC",
+        (pr_run_id,),
+    ).fetchall()
+    return list(rows)
+
+
+def set_human_issue_code_change_flag(
+    conn: sqlite3.Connection, issue_id: int, flag: int
+) -> None:
+    """Update is_code_change_request on a single review_issues row."""
+    with conn:
+        conn.execute(
+            "UPDATE review_issues SET is_code_change_request = ? WHERE id = ?",
+            (int(flag), issue_id),
+        )
 
 
 def insert_issue_match(

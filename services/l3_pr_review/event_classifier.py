@@ -23,6 +23,7 @@ class EventType(StrEnum):
     REVIEW_CHANGES_REQUESTED = "review_changes_requested"
     REVIEW_COMMENT = "review_comment"
     REVIEW_COMMENT_CREATED = "review_comment_created"
+    ISSUE_LABELED = "issue_labeled"
     IGNORED = "ignored"
 
 
@@ -81,6 +82,12 @@ def classify_event(headers: dict[str, str], payload: dict[str, Any]) -> EventTyp
     if github_event == "pull_request_review_comment":
         if action in ("created", "edited"):
             return EventType.REVIEW_COMMENT_CREATED
+        return EventType.IGNORED
+
+    # Issue (not PR) events — used for defect-label tracking
+    if github_event == "issues":
+        if action == "labeled":
+            return EventType.ISSUE_LABELED
         return EventType.IGNORED
 
     # Issue comment on a PR (only new comments, not edits or deletions)

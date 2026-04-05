@@ -711,7 +711,7 @@ class TestSchemaV3:
         conn = open_connection(db_path)
         try:
             version = ensure_schema(conn)
-            assert version == 3
+            assert version >= 3
             cols = {
                 r["name"]
                 for r in conn.execute(
@@ -739,12 +739,15 @@ class TestSchemaV3:
     def test_v3_migration_idempotent(self, db_path: Path) -> None:
         conn = open_connection(db_path)
         try:
-            assert ensure_schema(conn) == 3
-            assert ensure_schema(conn) == 3
+            first = ensure_schema(conn)
+            assert first >= 3
+            assert ensure_schema(conn) == first
             rows = conn.execute(
                 "SELECT version FROM schema_version ORDER BY version"
             ).fetchall()
-            assert [r["version"] for r in rows] == [1, 2, 3]
+            versions = [r["version"] for r in rows]
+            assert 1 in versions and 2 in versions and 3 in versions
+            assert len(versions) == first
         finally:
             conn.close()
 
@@ -1504,5 +1507,155 @@ class TestAutoMergeDecisions:
             )
             assert len(rows) == 1
             assert rows[0]["target_id"] == "a/b#1"
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# v4: pr_commits + helpers
+# ---------------------------------------------------------------------------
+
+
+class TestV4Migration:
+    def test_v4_migration_creates_pr_commits(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            version = ensure_schema(conn)
+            assert version >= 4
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='pr_commits'"
+            ).fetchone()
+            assert row is not None
+        finally:
+            conn.close()
+
+    def test_v4_migration_idempotent(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            ensure_schema(conn)
+            rows = conn.execute(
+                "SELECT version FROM schema_version WHERE version = 4"
+            ).fetchall()
+            assert len(rows) == 1
+        finally:
+            conn.close()
+
+
+class TestPrCommits:
+    def _setup(self, db_path: Path):
+        from autonomy_store import upsert_pr_run as _upsert
+        conn = open_connection(db_path)
+        ensure_schema(conn)
+        pr_run_id = _upsert(conn, _base_upsert())
+        return conn, pr_run_id
+
+    def test_insert_pr_commit_idempotent_on_unique(
+        self, db_path: Path
+    ) -> None:
+        from autonomy_store import insert_pr_commit, list_pr_commits
+        conn, pr_run_id = self._setup(db_path)
+        try:
+            id1 = insert_pr_commit(
+                conn,
+                pr_run_id=pr_run_id,
+                sha="abc",
+                committed_at="2026-04-05T12:00:00+00:00",
+            )
+            id2 = insert_pr_commit(
+                conn,
+                pr_run_id=pr_run_id,
+                sha="abc",
+                committed_at="2026-04-05T12:30:00+00:00",
+            )
+            assert id1 == id2
+            assert len(list_pr_commits(conn, pr_run_id)) == 1
+        finally:
+            conn.close()
+
+    def test_list_pr_commits_ordered_by_committed_at(
+        self, db_path: Path
+    ) -> None:
+        from autonomy_store import insert_pr_commit, list_pr_commits
+        conn, pr_run_id = self._setup(db_path)
+        try:
+            insert_pr_commit(
+                conn,
+                pr_run_id=pr_run_id,
+                sha="b",
+                committed_at="2026-04-05T13:00:00+00:00",
+            )
+            insert_pr_commit(
+                conn,
+                pr_run_id=pr_run_id,
+                sha="a",
+                committed_at="2026-04-05T12:00:00+00:00",
+            )
+            insert_pr_commit(
+                conn,
+                pr_run_id=pr_run_id,
+                sha="c",
+                committed_at="2026-04-05T14:00:00+00:00",
+            )
+            rows = list_pr_commits(conn, pr_run_id)
+            assert [r["sha"] for r in rows] == ["a", "b", "c"]
+        finally:
+            conn.close()
+
+    def test_list_human_issues_for_pr_run_ordered(
+        self, db_path: Path
+    ) -> None:
+        from autonomy_store import list_human_issues_for_pr_run
+        conn, pr_run_id = self._setup(db_path)
+        try:
+            # Insert out-of-order human issues using direct SQL to control created_at.
+            for ext, created_at in [
+                ("c2", "2026-04-05T12:30:00+00:00"),
+                ("c1", "2026-04-05T12:00:00+00:00"),
+                ("c3", "2026-04-05T13:00:00+00:00"),
+            ]:
+                conn.execute(
+                    "INSERT INTO review_issues (pr_run_id, source, external_id, "
+                    "created_at, summary) VALUES (?, 'human_review', ?, ?, ?)",
+                    (pr_run_id, ext, created_at, "s"),
+                )
+            conn.commit()
+            # Also add a non-human issue to confirm filtering.
+            conn.execute(
+                "INSERT INTO review_issues (pr_run_id, source, external_id, "
+                "created_at, summary) VALUES (?, 'ai_review', 'x', ?, ?)",
+                (pr_run_id, "2026-04-05T11:00:00+00:00", "ai"),
+            )
+            conn.commit()
+            rows = list_human_issues_for_pr_run(conn, pr_run_id)
+            assert [r["external_id"] for r in rows] == ["c1", "c2", "c3"]
+        finally:
+            conn.close()
+
+    def test_set_human_issue_code_change_flag(self, db_path: Path) -> None:
+        from autonomy_store import set_human_issue_code_change_flag
+        conn, pr_run_id = self._setup(db_path)
+        try:
+            issue_id = insert_review_issue(
+                conn,
+                pr_run_id=pr_run_id,
+                source="human_review",
+                external_id="c1",
+                summary="comment",
+                is_code_change_request=0,
+            )
+            set_human_issue_code_change_flag(conn, issue_id, 1)
+            row = conn.execute(
+                "SELECT is_code_change_request FROM review_issues WHERE id = ?",
+                (issue_id,),
+            ).fetchone()
+            assert int(row["is_code_change_request"]) == 1
+            set_human_issue_code_change_flag(conn, issue_id, 0)
+            row = conn.execute(
+                "SELECT is_code_change_request FROM review_issues WHERE id = ?",
+                (issue_id,),
+            ).fetchone()
+            assert int(row["is_code_change_request"]) == 0
         finally:
             conn.close()
