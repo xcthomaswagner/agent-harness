@@ -7,6 +7,7 @@ connection-per-request pattern and hand-rolled, versioned migrations.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -18,6 +19,9 @@ from pydantic import BaseModel
 from config import settings
 
 logger = structlog.get_logger()
+
+# AI-origin sources (defined locally to avoid import cycle with autonomy_matching).
+AI_SOURCES = ("ai_review", "judge", "qa")
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +94,15 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
                 (2, _now_iso()),
             )
         version = 2
+        logger.info("autonomy_schema_migrated", version=version)
+    if version < 3:
+        with conn:
+            _migrate_to_v3(conn)
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (3, _now_iso()),
+            )
+        version = 3
         logger.info("autonomy_schema_migrated", version=version)
     return version
 
@@ -258,6 +271,20 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_pr_runs_backfilled "
         "ON pr_runs (backfilled)"
+    )
+
+
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    """v3: categorize defect_links + unique key on (pr_run_id, defect_key, source)."""
+    # Add category column. Values: 'escaped'|'feature_request'|'pre_existing'|'infra'.
+    # Default to 'escaped' so existing rows remain counted as escapes.
+    conn.execute(
+        "ALTER TABLE defect_links ADD COLUMN category TEXT NOT NULL "
+        "DEFAULT 'escaped'"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_defect_links_uniq "
+        "ON defect_links (pr_run_id, defect_key, source)"
     )
 
 
@@ -728,3 +755,358 @@ def list_issue_matches_for_human(
         (human_issue_id,),
     ).fetchall()
     return list(rows)
+
+
+# ---------------------------------------------------------------------------
+# v3 helpers: defect_links, manual_overrides, match promotion
+# ---------------------------------------------------------------------------
+
+def insert_defect_link(
+    conn: sqlite3.Connection,
+    *,
+    pr_run_id: int,
+    defect_key: str,
+    source: str,
+    reported_at: str,
+    severity: str = "",
+    confirmed: int = 1,
+    notes: str = "",
+    category: str = "escaped",
+) -> int:
+    """Insert a defect_links row, upserting on (pr_run_id, defect_key, source).
+
+    On conflict, updates severity/reported_at/confirmed/notes/category.
+    Returns the row id.
+    """
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO defect_links (
+                pr_run_id, defect_key, source, severity, reported_at,
+                confirmed, notes, category
+            ) VALUES (?,?,?,?,?,?,?,?)
+            ON CONFLICT (pr_run_id, defect_key, source) DO UPDATE SET
+                severity = excluded.severity,
+                reported_at = excluded.reported_at,
+                confirmed = excluded.confirmed,
+                notes = excluded.notes,
+                category = excluded.category
+            """,
+            (
+                pr_run_id,
+                defect_key,
+                source,
+                severity,
+                reported_at,
+                int(confirmed),
+                notes,
+                category,
+            ),
+        )
+    row = conn.execute(
+        "SELECT id FROM defect_links WHERE pr_run_id = ? AND defect_key = ? "
+        "AND source = ?",
+        (pr_run_id, defect_key, source),
+    ).fetchone()
+    return int(row["id"]) if row is not None else 0
+
+
+def get_defect_link(
+    conn: sqlite3.Connection,
+    pr_run_id: int,
+    defect_key: str,
+    source: str,
+) -> sqlite3.Row | None:
+    """Lookup a defect_link by unique triple."""
+    row: sqlite3.Row | None = conn.execute(
+        "SELECT * FROM defect_links WHERE pr_run_id = ? AND defect_key = ? "
+        "AND source = ?",
+        (pr_run_id, defect_key, source),
+    ).fetchone()
+    return row
+
+
+def _parse_iso(value: str) -> datetime | None:
+    """Parse ISO-8601 string; return None on empty/malformed input."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def list_confirmed_escaped_defects(
+    conn: sqlite3.Connection,
+    pr_run_ids: list[int],
+    *,
+    window_days: int = 30,
+) -> list[sqlite3.Row]:
+    """Return confirmed escaped defect_links joined to pr_runs.
+
+    Filters:
+    - pr_run_id in pr_run_ids
+    - pr_run.merged=1 and merged_at non-empty
+    - defect_links.confirmed=1
+    - defect_links.category='escaped'
+    - reported_at >= merged_at
+    - reported_at < merged_at + window_days
+
+    Date-window filter is applied in Python over ISO strings.
+    """
+    if not pr_run_ids:
+        return []
+    placeholders = ",".join("?" for _ in pr_run_ids)
+    sql = (
+        "SELECT dl.*, pr.pr_number, pr.pr_url, pr.client_profile, "
+        "pr.ticket_id, pr.merged_at "
+        "FROM defect_links dl "
+        "JOIN pr_runs pr ON pr.id = dl.pr_run_id "
+        f"WHERE dl.pr_run_id IN ({placeholders}) "
+        "AND pr.merged = 1 "
+        "AND pr.merged_at != '' "
+        "AND dl.confirmed = 1 "
+        "AND dl.category = 'escaped'"
+    )
+    rows = conn.execute(sql, tuple(pr_run_ids)).fetchall()
+
+    out: list[sqlite3.Row] = []
+    for r in rows:
+        merged_dt = _parse_iso(r["merged_at"])
+        reported_dt = _parse_iso(r["reported_at"])
+        if merged_dt is None or reported_dt is None:
+            continue
+        delta_days = (reported_dt - merged_dt).total_seconds() / 86400.0
+        if delta_days < 0:
+            continue
+        if delta_days >= window_days:
+            continue
+        out.append(r)
+    return out
+
+
+def count_merged_pr_runs_with_escape(
+    conn: sqlite3.Connection,
+    pr_run_ids: list[int],
+    *,
+    window_days: int = 30,
+) -> int:
+    """Return count of distinct pr_run_ids with at least one escaped defect
+    in the post-merge window.
+    """
+    rows = list_confirmed_escaped_defects(
+        conn, pr_run_ids, window_days=window_days
+    )
+    return len({int(r["pr_run_id"]) for r in rows})
+
+
+def insert_manual_override(
+    conn: sqlite3.Connection,
+    *,
+    override_type: str,
+    target_id: str,
+    payload_json: str,
+    created_by: str = "admin",
+) -> int:
+    """Insert a manual_overrides audit row. Returns the new row id."""
+    now = _now_iso()
+    with conn:
+        cur = conn.execute(
+            """
+            INSERT INTO manual_overrides (
+                override_type, target_id, payload_json, created_at, created_by
+            ) VALUES (?,?,?,?,?)
+            """,
+            (override_type, target_id, payload_json, now, created_by),
+        )
+    return int(cur.lastrowid or 0)
+
+
+def promote_match_to_counted(
+    conn: sqlite3.Connection,
+    *,
+    match_id: int,
+    created_by: str = "admin",
+) -> bool:
+    """Promote a 'suggested' issue_matches row to 'manual' with confidence=1.0.
+
+    Returns True if promoted. Returns False if the match does not exist or
+    is not currently matched_by='suggested'.
+    """
+    row = conn.execute(
+        "SELECT id, matched_by FROM issue_matches WHERE id = ?",
+        (match_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    if row["matched_by"] != "suggested":
+        return False
+    with conn:
+        conn.execute(
+            "UPDATE issue_matches SET matched_by = 'manual', confidence = 1.0 "
+            "WHERE id = ?",
+            (match_id,),
+        )
+    insert_manual_override(
+        conn,
+        override_type="promote_match",
+        target_id=str(match_id),
+        payload_json=json.dumps({"match_id": match_id}),
+        created_by=created_by,
+    )
+    return True
+
+
+def create_manual_match(
+    conn: sqlite3.Connection,
+    *,
+    human_issue_id: int,
+    ai_issue_id: int,
+    created_by: str = "admin",
+) -> int:
+    """Create a manual issue_matches row linking a human-review issue to an
+    AI-origin issue on the same PR run.
+
+    Validates that:
+    - both review_issues rows exist
+    - they share pr_run_id
+    - human source == 'human_review'
+    - ai source in AI_SOURCES
+    - ai.is_valid == 1
+
+    Also writes a manual_overrides audit row. Returns the new match id.
+    """
+    human = conn.execute(
+        "SELECT id, pr_run_id, source, is_valid FROM review_issues WHERE id = ?",
+        (human_issue_id,),
+    ).fetchone()
+    if human is None:
+        raise ValueError(f"human_issue_id {human_issue_id} not found")
+    ai = conn.execute(
+        "SELECT id, pr_run_id, source, is_valid FROM review_issues WHERE id = ?",
+        (ai_issue_id,),
+    ).fetchone()
+    if ai is None:
+        raise ValueError(f"ai_issue_id {ai_issue_id} not found")
+    if human["pr_run_id"] != ai["pr_run_id"]:
+        raise ValueError(
+            "human and ai issues must belong to the same pr_run"
+        )
+    if human["source"] != "human_review":
+        raise ValueError(
+            f"human_issue_id source must be 'human_review', got "
+            f"{human['source']!r}"
+        )
+    if ai["source"] not in AI_SOURCES:
+        raise ValueError(
+            f"ai_issue_id source must be one of {AI_SOURCES}, got "
+            f"{ai['source']!r}"
+        )
+    if int(ai["is_valid"]) != 1:
+        raise ValueError("ai_issue_id must have is_valid=1")
+
+    now = _now_iso()
+    with conn:
+        cur = conn.execute(
+            """
+            INSERT INTO issue_matches (
+                human_issue_id, ai_issue_id, match_type, confidence,
+                matched_at, matched_by
+            ) VALUES (?,?,?,?,?,?)
+            """,
+            (
+                human_issue_id,
+                ai_issue_id,
+                "manual",
+                1.0,
+                now,
+                "manual",
+            ),
+        )
+    match_id = int(cur.lastrowid or 0)
+    insert_manual_override(
+        conn,
+        override_type="create_manual_match",
+        target_id=str(match_id),
+        payload_json=json.dumps(
+            {
+                "match_id": match_id,
+                "human_issue_id": human_issue_id,
+                "ai_issue_id": ai_issue_id,
+            }
+        ),
+        created_by=created_by,
+    )
+    return match_id
+
+
+def list_defect_links_for_profile(
+    conn: sqlite3.Connection,
+    client_profile: str,
+    *,
+    since_iso: str | None = None,
+    limit: int = 50,
+) -> list[sqlite3.Row]:
+    """Return defect_links for PRs in the given profile, most recent first.
+
+    Joins defect_links to pr_runs on pr_runs.client_profile. Optional
+    since_iso filters on defect_links.reported_at.
+    """
+    clauses = ["pr.client_profile = ?"]
+    params: list[object] = [client_profile]
+    if since_iso is not None:
+        clauses.append("dl.reported_at >= ?")
+        params.append(since_iso)
+    sql = (
+        "SELECT dl.*, pr.pr_number, pr.pr_url, pr.client_profile, "
+        "pr.ticket_id, pr.merged_at "
+        "FROM defect_links dl "
+        "JOIN pr_runs pr ON pr.id = dl.pr_run_id "
+        "WHERE " + " AND ".join(clauses) + " "
+        "ORDER BY dl.reported_at DESC, dl.id DESC LIMIT ?"
+    )
+    params.append(int(limit))
+    return list(conn.execute(sql, tuple(params)).fetchall())
+
+
+def record_defect_sweep_heartbeat(
+    conn: sqlite3.Connection,
+    *,
+    client_profile: str,
+    swept_through_iso: str,
+    created_by: str = "admin",
+) -> int:
+    """Record a 'defect sweep heartbeat' for a client profile.
+
+    Stored as a manual_overrides row with override_type='defect_sweep_heartbeat',
+    target_id=client_profile, payload_json={'swept_through': swept_through_iso}.
+    """
+    return insert_manual_override(
+        conn,
+        override_type="defect_sweep_heartbeat",
+        target_id=client_profile,
+        payload_json=json.dumps({"swept_through": swept_through_iso}),
+        created_by=created_by,
+    )
+
+
+def get_latest_defect_sweep_heartbeat(
+    conn: sqlite3.Connection,
+    client_profile: str,
+) -> str | None:
+    """Return the most recent swept_through timestamp for the profile."""
+    rows = conn.execute(
+        "SELECT payload_json FROM manual_overrides "
+        "WHERE override_type = 'defect_sweep_heartbeat' AND target_id = ? "
+        "ORDER BY id DESC",
+        (client_profile,),
+    ).fetchall()
+    for r in rows:
+        try:
+            payload = json.loads(r["payload_json"])
+        except (ValueError, TypeError):
+            continue
+        value = payload.get("swept_through")
+        if isinstance(value, str) and value:
+            return value
+    return None

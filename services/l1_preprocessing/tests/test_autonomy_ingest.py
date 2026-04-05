@@ -848,3 +848,259 @@ class TestHumanIssueEndpoint:
             assert matches[0]["match_type"] == "line_overlap"
         finally:
             c.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 admin endpoints
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def admin_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "autonomy_admin_token", "admin-token")
+    monkeypatch.setattr(settings, "autonomy_internal_max_body_bytes", 262_144)
+    autonomy_ingest._bucket = TokenBucket(capacity=100, refill_per_sec=100.0)
+    app = FastAPI()
+    app.include_router(router)
+    return app
+
+
+def _seed_pr_for_admin(db_path: Path) -> int:
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+        pr_id = upsert_pr_run(
+            conn,
+            PrRunUpsert(
+                ticket_id="RW-1",
+                pr_number=1,
+                repo_full_name="acme/widgets",
+                head_sha="sha1",
+                client_profile="rockwell",
+                opened_at="2026-04-01T00:00:00+00:00",
+                merged=1,
+                merged_at="2026-04-02T00:00:00+00:00",
+            ),
+        )
+    finally:
+        conn.close()
+    return pr_id
+
+
+def test_manual_defect_401_without_token(admin_app: FastAPI, tmp_path: Path) -> None:
+    _seed_pr_for_admin(Path(settings.autonomy_db_path))
+    c = TestClient(admin_app)
+    r = c.post(
+        "/api/autonomy/manual-defect",
+        json={
+            "pr_run_id": 1,
+            "defect_key": "BUG-1",
+            "reported_at": "2026-04-03T00:00:00+00:00",
+        },
+    )
+    assert r.status_code == 401
+
+
+def test_manual_defect_503_when_token_not_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "autonomy_db_path", str(tmp_path / "a.db"))
+    monkeypatch.setattr(settings, "autonomy_admin_token", "")
+    autonomy_ingest._bucket = TokenBucket(capacity=100, refill_per_sec=100.0)
+    app = FastAPI()
+    app.include_router(router)
+    c = TestClient(app)
+    r = c.post(
+        "/api/autonomy/manual-defect",
+        json={"pr_run_id": 1, "defect_key": "X", "reported_at": "x"},
+        headers={"X-Autonomy-Admin-Token": "anything"},
+    )
+    assert r.status_code == 503
+
+
+def test_manual_defect_happy_path(admin_app: FastAPI) -> None:
+    pr_id = _seed_pr_for_admin(Path(settings.autonomy_db_path))
+    c = TestClient(admin_app)
+    r = c.post(
+        "/api/autonomy/manual-defect",
+        json={
+            "pr_run_id": pr_id,
+            "defect_key": "BUG-1",
+            "source": "jira",
+            "severity": "high",
+            "reported_at": "2026-04-03T00:00:00+00:00",
+            "confirmed": True,
+            "category": "escaped",
+        },
+        headers={"X-Autonomy-Admin-Token": "admin-token"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["pr_run_id"] == pr_id
+    assert body["defect_link_id"] > 0
+
+
+def test_manual_defect_404_unknown_pr_run(admin_app: FastAPI) -> None:
+    c = TestClient(admin_app)
+    r = c.post(
+        "/api/autonomy/manual-defect",
+        json={
+            "pr_run_id": 9999,
+            "defect_key": "BUG-1",
+            "reported_at": "2026-04-03T00:00:00+00:00",
+        },
+        headers={"X-Autonomy-Admin-Token": "admin-token"},
+    )
+    assert r.status_code == 404
+
+
+def test_manual_defect_by_repo_tuple(admin_app: FastAPI) -> None:
+    _seed_pr_for_admin(Path(settings.autonomy_db_path))
+    c = TestClient(admin_app)
+    r = c.post(
+        "/api/autonomy/manual-defect",
+        json={
+            "repo_full_name": "acme/widgets",
+            "pr_number": 1,
+            "head_sha": "sha1",
+            "defect_key": "BUG-2",
+            "reported_at": "2026-04-03T00:00:00+00:00",
+        },
+        headers={"X-Autonomy-Admin-Token": "admin-token"},
+    )
+    assert r.status_code == 200
+
+
+def test_manual_defect_422_missing_lookup(admin_app: FastAPI) -> None:
+    c = TestClient(admin_app)
+    r = c.post(
+        "/api/autonomy/manual-defect",
+        json={
+            "defect_key": "BUG-1",
+            "reported_at": "2026-04-03T00:00:00+00:00",
+        },
+        headers={"X-Autonomy-Admin-Token": "admin-token"},
+    )
+    assert r.status_code == 422
+
+
+def test_manual_match_promote_happy_path(admin_app: FastAPI) -> None:
+    db_path = Path(settings.autonomy_db_path)
+    pr_id = _seed_pr_for_admin(db_path)
+    conn = open_connection(db_path)
+    try:
+        h = insert_review_issue(
+            conn, pr_run_id=pr_id, source="human_review",
+            external_id="h", summary="x", is_valid=1,
+        )
+        a = insert_review_issue(
+            conn, pr_run_id=pr_id, source="ai_review",
+            external_id="a", summary="x", is_valid=1,
+        )
+        from autonomy_store import insert_issue_match
+        match_id = insert_issue_match(
+            conn,
+            human_issue_id=h,
+            ai_issue_id=a,
+            match_type="semantic_weak",
+            confidence=0.7,
+            matched_by="suggested",
+        )
+    finally:
+        conn.close()
+    c = TestClient(admin_app)
+    r = c.post(
+        "/api/autonomy/manual-match",
+        json={"mode": "promote", "match_id": match_id},
+        headers={"X-Autonomy-Admin-Token": "admin-token"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["match_id"] == match_id
+
+
+def test_manual_match_promote_409_when_not_suggested(admin_app: FastAPI) -> None:
+    db_path = Path(settings.autonomy_db_path)
+    pr_id = _seed_pr_for_admin(db_path)
+    conn = open_connection(db_path)
+    try:
+        h = insert_review_issue(
+            conn, pr_run_id=pr_id, source="human_review",
+            external_id="h", summary="x", is_valid=1,
+        )
+        a = insert_review_issue(
+            conn, pr_run_id=pr_id, source="ai_review",
+            external_id="a", summary="x", is_valid=1,
+        )
+        from autonomy_store import insert_issue_match
+        match_id = insert_issue_match(
+            conn,
+            human_issue_id=h,
+            ai_issue_id=a,
+            match_type="exact_line",
+            confidence=0.95,
+            matched_by="system",
+        )
+    finally:
+        conn.close()
+    c = TestClient(admin_app)
+    r = c.post(
+        "/api/autonomy/manual-match",
+        json={"mode": "promote", "match_id": match_id},
+        headers={"X-Autonomy-Admin-Token": "admin-token"},
+    )
+    assert r.status_code == 409
+
+
+def test_manual_match_create_happy_path(admin_app: FastAPI) -> None:
+    db_path = Path(settings.autonomy_db_path)
+    pr_id = _seed_pr_for_admin(db_path)
+    conn = open_connection(db_path)
+    try:
+        h = insert_review_issue(
+            conn, pr_run_id=pr_id, source="human_review",
+            external_id="h", summary="x", is_valid=1,
+        )
+        a = insert_review_issue(
+            conn, pr_run_id=pr_id, source="ai_review",
+            external_id="a", summary="x", is_valid=1,
+        )
+    finally:
+        conn.close()
+    c = TestClient(admin_app)
+    r = c.post(
+        "/api/autonomy/manual-match",
+        json={"mode": "create", "human_issue_id": h, "ai_issue_id": a},
+        headers={"X-Autonomy-Admin-Token": "admin-token"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["match_id"] > 0
+
+
+def test_manual_match_create_422_on_validation_error(admin_app: FastAPI) -> None:
+    c = TestClient(admin_app)
+    r = c.post(
+        "/api/autonomy/manual-match",
+        json={"mode": "create", "human_issue_id": 9999, "ai_issue_id": 9998},
+        headers={"X-Autonomy-Admin-Token": "admin-token"},
+    )
+    assert r.status_code == 422
+
+
+def test_defect_sweep_heartbeat_happy_path(admin_app: FastAPI) -> None:
+    c = TestClient(admin_app)
+    r = c.post(
+        "/api/autonomy/defect-sweep-heartbeat",
+        json={
+            "client_profile": "rockwell",
+            "swept_through": "2026-04-05T00:00:00+00:00",
+        },
+        headers={"X-Autonomy-Admin-Token": "admin-token"},
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "accepted"

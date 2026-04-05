@@ -110,6 +110,33 @@ If **all** issues are rejected (all scores below 80), return:
 
 This tells the team lead the unit passes review without changes.
 
+## Sidecar Output
+
+In addition to the in-process JSON you return to the team lead, use the
+Write tool to create `.harness/logs/judge-verdict.json`:
+
+```json
+{
+  "validated_issues": [
+    {"source_issue_id": "cr-1", "score": 92, "summary": "short reason"}
+  ],
+  "rejected_issues": [
+    {"source_issue_id": "cr-2", "score": 25, "summary": "short reason"}
+  ]
+}
+```
+
+Rules:
+- `source_issue_id` MUST exactly match the `id` from the code reviewer's
+  `.harness/logs/code-review.json` (e.g., `cr-1`). These ids join judge
+  verdicts to the issues they ruled on.
+- Every issue you were given appears in exactly one of the two arrays.
+- Empty case: `{"validated_issues": [], "rejected_issues": []}`.
+- This file is WRITE-ONLY for the metrics pipeline. Overwrite any
+  existing content; do not merge.
+- If the judge did not run at all (e.g., APPROVED path skipped the
+  judge), do NOT create this file.
+
 ## Communication
 
 - **Receives from:** Team Lead (forwarding Code Reviewer findings)

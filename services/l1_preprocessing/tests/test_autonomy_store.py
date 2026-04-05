@@ -8,17 +8,25 @@ import pytest
 
 from autonomy_store import (
     PrRunUpsert,
+    count_merged_pr_runs_with_escape,
+    create_manual_match,
     drain_pending_ai_issues,
     ensure_schema,
+    get_defect_link,
+    get_latest_defect_sweep_heartbeat,
     get_pr_run_by_unique,
+    insert_defect_link,
     insert_issue_match,
     insert_pending_ai_issue,
     insert_review_issue,
     list_client_profiles,
+    list_confirmed_escaped_defects,
     list_issue_matches_for_human,
     list_pr_runs,
     list_review_issues_by_pr_run,
     open_connection,
+    promote_match_to_counted,
+    record_defect_sweep_heartbeat,
     upsert_pr_run,
 )
 
@@ -327,30 +335,27 @@ class TestSchemaV2:
         conn = open_connection(db_path)
         try:
             version = ensure_schema(conn)
-            assert version == 2
-            row = conn.execute(
-                "SELECT MAX(version) AS v FROM schema_version"
-            ).fetchone()
-            assert row["v"] == 2
+            assert version >= 2  # v2+ migrations have run
             versions = [
                 r["version"]
                 for r in conn.execute(
                     "SELECT version FROM schema_version ORDER BY version"
                 ).fetchall()
             ]
-            assert versions == [1, 2]
+            assert 1 in versions
+            assert 2 in versions
         finally:
             conn.close()
 
     def test_v2_migration_idempotent(self, db_path: Path) -> None:
         conn = open_connection(db_path)
         try:
-            assert ensure_schema(conn) == 2
-            assert ensure_schema(conn) == 2
+            first = ensure_schema(conn)
+            assert ensure_schema(conn) == first
             rows = conn.execute(
                 "SELECT version FROM schema_version"
             ).fetchall()
-            assert len(rows) == 2
+            assert len(rows) == first
         finally:
             conn.close()
 
@@ -675,5 +680,560 @@ class TestIssueMatches:
             matches = list_issue_matches_for_human(conn, human_id)
             assert len(matches) == 2
             assert {m["ai_issue_id"] for m in matches} == {ai1, ai2}
+        finally:
+            conn.close()
+
+
+def _merged_pr(
+    conn: object,
+    *,
+    pr_number: int = 10,
+    head_sha: str = "abc123",
+    merged_at: str = "2026-03-01T12:00:00+00:00",
+    client_profile: str = "default",
+) -> int:
+    """Create a merged pr_runs row and return its id."""
+    return upsert_pr_run(
+        conn,  # type: ignore[arg-type]
+        _base_upsert(
+            pr_number=pr_number,
+            head_sha=head_sha,
+            merged=1,
+            merged_at=merged_at,
+            client_profile=client_profile,
+        ),
+    )
+
+
+class TestSchemaV3:
+    def test_v3_migration_adds_category_column(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            version = ensure_schema(conn)
+            assert version == 3
+            cols = {
+                r["name"]
+                for r in conn.execute(
+                    "PRAGMA table_info(defect_links)"
+                ).fetchall()
+            }
+            assert "category" in cols
+        finally:
+            conn.close()
+
+    def test_v3_migration_adds_defect_links_unique_index(
+        self, db_path: Path
+    ) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND name='idx_defect_links_uniq'"
+            ).fetchone()
+            assert row is not None
+        finally:
+            conn.close()
+
+    def test_v3_migration_idempotent(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            assert ensure_schema(conn) == 3
+            assert ensure_schema(conn) == 3
+            rows = conn.execute(
+                "SELECT version FROM schema_version ORDER BY version"
+            ).fetchall()
+            assert [r["version"] for r in rows] == [1, 2, 3]
+        finally:
+            conn.close()
+
+
+class TestInsertDefectLink:
+    def test_insert_defect_link_returns_id_and_row(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr_id = _merged_pr(conn)
+            dl_id = insert_defect_link(
+                conn,
+                pr_run_id=pr_id,
+                defect_key="BUG-1",
+                source="jira",
+                reported_at="2026-03-05T09:00:00+00:00",
+                severity="major",
+                notes="customer report",
+            )
+            assert dl_id > 0
+            row = get_defect_link(conn, pr_id, "BUG-1", "jira")
+            assert row is not None
+            assert row["severity"] == "major"
+            assert row["notes"] == "customer report"
+            assert row["category"] == "escaped"
+            assert row["confirmed"] == 1
+        finally:
+            conn.close()
+
+    def test_insert_defect_link_conflict_upserts(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr_id = _merged_pr(conn)
+            first = insert_defect_link(
+                conn,
+                pr_run_id=pr_id,
+                defect_key="BUG-1",
+                source="jira",
+                reported_at="2026-03-05T09:00:00+00:00",
+                severity="minor",
+                notes="initial",
+            )
+            second = insert_defect_link(
+                conn,
+                pr_run_id=pr_id,
+                defect_key="BUG-1",
+                source="jira",
+                reported_at="2026-03-06T10:00:00+00:00",
+                severity="major",
+                notes="updated",
+                confirmed=1,
+                category="pre_existing",
+            )
+            assert first == second
+            count = conn.execute(
+                "SELECT COUNT(*) AS c FROM defect_links"
+            ).fetchone()["c"]
+            assert count == 1
+            row = get_defect_link(conn, pr_id, "BUG-1", "jira")
+            assert row is not None
+            assert row["severity"] == "major"
+            assert row["notes"] == "updated"
+            assert row["reported_at"] == "2026-03-06T10:00:00+00:00"
+            assert row["category"] == "pre_existing"
+        finally:
+            conn.close()
+
+    def test_insert_defect_link_defaults_category_escaped(
+        self, db_path: Path
+    ) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr_id = _merged_pr(conn)
+            insert_defect_link(
+                conn,
+                pr_run_id=pr_id,
+                defect_key="BUG-9",
+                source="manual",
+                reported_at="2026-03-05T09:00:00+00:00",
+            )
+            row = get_defect_link(conn, pr_id, "BUG-9", "manual")
+            assert row is not None
+            assert row["category"] == "escaped"
+        finally:
+            conn.close()
+
+
+class TestListConfirmedEscapedDefects:
+    def test_in_window_counts(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr_id = _merged_pr(
+                conn, merged_at="2026-03-01T00:00:00+00:00"
+            )
+            insert_defect_link(
+                conn,
+                pr_run_id=pr_id,
+                defect_key="BUG-1",
+                source="jira",
+                reported_at="2026-03-15T00:00:00+00:00",
+            )
+            rows = list_confirmed_escaped_defects(
+                conn, [pr_id], window_days=30
+            )
+            assert len(rows) == 1
+            assert rows[0]["defect_key"] == "BUG-1"
+            assert rows[0]["pr_number"] == 10
+        finally:
+            conn.close()
+
+    def test_outside_window_excluded(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr_id = _merged_pr(
+                conn, merged_at="2026-03-01T00:00:00+00:00"
+            )
+            insert_defect_link(
+                conn,
+                pr_run_id=pr_id,
+                defect_key="BUG-1",
+                source="jira",
+                reported_at="2026-04-15T00:00:00+00:00",
+            )
+            rows = list_confirmed_escaped_defects(
+                conn, [pr_id], window_days=30
+            )
+            assert rows == []
+        finally:
+            conn.close()
+
+    def test_unconfirmed_excluded(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr_id = _merged_pr(
+                conn, merged_at="2026-03-01T00:00:00+00:00"
+            )
+            insert_defect_link(
+                conn,
+                pr_run_id=pr_id,
+                defect_key="BUG-1",
+                source="jira",
+                reported_at="2026-03-10T00:00:00+00:00",
+                confirmed=0,
+            )
+            rows = list_confirmed_escaped_defects(
+                conn, [pr_id], window_days=30
+            )
+            assert rows == []
+        finally:
+            conn.close()
+
+    def test_non_escape_category_excluded(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr_id = _merged_pr(
+                conn, merged_at="2026-03-01T00:00:00+00:00"
+            )
+            insert_defect_link(
+                conn,
+                pr_run_id=pr_id,
+                defect_key="BUG-1",
+                source="jira",
+                reported_at="2026-03-10T00:00:00+00:00",
+                category="pre_existing",
+            )
+            rows = list_confirmed_escaped_defects(
+                conn, [pr_id], window_days=30
+            )
+            assert rows == []
+        finally:
+            conn.close()
+
+    def test_not_merged_excluded(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            # Create an unmerged PR run directly
+            pr_id = upsert_pr_run(conn, _base_upsert())
+            insert_defect_link(
+                conn,
+                pr_run_id=pr_id,
+                defect_key="BUG-1",
+                source="jira",
+                reported_at="2026-04-10T00:00:00+00:00",
+            )
+            rows = list_confirmed_escaped_defects(
+                conn, [pr_id], window_days=30
+            )
+            assert rows == []
+        finally:
+            conn.close()
+
+
+class TestCountMergedPrRunsWithEscape:
+    def test_counts_distinct_pr_runs(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr1 = _merged_pr(
+                conn,
+                pr_number=10,
+                head_sha="sha1",
+                merged_at="2026-03-01T00:00:00+00:00",
+            )
+            pr2 = _merged_pr(
+                conn,
+                pr_number=11,
+                head_sha="sha2",
+                merged_at="2026-03-01T00:00:00+00:00",
+            )
+            insert_defect_link(
+                conn,
+                pr_run_id=pr1,
+                defect_key="BUG-1",
+                source="jira",
+                reported_at="2026-03-05T00:00:00+00:00",
+            )
+            insert_defect_link(
+                conn,
+                pr_run_id=pr1,
+                defect_key="BUG-2",
+                source="jira",
+                reported_at="2026-03-07T00:00:00+00:00",
+            )
+            insert_defect_link(
+                conn,
+                pr_run_id=pr2,
+                defect_key="BUG-3",
+                source="jira",
+                reported_at="2026-03-10T00:00:00+00:00",
+            )
+            count = count_merged_pr_runs_with_escape(
+                conn, [pr1, pr2], window_days=30
+            )
+            assert count == 2
+            # Only pr1
+            count1 = count_merged_pr_runs_with_escape(
+                conn, [pr1], window_days=30
+            )
+            assert count1 == 1
+        finally:
+            conn.close()
+
+
+class TestPromoteMatch:
+    def test_promote_flips_matched_by(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr_id = upsert_pr_run(conn, _base_upsert())
+            human_id = insert_review_issue(
+                conn, pr_run_id=pr_id, source="human_review", summary="h"
+            )
+            ai_id = insert_review_issue(
+                conn, pr_run_id=pr_id, source="ai_review", summary="a"
+            )
+            match_id = insert_issue_match(
+                conn,
+                human_issue_id=human_id,
+                ai_issue_id=ai_id,
+                match_type="fuzzy",
+                confidence=0.6,
+                matched_by="suggested",
+            )
+            assert match_id > 0
+            ok = promote_match_to_counted(conn, match_id=match_id)
+            assert ok is True
+            row = conn.execute(
+                "SELECT matched_by, confidence FROM issue_matches WHERE id = ?",
+                (match_id,),
+            ).fetchone()
+            assert row["matched_by"] == "manual"
+            assert float(row["confidence"]) == 1.0
+            # Audit row written
+            audit = conn.execute(
+                "SELECT * FROM manual_overrides WHERE override_type = 'promote_match'"
+            ).fetchone()
+            assert audit is not None
+            assert audit["target_id"] == str(match_id)
+        finally:
+            conn.close()
+
+    def test_promote_returns_false_for_nonexistent(
+        self, db_path: Path
+    ) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            assert promote_match_to_counted(conn, match_id=9999) is False
+        finally:
+            conn.close()
+
+    def test_promote_returns_false_for_already_system(
+        self, db_path: Path
+    ) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr_id = upsert_pr_run(conn, _base_upsert())
+            human_id = insert_review_issue(
+                conn, pr_run_id=pr_id, source="human_review", summary="h"
+            )
+            ai_id = insert_review_issue(
+                conn, pr_run_id=pr_id, source="ai_review", summary="a"
+            )
+            match_id = insert_issue_match(
+                conn,
+                human_issue_id=human_id,
+                ai_issue_id=ai_id,
+                match_type="exact",
+                confidence=0.95,
+                matched_by="system",
+            )
+            assert promote_match_to_counted(conn, match_id=match_id) is False
+            row = conn.execute(
+                "SELECT matched_by FROM issue_matches WHERE id = ?",
+                (match_id,),
+            ).fetchone()
+            assert row["matched_by"] == "system"
+        finally:
+            conn.close()
+
+
+class TestCreateManualMatch:
+    def test_create_manual_match_inserts_row(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr_id = upsert_pr_run(conn, _base_upsert())
+            human_id = insert_review_issue(
+                conn, pr_run_id=pr_id, source="human_review", summary="h"
+            )
+            ai_id = insert_review_issue(
+                conn,
+                pr_run_id=pr_id,
+                source="ai_review",
+                summary="a",
+                is_valid=1,
+            )
+            match_id = create_manual_match(
+                conn, human_issue_id=human_id, ai_issue_id=ai_id
+            )
+            assert match_id > 0
+            row = conn.execute(
+                "SELECT * FROM issue_matches WHERE id = ?", (match_id,)
+            ).fetchone()
+            assert row["match_type"] == "manual"
+            assert float(row["confidence"]) == 1.0
+            assert row["matched_by"] == "manual"
+        finally:
+            conn.close()
+
+    def test_rejects_cross_pr_run(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr1 = upsert_pr_run(conn, _base_upsert(pr_number=1))
+            pr2 = upsert_pr_run(conn, _base_upsert(pr_number=2))
+            human_id = insert_review_issue(
+                conn, pr_run_id=pr1, source="human_review", summary="h"
+            )
+            ai_id = insert_review_issue(
+                conn, pr_run_id=pr2, source="ai_review", summary="a"
+            )
+            with pytest.raises(ValueError):
+                create_manual_match(
+                    conn, human_issue_id=human_id, ai_issue_id=ai_id
+                )
+        finally:
+            conn.close()
+
+    def test_rejects_invalid_ai_issue(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr_id = upsert_pr_run(conn, _base_upsert())
+            human_id = insert_review_issue(
+                conn, pr_run_id=pr_id, source="human_review", summary="h"
+            )
+            ai_id = insert_review_issue(
+                conn,
+                pr_run_id=pr_id,
+                source="ai_review",
+                summary="a",
+                is_valid=0,
+            )
+            with pytest.raises(ValueError):
+                create_manual_match(
+                    conn, human_issue_id=human_id, ai_issue_id=ai_id
+                )
+        finally:
+            conn.close()
+
+    def test_rejects_non_human_source(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr_id = upsert_pr_run(conn, _base_upsert())
+            ai1 = insert_review_issue(
+                conn, pr_run_id=pr_id, source="ai_review", summary="a1"
+            )
+            ai2 = insert_review_issue(
+                conn, pr_run_id=pr_id, source="ai_review", summary="a2"
+            )
+            with pytest.raises(ValueError):
+                create_manual_match(
+                    conn, human_issue_id=ai1, ai_issue_id=ai2
+                )
+        finally:
+            conn.close()
+
+    def test_also_logs_manual_override(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr_id = upsert_pr_run(conn, _base_upsert())
+            human_id = insert_review_issue(
+                conn, pr_run_id=pr_id, source="human_review", summary="h"
+            )
+            ai_id = insert_review_issue(
+                conn, pr_run_id=pr_id, source="ai_review", summary="a"
+            )
+            match_id = create_manual_match(
+                conn, human_issue_id=human_id, ai_issue_id=ai_id
+            )
+            audit = conn.execute(
+                "SELECT * FROM manual_overrides "
+                "WHERE override_type = 'create_manual_match'"
+            ).fetchone()
+            assert audit is not None
+            assert audit["target_id"] == str(match_id)
+        finally:
+            conn.close()
+
+
+class TestHeartbeat:
+    def test_record_and_get_heartbeat_roundtrip(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            record_defect_sweep_heartbeat(
+                conn,
+                client_profile="acme",
+                swept_through_iso="2026-04-01T00:00:00+00:00",
+            )
+            value = get_latest_defect_sweep_heartbeat(conn, "acme")
+            assert value == "2026-04-01T00:00:00+00:00"
+        finally:
+            conn.close()
+
+    def test_get_returns_latest_when_multiple(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            record_defect_sweep_heartbeat(
+                conn,
+                client_profile="acme",
+                swept_through_iso="2026-03-01T00:00:00+00:00",
+            )
+            record_defect_sweep_heartbeat(
+                conn,
+                client_profile="acme",
+                swept_through_iso="2026-04-01T00:00:00+00:00",
+            )
+            record_defect_sweep_heartbeat(
+                conn,
+                client_profile="beta",
+                swept_through_iso="2026-05-01T00:00:00+00:00",
+            )
+            assert (
+                get_latest_defect_sweep_heartbeat(conn, "acme")
+                == "2026-04-01T00:00:00+00:00"
+            )
+            assert (
+                get_latest_defect_sweep_heartbeat(conn, "beta")
+                == "2026-05-01T00:00:00+00:00"
+            )
+        finally:
+            conn.close()
+
+    def test_get_returns_none_when_absent(self, db_path: Path) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            assert get_latest_defect_sweep_heartbeat(conn, "acme") is None
         finally:
             conn.close()

@@ -44,3 +44,48 @@ To help the Judge validate your findings:
 - Explain WHY it's a problem, not just WHAT the problem is
 - If referencing a convention, cite the specific CLAUDE.md rule
 - Do NOT rationalize issues away — flag them and let the Judge decide
+
+## JSON Sidecar
+
+In addition to code-review.md, use the Write tool to create
+`.harness/logs/code-review.json` matching this shape exactly:
+
+```json
+{
+  "verdict": "APPROVED" | "CHANGES_NEEDED",
+  "issues": [
+    {
+      "id": "cr-1",
+      "severity": "critical" | "warning",
+      "category": "correctness" | "security" | "style" | "coverage" | "dependencies" | "performance",
+      "file_path": "src/foo.ts",
+      "line_start": 14,
+      "line_end": 14,
+      "summary": "One-line description",
+      "details": "Longer explanation matching the Markdown entry",
+      "acceptance_criterion_ref": "AC-2",
+      "blocking": true,
+      "is_code_change_request": true
+    }
+  ]
+}
+```
+
+ID convention: `cr-1`, `cr-2`, ... in the order issues appear in the
+Markdown review. The Judge agent echoes these ids. Do not reuse or
+renumber ids between runs.
+
+INDEPENDENT fields:
+- `blocking`: true if this issue must be fixed before merge. Do NOT
+  infer from severity — set it explicitly per issue. A critical issue
+  may be non-blocking (e.g., pre-existing bug). A warning may be
+  blocking (e.g., new lint violation the team wants gated).
+- `is_code_change_request`: true if fixing this issue requires a source
+  code change. Informational / out-of-scope / observation-only findings
+  are false.
+
+`acceptance_criterion_ref` required when the issue traces to a specific
+AC; otherwise the empty string `""`.
+
+Empty case: `{"verdict": "APPROVED", "issues": []}` — never omit the
+issues key.

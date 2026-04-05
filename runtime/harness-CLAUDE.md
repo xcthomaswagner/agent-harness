@@ -27,7 +27,7 @@ For small tickets with one implementation unit.
 git checkout -b ai/<ticket-id>
 ```
 
-Log: `{"phase": "ticket_read", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Pipeline started, simple mode", "pipeline_mode": "simple"}`
+Log: `{"phase": "ticket_read", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Pipeline started, simple mode", "pipeline_mode": "simple", "runtime_version": "<read from .harness/runtime-version>"}`
 
 ### Step 2: Implementation
 
@@ -83,7 +83,7 @@ For medium/large tickets with 2+ independent implementation units.
 git checkout -b ai/<ticket-id>
 ```
 
-Log: `{"phase": "ticket_read", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Pipeline started, full mode", "pipeline_mode": "full", "estimated_units": N}`
+Log: `{"phase": "ticket_read", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Pipeline started, full mode", "pipeline_mode": "full", "estimated_units": N, "runtime_version": "<read from .harness/runtime-version>"}`
 
 ### Step 2: Planning
 
@@ -298,7 +298,8 @@ Spawn a code reviewer. This agent reviews the diff but CANNOT modify code. **Rea
 Agent(
   prompt="Follow the /code-review skill at .claude/skills/code-review/SKILL.md.
          Review the changes on this branch against the acceptance criteria
-         in .harness/ticket.json. Write your review to .harness/logs/code-review.md.",
+         in .harness/ticket.json. Write your review to .harness/logs/code-review.md.
+         Emit both `.harness/logs/code-review.md` and `.harness/logs/code-review.json` per the skill.",
   description="Review <ticket-id>",
   mode="bypassPermissions"
 )
@@ -329,7 +330,9 @@ Agent(
          | Issue | Score | Verdict |
          |-------|-------|---------|
          ### Summary
-         X of Y issues validated. Rejected issues are false positives or out of scope.",
+         X of Y issues validated. Rejected issues are false positives or out of scope.
+
+         Also write `.harness/logs/judge-verdict.json` per the 'Sidecar Output' section of the judge agent definition. `source_issue_id` values must echo the `cr-N` ids from `code-review.json`.",
   description="Judge <ticket-id>",
   mode="bypassPermissions"
   # If any findings are security-related, use model="opus" for stronger reasoning
@@ -359,7 +362,8 @@ Spawn a QA agent:
 Agent(
   prompt="Follow the /qa-validation skill at .claude/skills/qa-validation/SKILL.md.
          Validate the implementation against the acceptance criteria in .harness/ticket.json.
-         Write your QA matrix to .harness/logs/qa-matrix.md.",
+         Write your QA matrix to .harness/logs/qa-matrix.md.
+         Emit both `.harness/logs/qa-matrix.md` and `.harness/logs/qa-matrix.json` per the skill.",
   description="QA <ticket-id>",
   mode="bypassPermissions"
 )
@@ -466,8 +470,11 @@ The harness uses a two-tier observability model inspired by OpenTelemetry:
 | File | Written by | Attached to phase |
 |------|-----------|-------------------|
 | `code-review.md` | Code Reviewer | `code_review` |
+| `code-review.json` | Code Reviewer | `code_review` |
 | `judge-verdict.md` | Judge | `judge` |
+| `judge-verdict.json` | Judge | `judge` |
 | `qa-matrix.md` | QA | `qa_validation` |
+| `qa-matrix.json` | QA | `qa_validation` |
 | `merge-report.md` | Merge Coordinator | `merge` |
 | `plan-review.md` | Plan Reviewer | `plan_review` |
 | `blocked-units.md` | Team Lead | `implementation` |

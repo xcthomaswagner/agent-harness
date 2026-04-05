@@ -48,3 +48,39 @@ Design Compliance: X/Y checks passed (or "Skipped — no Figma design spec provi
 - Screenshots are required for all e2e test evidence
 - Overall is `PASS` only when ALL acceptance criteria pass
 - Overall is `FAIL` if any acceptance criterion fails (edge cases and design compliance don't affect overall)
+
+## JSON Sidecar
+
+In addition to qa-matrix.md, use the Write tool to create
+`.harness/logs/qa-matrix.json` matching this shape exactly:
+
+```json
+{
+  "overall": "PASS" | "FAIL",
+  "issues": [
+    {
+      "id": "qa-1",
+      "severity": "critical" | "warning",
+      "category": "acceptance_criterion" | "edge_case" | "e2e" | "design_compliance",
+      "file_path": "",
+      "line_start": 0,
+      "line_end": 0,
+      "summary": "One-line description of the failing check",
+      "details": "Longer explanation — test name, error output, or observed vs expected",
+      "acceptance_criterion_ref": "AC-2"
+    }
+  ]
+}
+```
+
+ID convention: `qa-1`, `qa-2`, ... in the order failing checks appear
+in the Markdown matrix. Do not reuse or renumber ids between runs.
+
+Only include failing / NOT_TESTED checks in `issues`. Passing checks
+do not appear.
+
+`acceptance_criterion_ref` required when the issue traces to a specific
+AC; otherwise the empty string `""`.
+
+Empty case: `{"overall": "PASS", "issues": []}` — never omit the
+issues key.

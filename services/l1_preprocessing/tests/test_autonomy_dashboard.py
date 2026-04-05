@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from autonomy_dashboard import router
+from autonomy_dashboard import _render_sparkline_svg, router
 from autonomy_store import (
     PrRunUpsert,
     ensure_schema,
+    insert_defect_link,
     insert_issue_match,
     insert_review_issue,
     open_connection,
@@ -392,3 +394,312 @@ def test_autonomy_escapes_profile_name(
     assert "<script>alert(1)</script>" not in r.text
     # Escaped form must appear
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 Step 5/6/7 dashboard tests
+# ---------------------------------------------------------------------------
+
+def _days_ago(n: int) -> str:
+    return (datetime.now(UTC) - timedelta(days=n)).isoformat()
+
+
+def _seed_merged(
+    db_path: Path,
+    *,
+    profile: str = "rockwell",
+    ticket_id: str = "RW-1",
+    pr_number: int = 1,
+    head_sha: str = "sha1",
+    days_ago: int = 5,
+    first_pass_accepted: int = 1,
+) -> int:
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+        pr_id = upsert_pr_run(
+            conn,
+            PrRunUpsert(
+                ticket_id=ticket_id,
+                pr_number=pr_number,
+                repo_full_name="acme/widgets",
+                head_sha=head_sha,
+                client_profile=profile,
+                opened_at=_days_ago(days_ago + 1),
+                first_pass_accepted=first_pass_accepted,
+                merged=1,
+                merged_at=_days_ago(days_ago),
+            ),
+        )
+    finally:
+        conn.close()
+    return pr_id
+
+
+def test_defect_escape_badge_green_when_low(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    # 100 merged PRs, 2 escaped → 0.02
+    for i in range(100):
+        _seed_merged(
+            db_path,
+            ticket_id=f"RW-{i}",
+            pr_number=i + 1,
+            head_sha=f"s{i}",
+            days_ago=5,
+        )
+    conn = open_connection(db_path)
+    try:
+        for i in range(2):
+            insert_defect_link(
+                conn,
+                pr_run_id=i + 1,
+                defect_key=f"BUG-{i}",
+                source="jira",
+                reported_at=_days_ago(4),
+                confirmed=1,
+                category="escaped",
+            )
+    finally:
+        conn.close()
+    c = TestClient(_mk_app())
+    r = c.get("/autonomy?client_profile=rockwell")
+    assert r.status_code == 200
+    assert "badge-success" in r.text
+    assert "Defect escape" in r.text
+
+
+def test_defect_escape_badge_red_when_high(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    # 10 merged PRs, 1 escaped → 0.10 > 0.05
+    for i in range(10):
+        _seed_merged(
+            db_path,
+            ticket_id=f"RW-{i}",
+            pr_number=i + 1,
+            head_sha=f"s{i}",
+        )
+    conn = open_connection(db_path)
+    try:
+        insert_defect_link(
+            conn,
+            pr_run_id=1,
+            defect_key="BUG-1",
+            source="jira",
+            reported_at=_days_ago(4),
+            confirmed=1,
+            category="escaped",
+        )
+    finally:
+        conn.close()
+    c = TestClient(_mk_app())
+    r = c.get("/autonomy?client_profile=rockwell")
+    assert r.status_code == 200
+    assert "badge-error" in r.text
+
+
+def test_defect_escape_shows_unknown_when_no_merged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    _seed_pr_run(db_path, profile="rockwell", merged=0)
+    c = TestClient(_mk_app())
+    r = c.get("/autonomy?client_profile=rockwell")
+    assert r.status_code == 200
+    assert "unknown" in r.text
+
+
+def test_escaped_defects_section_renders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    pr_id = _seed_merged(db_path, ticket_id="RW-42", pr_number=7)
+    conn = open_connection(db_path)
+    try:
+        insert_defect_link(
+            conn,
+            pr_run_id=pr_id,
+            defect_key="ESCAPE-9",
+            source="jira",
+            reported_at=_days_ago(2),
+            confirmed=1,
+            category="escaped",
+        )
+    finally:
+        conn.close()
+    c = TestClient(_mk_app())
+    r = c.get("/autonomy?client_profile=rockwell")
+    assert r.status_code == 200
+    assert "Escaped Defects" in r.text
+    assert "ESCAPE-9" in r.text
+
+
+def test_escaped_defects_section_empty_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    _seed_merged(db_path)
+    c = TestClient(_mk_app())
+    r = c.get("/autonomy?client_profile=rockwell")
+    assert r.status_code == 200
+    assert "Escaped Defects" in r.text
+    assert "No escaped defects in window." in r.text
+
+
+def test_suggested_matches_include_promote_curl_snippet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    pr_run_id = _seed_pr_run(db_path, profile="rockwell", ticket_id="RW-1")
+    conn = open_connection(db_path)
+    try:
+        human_id = insert_review_issue(
+            conn, pr_run_id=pr_run_id, source="human_review",
+            external_id="h1", summary="x", is_valid=1,
+        )
+        ai_id = insert_review_issue(
+            conn, pr_run_id=pr_run_id, source="ai_review",
+            external_id="a1", summary="y", is_valid=1,
+        )
+        insert_issue_match(
+            conn,
+            human_issue_id=human_id,
+            ai_issue_id=ai_id,
+            match_type="semantic_weak",
+            confidence=0.7,
+            matched_by="suggested",
+        )
+    finally:
+        conn.close()
+    c = TestClient(_mk_app())
+    r = c.get("/autonomy?client_profile=rockwell")
+    assert r.status_code == 200
+    assert "manual-match" in r.text
+    assert "promote" in r.text
+    assert "X-Autonomy-Admin-Token" in r.text
+
+
+# --- Drilldown ---
+
+def test_drilldown_200_for_existing_pr_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    pr_id = _seed_pr_run(db_path, profile="rockwell", ticket_id="RW-1")
+    c = TestClient(_mk_app())
+    r = c.get(f"/autonomy/pr/{pr_id}")
+    assert r.status_code == 200
+    assert "PR Drilldown" in r.text
+    assert "RW-1" in r.text
+
+
+def test_drilldown_404_for_missing_pr_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    c = TestClient(_mk_app())
+    r = c.get("/autonomy/pr/9999")
+    assert r.status_code == 404
+
+
+def test_drilldown_renders_human_issues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    pr_id = _seed_pr_run(db_path, profile="rockwell", ticket_id="RW-1")
+    conn = open_connection(db_path)
+    try:
+        insert_review_issue(
+            conn, pr_run_id=pr_id, source="human_review",
+            external_id="h1", file_path="app.py",
+            line_start=5, line_end=5,
+            summary="Missing null guard here xyz", is_valid=1,
+        )
+    finally:
+        conn.close()
+    c = TestClient(_mk_app())
+    r = c.get(f"/autonomy/pr/{pr_id}")
+    assert r.status_code == 200
+    assert "Human Issues" in r.text
+    assert "Missing null guard here xyz" in r.text
+
+
+def test_drilldown_renders_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    pr_id = _seed_pr_run(db_path, profile="rockwell", ticket_id="RW-1")
+    conn = open_connection(db_path)
+    try:
+        human_id = insert_review_issue(
+            conn, pr_run_id=pr_id, source="human_review",
+            external_id="h1", summary="human-issue-zzz", is_valid=1,
+        )
+        ai_id = insert_review_issue(
+            conn, pr_run_id=pr_id, source="ai_review",
+            external_id="a1", summary="ai-issue-qqq", is_valid=1,
+        )
+        insert_issue_match(
+            conn,
+            human_issue_id=human_id,
+            ai_issue_id=ai_id,
+            match_type="exact_line",
+            confidence=0.95,
+            matched_by="system",
+        )
+    finally:
+        conn.close()
+    c = TestClient(_mk_app())
+    r = c.get(f"/autonomy/pr/{pr_id}")
+    assert r.status_code == 200
+    assert "Matches" in r.text
+    assert "human-issue-zzz" in r.text
+
+
+def test_drilldown_renders_defects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    pr_id = _seed_pr_run(db_path, profile="rockwell", ticket_id="RW-1")
+    conn = open_connection(db_path)
+    try:
+        insert_defect_link(
+            conn,
+            pr_run_id=pr_id,
+            defect_key="DRILLBUG-1",
+            source="jira",
+            reported_at=_days_ago(1),
+            confirmed=1,
+            category="escaped",
+        )
+    finally:
+        conn.close()
+    c = TestClient(_mk_app())
+    r = c.get(f"/autonomy/pr/{pr_id}")
+    assert r.status_code == 200
+    assert "Defect Links" in r.text
+    assert "DRILLBUG-1" in r.text
+
+
+def test_sparkline_renders_with_points() -> None:
+    svg = _render_sparkline_svg(
+        [("2026-04-01", 0.5), ("2026-04-02", None), ("2026-04-03", 0.9)],
+        label="test",
+    )
+    assert "<svg" in svg
+    # Two visible points (one None → skipped)
+    assert svg.count("<circle") == 2

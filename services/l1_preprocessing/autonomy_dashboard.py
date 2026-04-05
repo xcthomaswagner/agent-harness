@@ -21,7 +21,9 @@ from autonomy_metrics import compute_profile_metrics
 from autonomy_store import (
     ensure_schema,
     list_client_profiles,
+    list_defect_links_for_profile,
     list_pr_runs,
+    list_review_issues_by_pr_run,
     open_connection,
     resolve_db_path,
 )
@@ -126,6 +128,22 @@ def _catch_rate_badge_class(value: float | None) -> str:
     return "badge-error"
 
 
+def _defect_escape_badge_class(value: float | None) -> str:
+    if value is None:
+        return "badge-secondary"
+    if value <= 0.03:
+        return "badge-success"
+    if value <= 0.05:
+        return "badge-warning"
+    return "badge-error"
+
+
+def _defect_escape_display(value: float | None) -> str:
+    if value is None:
+        return "— (unknown)"
+    return f"{value * 100:.1f}%"
+
+
 def _sidecar_badge_class(value: float) -> str:
     if value >= 0.8:
         return "badge-success"
@@ -162,6 +180,11 @@ def _render_profile_card(metrics: dict[str, Any]) -> str:
     sidecar_cls = _sidecar_badge_class(sidecar_cov)
     sidecar_display = _fmt_pct(sidecar_cov)
 
+    defect_escape = metrics.get("defect_escape_rate")
+    defect_escape_cls = _defect_escape_badge_class(defect_escape)
+    defect_escape_text = _defect_escape_display(defect_escape)
+    sparkline_html = metrics.get("_sparkline_html", "")
+
     humans_line = (
         f"{matched_count}/{human_count} matched"
         + (f" ({unmatched_count} unmatched)" if unmatched_count > 0 else "")
@@ -189,7 +212,9 @@ def _render_profile_card(metrics: dict[str, Any]) -> str:
         f'<span class="metric-value">{merged}</span></div>'
         '<div class="metric-row">'
         '<span class="metric-label">Defect escape</span>'
-        '<span class="metric-value">— (phase 3)</span></div>'
+        f'<span class="metric-value">'
+        f'<span class="badge {defect_escape_cls}">{_e(defect_escape_text)}</span>'
+        '</span></div>'
         '<div class="metric-row">'
         '<span class="metric-label">Self-review catch</span>'
         f'<span class="metric-value">'
@@ -216,6 +241,7 @@ def _render_profile_card(metrics: dict[str, Any]) -> str:
         f'<span class="badge {dq_badge_cls}">{_e(dq_status)}</span>'
         f'{notes_html}'
         '</span></div>'
+        f'{sparkline_html}'
         '</div>'
     )
 
@@ -340,25 +366,207 @@ def _render_suggested_section(rows: list[sqlite3.Row]) -> str:
         ac_ref = _e(r["ac_ref"] or "—")
         confidence = float(r["confidence"] or 0.0)
         conf_cell = f"{confidence:.2f}"
+        match_id = int(r["match_id"])
+        curl_snippet = (
+            "curl -X POST localhost:8000/api/autonomy/manual-match \\\n"
+            "  -H 'X-Autonomy-Admin-Token: $TOKEN' \\\n"
+            "  -H 'Content-Type: application/json' \\\n"
+            f"  -d '{{\"mode\":\"promote\",\"match_id\":{match_id}}}'"
+        )
+        promote_cell = (
+            '<pre style="font-size:10.5px;background:#F8FAFC;padding:4px 8px;'
+            'border-radius:4px;margin:0;white-space:pre-wrap;'
+            f'word-break:break-all">{_e(curl_snippet)}</pre>'
+        )
         body_parts.append(
             f"<tr><td>{human_summary}</td><td>{ai_summary}</td>"
-            f"<td>{ac_ref}</td><td>{_e(conf_cell)}</td></tr>"
+            f"<td>{ac_ref}</td><td>{_e(conf_cell)}</td>"
+            f"<td>{promote_cell}</td></tr>"
         )
     body = "".join(body_parts)
     return (
         '<h2 style="margin-top:24px">Suggested Matches (Tier 4)</h2>'
-        '<p class="meta">promote via POST /api/autonomy/manual-match '
-        '(Phase 3)</p>'
+        '<p class="meta">promote via POST /api/autonomy/manual-match</p>'
         '<table><thead><tr>'
         '<th>Human issue</th><th>AI issue</th><th>AC ref</th>'
-        '<th>Confidence</th>'
+        '<th>Confidence</th><th>Promote</th>'
         '</tr></thead>'
         f'<tbody>{body}</tbody></table>'
     )
 
 
+def _render_escaped_defects_section(
+    conn: sqlite3.Connection,
+    profiles: list[str],
+    window_days: int,
+    limit: int = 25,
+) -> str:
+    """Render escaped defects table for the given profiles.
+
+    Queries list_defect_links_for_profile per profile, filters to
+    confirmed=1 AND category='escaped'. Empty profiles → short message.
+    """
+    since_iso = (
+        datetime.now(UTC) - timedelta(days=window_days)
+    ).isoformat()
+    all_rows: list[sqlite3.Row] = []
+    for p in profiles:
+        rows = list_defect_links_for_profile(
+            conn, p, since_iso=since_iso, limit=limit
+        )
+        all_rows.extend(rows)
+
+    escaped = [
+        r for r in all_rows
+        if int(r["confirmed"]) == 1 and r["category"] == "escaped"
+    ]
+    escaped.sort(key=lambda r: r["reported_at"] or "", reverse=True)
+    escaped = escaped[:limit]
+
+    header = '<h2 style="margin-top:24px">Escaped Defects</h2>'
+    if not escaped:
+        return header + '<p class="meta">No escaped defects in window.</p>'
+
+    body_parts: list[str] = []
+    for r in escaped:
+        ticket = _e(r["ticket_id"] or "—")
+        pr_url = r["pr_url"] or ""
+        pr_num = r["pr_number"]
+        pr_cell = (
+            f'<a href="{_e(pr_url)}">#{pr_num}</a>' if pr_url else f"#{pr_num}"
+        )
+        profile = _e(r["client_profile"] or "—")
+        defect_key = _e(r["defect_key"] or "—")
+        src = _e(r["source"] or "—")
+        sev = _e(r["severity"] or "—")
+        category = _e(r["category"] or "—")
+        reported = _e((r["reported_at"] or "")[:19])
+        body_parts.append(
+            f"<tr><td>{ticket}</td><td>{pr_cell}</td><td>{profile}</td>"
+            f"<td>{defect_key}</td><td>{src}</td><td>{sev}</td>"
+            f"<td>{category}</td><td>{reported}</td></tr>"
+        )
+    body = "".join(body_parts)
+    return (
+        header
+        + '<table><thead><tr>'
+        '<th>Ticket</th><th>PR</th><th>Profile</th><th>Defect Key</th>'
+        '<th>Source</th><th>Severity</th><th>Category</th><th>Reported At</th>'
+        '</tr></thead>'
+        f'<tbody>{body}</tbody></table>'
+    )
+
+
+def _render_sparkline_svg(
+    points: list[tuple[str, float | None]], *, label: str
+) -> str:
+    """Render a 120x32 sparkline SVG with circles. Missing values = gaps."""
+    width = 120
+    height = 32
+    pad = 2
+    if not points:
+        return (
+            f'<svg width="{width}" height="{height}" '
+            f'aria-label="{_e(label)}"></svg>'
+        )
+    n = len(points)
+    # x-spacing
+    inner_w = width - 2 * pad
+    step = inner_w / max(1, n - 1) if n > 1 else 0
+    inner_h = height - 2 * pad
+    circles: list[str] = []
+    for i, (_, v) in enumerate(points):
+        if v is None:
+            continue
+        # Clamp v into [0, 1] (metrics are rates). Escape rate can be >1 in
+        # theory but for rendering we clip at 1.
+        vc = max(0.0, min(1.0, v))
+        x = pad + i * step
+        y = pad + inner_h - (vc * inner_h)
+        circles.append(
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="1.8" fill="#4D45E5"/>'
+        )
+    body = "".join(circles)
+    return (
+        f'<svg width="{width}" height="{height}" '
+        f'aria-label="{_e(label)}" '
+        f'style="display:inline-block;vertical-align:middle">'
+        f'<rect x="0" y="0" width="{width}" height="{height}" '
+        f'fill="#F8FAFC" stroke="#E2E8F0" stroke-width="0.5"/>'
+        f'{body}'
+        f'</svg>'
+    )
+
+
+def _render_ticket_type_breakdown(rows: list[dict[str, Any]]) -> str:
+    """Small table: Ticket Type | Sample | FPA | Catch Rate | Defect Escape."""
+    if not rows:
+        return ""
+    body_parts: list[str] = []
+    for r in rows:
+        body_parts.append(
+            f"<tr><td>{_e(r['ticket_type'])}</td>"
+            f"<td>{r['sample_size']}</td>"
+            f"<td>{_e(_fmt_pct(r['first_pass_acceptance_rate']))}</td>"
+            f"<td>{_e(_fmt_pct(r['self_review_catch_rate']))}</td>"
+            f"<td>{_e(_defect_escape_display(r['defect_escape_rate']))}</td>"
+            f"</tr>"
+        )
+    body = "".join(body_parts)
+    return (
+        '<h2 style="margin-top:24px">By Ticket Type</h2>'
+        '<table><thead><tr>'
+        '<th>Ticket Type</th><th>Sample</th><th>FPA</th>'
+        '<th>Catch Rate</th><th>Defect Escape</th>'
+        '</tr></thead>'
+        f'<tbody>{body}</tbody></table>'
+    )
+
+
+def _build_sparklines_html(
+    conn: sqlite3.Connection, profile: str, window_days: int
+) -> str:
+    """Build stacked sparkline HTML for a profile card."""
+    from autonomy_metrics import compute_daily_trend
+
+    fpa_points = [
+        (d, v) for (d, v, _n) in compute_daily_trend(
+            conn, profile, window_days, "fpa"
+        )
+    ]
+    esc_points = [
+        (d, v) for (d, v, _n) in compute_daily_trend(
+            conn, profile, window_days, "defect_escape"
+        )
+    ]
+    catch_points = [
+        (d, v) for (d, v, _n) in compute_daily_trend(
+            conn, profile, window_days, "catch_rate"
+        )
+    ]
+    return (
+        '<div style="margin-top:8px;padding-top:8px;'
+        'border-top:1px solid #E2E8F0">'
+        '<div class="metric-row">'
+        '<span class="metric-label">FPA trend</span>'
+        f'<span>{_render_sparkline_svg(fpa_points, label="FPA trend")}</span>'
+        '</div>'
+        '<div class="metric-row">'
+        '<span class="metric-label">Defect escape trend</span>'
+        f'<span>{_render_sparkline_svg(esc_points, label="Defect escape trend")}</span>'
+        '</div>'
+        '<div class="metric-row">'
+        '<span class="metric-label">Catch rate trend</span>'
+        f'<span>{_render_sparkline_svg(catch_points, label="Catch rate trend")}</span>'
+        '</div>'
+        '</div>'
+    )
+
+
 def _render_pr_row(row: sqlite3.Row) -> str:
-    ticket = _e(row["ticket_id"])
+    ticket_id = _e(row["ticket_id"])
+    pr_run_id = int(row["id"])
+    ticket = f'<a href="/autonomy/pr/{pr_run_id}">{ticket_id}</a>'
     pr_url = row["pr_url"] or ""
     pr_number = row["pr_number"]
     pr_cell = (
@@ -433,6 +641,11 @@ def autonomy_dashboard(
         profile_metrics = [
             _compute_profile_metrics(conn, p, window_days) for p in profiles_to_show
         ]
+        # Attach sparkline HTML per card
+        for m in profile_metrics:
+            m["_sparkline_html"] = _build_sparklines_html(
+                conn, m["client_profile"], window_days
+            )
 
         # Build recent PR table scope
         cutoff = (datetime.now(UTC) - timedelta(days=window_days)).isoformat()
@@ -454,6 +667,20 @@ def autonomy_dashboard(
 
         unmatched_rows = _query_unmatched_human_issues(conn, scoped_pr_run_ids)
         suggested_rows = _query_suggested_matches(conn, scoped_pr_run_ids)
+
+        escaped_html = _render_escaped_defects_section(
+            conn, profiles_to_show, window_days
+        )
+
+        # Ticket-type breakdown: only for single profile view
+        from autonomy_metrics import compute_ticket_type_breakdown
+        if client_profile is not None:
+            breakdown_rows = compute_ticket_type_breakdown(
+                conn, client_profile, window_days
+            )
+            breakdown_html = _render_ticket_type_breakdown(breakdown_rows)
+        else:
+            breakdown_html = ""
     finally:
         conn.close()
 
@@ -498,8 +725,216 @@ def autonomy_dashboard(
 <div class="card-grid">{cards_html}</div>
 <h2 style="margin-top:24px">Recent PR Outcomes</h2>
 {table_html}
+{breakdown_html}
+{escaped_html}
 {unmatched_html}
 {suggested_html}
 </div></body></html>"""
 
+    return HTMLResponse(content=html_doc)
+
+
+# ---------------------------------------------------------------------------
+# Per-PR drilldown route
+# ---------------------------------------------------------------------------
+
+
+def _render_issues_table(rows: list[sqlite3.Row], *, title: str) -> str:
+    if not rows:
+        return f'<h3 style="margin-top:16px">{_e(title)}</h3><p class="meta">None.</p>'
+    body_parts: list[str] = []
+    for r in rows:
+        file_path = _e(r["file_path"] or "—")
+        line_start = int(r["line_start"] or 0)
+        line_end = int(r["line_end"] or 0)
+        if line_start == 0 and line_end == 0:
+            lines = "—"
+        elif line_start == line_end or line_end == 0:
+            lines = str(line_start)
+        else:
+            lines = f"{line_start}-{line_end}"
+        summary = _e(_truncate(r["summary"] or ""))
+        severity = _e(r["severity"] or "—")
+        category = _e(r["category"] or "—")
+        is_valid = "yes" if int(r["is_valid"]) == 1 else "no"
+        body_parts.append(
+            f"<tr><td>{int(r['id'])}</td><td>{file_path}</td>"
+            f"<td>{_e(lines)}</td><td>{summary}</td>"
+            f"<td>{category}</td><td>{severity}</td><td>{is_valid}</td></tr>"
+        )
+    body = "".join(body_parts)
+    return (
+        f'<h3 style="margin-top:16px">{_e(title)}</h3>'
+        '<table><thead><tr>'
+        '<th>ID</th><th>File</th><th>Lines</th><th>Summary</th>'
+        '<th>Category</th><th>Severity</th><th>Valid</th>'
+        '</tr></thead>'
+        f'<tbody>{body}</tbody></table>'
+    )
+
+
+def _render_matches_table(rows: list[sqlite3.Row]) -> str:
+    if not rows:
+        return (
+            '<h3 style="margin-top:16px">Matches</h3>'
+            '<p class="meta">None.</p>'
+        )
+    body_parts: list[str] = []
+    for r in rows:
+        body_parts.append(
+            f"<tr><td>{int(r['id'])}</td>"
+            f"<td>{int(r['human_issue_id'])}</td>"
+            f"<td>{int(r['ai_issue_id'])}</td>"
+            f"<td>{_e(r['match_type'] or '—')}</td>"
+            f"<td>{float(r['confidence'] or 0.0):.2f}</td>"
+            f"<td>{_e(r['matched_by'] or '—')}</td>"
+            f"<td>{_e(_truncate(r['human_summary'] or '', 60))}</td>"
+            f"<td>{_e(_truncate(r['ai_summary'] or '', 60))}</td></tr>"
+        )
+    body = "".join(body_parts)
+    return (
+        '<h3 style="margin-top:16px">Matches</h3>'
+        '<table><thead><tr>'
+        '<th>ID</th><th>Human</th><th>AI</th><th>Type</th>'
+        '<th>Confidence</th><th>By</th><th>Human summary</th>'
+        '<th>AI summary</th>'
+        '</tr></thead>'
+        f'<tbody>{body}</tbody></table>'
+    )
+
+
+def _render_defects_table(rows: list[sqlite3.Row]) -> str:
+    if not rows:
+        return (
+            '<h3 style="margin-top:16px">Defect Links</h3>'
+            '<p class="meta">None.</p>'
+        )
+    body_parts: list[str] = []
+    for r in rows:
+        body_parts.append(
+            f"<tr><td>{_e(r['defect_key'] or '—')}</td>"
+            f"<td>{_e(r['source'] or '—')}</td>"
+            f"<td>{_e(r['severity'] or '—')}</td>"
+            f"<td>{_e(r['category'] or '—')}</td>"
+            f"<td>{'yes' if int(r['confirmed']) == 1 else 'no'}</td>"
+            f"<td>{_e((r['reported_at'] or '')[:19])}</td></tr>"
+        )
+    body = "".join(body_parts)
+    return (
+        '<h3 style="margin-top:16px">Defect Links</h3>'
+        '<table><thead><tr>'
+        '<th>Defect Key</th><th>Source</th><th>Severity</th>'
+        '<th>Category</th><th>Confirmed</th><th>Reported At</th>'
+        '</tr></thead>'
+        f'<tbody>{body}</tbody></table>'
+    )
+
+
+@router.get("/autonomy/pr/{pr_run_id}", response_class=HTMLResponse)
+def autonomy_pr_drilldown(pr_run_id: int) -> HTMLResponse:
+    """Per-PR drilldown view."""
+    db_path = resolve_db_path(settings.autonomy_db_path)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+        pr_row = conn.execute(
+            "SELECT * FROM pr_runs WHERE id = ?", (pr_run_id,)
+        ).fetchone()
+        if pr_row is None:
+            return HTMLResponse(
+                content=(
+                    f"<!DOCTYPE html><html><body>"
+                    f"<h1>pr_run {pr_run_id} not found</h1>"
+                    f'<a href="/autonomy">Back to Autonomy</a>'
+                    f"</body></html>"
+                ),
+                status_code=404,
+            )
+
+        human_issues = list_review_issues_by_pr_run(
+            conn, pr_run_id, source="human_review"
+        )
+        ai_issues = list_review_issues_by_pr_run(
+            conn, pr_run_id, source="ai_review"
+        )
+        judge_issues = list_review_issues_by_pr_run(
+            conn, pr_run_id, source="judge"
+        )
+        qa_issues = list_review_issues_by_pr_run(
+            conn, pr_run_id, source="qa"
+        )
+
+        matches_rows = conn.execute(
+            """
+            SELECT m.id, m.human_issue_id, m.ai_issue_id, m.match_type,
+                   m.confidence, m.matched_by,
+                   h.summary AS human_summary,
+                   a.summary AS ai_summary
+            FROM issue_matches m
+            JOIN review_issues h ON h.id = m.human_issue_id
+            JOIN review_issues a ON a.id = m.ai_issue_id
+            WHERE h.pr_run_id = ?
+            ORDER BY m.id
+            """,
+            (pr_run_id,),
+        ).fetchall()
+
+        defect_rows = conn.execute(
+            "SELECT * FROM defect_links WHERE pr_run_id = ? "
+            "ORDER BY reported_at DESC, id DESC",
+            (pr_run_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    ticket = _e(pr_row["ticket_id"] or "—")
+    pr_url = pr_row["pr_url"] or ""
+    pr_number = pr_row["pr_number"]
+    pr_link = (
+        f'<a href="{_e(pr_url)}">#{pr_number}</a>'
+        if pr_url else f"#{pr_number}"
+    )
+    profile = _e(pr_row["client_profile"] or "—")
+    opened = _e((pr_row["opened_at"] or "")[:19])
+    merged_at = _e((pr_row["merged_at"] or "")[:19]) or "—"
+    flags: list[str] = []
+    if int(pr_row["first_pass_accepted"]) == 1:
+        flags.append('<span class="badge badge-success">first-pass</span>')
+    if int(pr_row["merged"]) == 1:
+        flags.append('<span class="badge badge-success">merged</span>')
+    if int(pr_row["escalated"]) == 1:
+        flags.append('<span class="badge badge-error">escalated</span>')
+    if int(pr_row["backfilled"]) == 1:
+        flags.append('<span class="badge badge-secondary">backfilled</span>')
+    flags_html = " ".join(flags) if flags else "—"
+
+    header_html = (
+        '<div class="card">'
+        f'<h2>{ticket} — PR {pr_link}</h2>'
+        f'<div class="metric-row"><span class="metric-label">Profile</span>'
+        f'<span class="metric-value">{profile}</span></div>'
+        f'<div class="metric-row"><span class="metric-label">Opened</span>'
+        f'<span class="metric-value">{opened}</span></div>'
+        f'<div class="metric-row"><span class="metric-label">Merged at</span>'
+        f'<span class="metric-value">{merged_at}</span></div>'
+        f'<div class="metric-row"><span class="metric-label">Flags</span>'
+        f'<span class="metric-value">{flags_html}</span></div>'
+        '</div>'
+    )
+
+    html_doc = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>PR Drilldown {pr_run_id}</title>
+<style>{_LANGFUSE_STYLES}</style></head><body><div class="page">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+  <h1>PR Drilldown</h1>
+  <div class="meta"><a href="/autonomy">← Back to Autonomy</a></div>
+</div>
+{header_html}
+{_render_issues_table(human_issues, title="Human Issues")}
+{_render_issues_table(ai_issues, title="AI Review Issues")}
+{_render_issues_table(judge_issues, title="Judge Issues")}
+{_render_issues_table(qa_issues, title="QA Issues")}
+{_render_matches_table(matches_rows)}
+{_render_defects_table(defect_rows)}
+</div></body></html>"""
     return HTMLResponse(content=html_doc)

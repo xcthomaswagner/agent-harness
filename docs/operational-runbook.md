@@ -228,3 +228,20 @@ cd services/l1_preprocessing
 source .venv/bin/activate
 pip install --upgrade -e ".[dev]"
 ```
+
+## Runtime Versioning & Sidecars
+
+Each client worktree is stamped with a runtime version at creation time
+(`.harness/runtime-version`, copied from `runtime/VERSION`). The version
+is referenced in each PR's metrics to distinguish pre- and
+post-sidecar-rollout data.
+
+Current version: see `runtime/VERSION` (e.g., `2026.04.0-sidecar`).
+
+In-flight worktrees keep the version they were spawned with. To force a
+refresh, cleanup and respawn the worktree.
+
+Effect on metrics:
+- Pre-sidecar PRs have no `review_issues` rows with source='ai_review'
+  or 'qa' — self-review catch rate will be lower than reality.
+- Dashboard `sidecar_coverage` surfaces the rollout gap.

@@ -142,6 +142,17 @@ E2E: X passed, Y failed (or "skipped — no Playwright")
 Design Compliance: X/Y checks passed (or "Skipped — no Figma design spec provided in ticket")
 ```
 
+## JSON Sidecar
+
+In addition to qa-matrix.md, use the Write tool to create
+`.harness/logs/qa-matrix.json` per the "JSON Sidecar" section of
+QA_MATRIX_TEMPLATE.md. Each failing / NOT_TESTED check gets a stable id
+(`qa-1`, `qa-2`, ...). Passing checks do NOT appear in the sidecar.
+
+Run `mkdir -p .harness/logs` if the directory doesn't exist.
+
+Empty case (all passed): `{"overall": "PASS", "issues": []}`.
+
 ## Failure Routing
 
 When criteria fail:

@@ -44,9 +44,20 @@ Do NOT rationalize issues away. Flag them and explain WHY they are or are not ac
 
 Write your review to `.harness/logs/code-review.md` using the exact format in `REVIEW_FORMAT.md`.
 
+### Step 4: Write the JSON Sidecar
+
+Use the Write tool to create `.harness/logs/code-review.json` per the
+"JSON Sidecar" section of REVIEW_FORMAT.md. Each issue gets a stable id
+(`cr-1`, `cr-2`, ...). Set `blocking` and `is_code_change_request`
+independently — do not infer either from severity.
+
+Run `mkdir -p .harness/logs` if the directory doesn't exist.
+
 ## Output
 
-File: `.harness/logs/code-review.md`
+- `.harness/logs/code-review.md`
+- `.harness/logs/code-review.json`
+
 Format: See `REVIEW_FORMAT.md`
 
 ## What Happens Next

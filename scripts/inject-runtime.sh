@@ -147,4 +147,13 @@ mkdir -p "$TARGET_DIR/.harness/messages"
 mkdir -p "$TARGET_DIR/.harness/plans"
 echo "[inject] Harness directories created"
 
+# --- Step 7: Copy runtime version marker ---
+
+if [[ -f "$RUNTIME_DIR/VERSION" ]]; then
+    cp "$RUNTIME_DIR/VERSION" "$TARGET_DIR/.harness/runtime-version"
+    echo "[inject] Runtime version: $(cat "$RUNTIME_DIR/VERSION")"
+else
+    echo "[inject] WARNING: runtime/VERSION not found — skipping version marker"
+fi
+
 echo "[inject] Done."

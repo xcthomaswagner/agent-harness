@@ -21,12 +21,17 @@ from autonomy_matching import match_human_issues_for_pr_run
 from autonomy_metrics import compute_profile_metrics
 from autonomy_store import (
     PrRunUpsert,
+    create_manual_match,
     drain_pending_ai_issues,
     ensure_schema,
     get_pr_run_by_unique,
+    insert_defect_link,
+    insert_manual_override,
     insert_review_issue,
     list_client_profiles,
     open_connection,
+    promote_match_to_counted,
+    record_defect_sweep_heartbeat,
     resolve_db_path,
     upsert_pr_run,
 )
@@ -512,6 +517,276 @@ async def post_autonomy_human_issue(
         "action": action,
         "client_profile": profile_name,
         "match_summary": match_summary,
+    }
+
+
+async def _guard_admin_request(
+    request: Request, token: str | None
+) -> bytes:
+    """Auth + payload size + rate-limit for admin endpoints.
+
+    Returns the request body bytes on success. Raises HTTPException for
+    auth (503/401), size (413), or rate-limit (429) failures.
+    """
+    if not settings.autonomy_admin_token:
+        raise HTTPException(status_code=503, detail="Admin API not configured")
+    if not token or token != settings.autonomy_admin_token:
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+    body = await request.body()
+    if len(body) > settings.autonomy_internal_max_body_bytes:
+        raise HTTPException(status_code=413, detail="Payload too large")
+    if not _bucket.try_consume():
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    return body
+
+
+class ManualDefectIn(BaseModel):
+    """Payload for POST /api/autonomy/manual-defect."""
+
+    # Lookup: use pr_run_id directly OR (repo, pr_number, head_sha).
+    pr_run_id: int | None = None
+    repo_full_name: str = ""
+    pr_number: int | None = None
+    head_sha: str = ""
+    # Defect info
+    defect_key: str
+    source: Literal["manual", "jira", "github"] = "manual"
+    severity: str = ""
+    reported_at: str
+    confirmed: bool = True
+    notes: str = ""
+    category: Literal[
+        "escaped", "feature_request", "pre_existing", "infra"
+    ] = "escaped"
+
+
+class ManualMatchIn(BaseModel):
+    """Payload for POST /api/autonomy/manual-match."""
+
+    mode: Literal["promote", "create"]
+    # promote mode
+    match_id: int | None = None
+    # create mode
+    human_issue_id: int | None = None
+    ai_issue_id: int | None = None
+
+
+class DefectSweepHeartbeatIn(BaseModel):
+    """Payload for POST /api/autonomy/defect-sweep-heartbeat."""
+
+    client_profile: str
+    swept_through: str  # ISO 8601
+
+
+@router.post("/api/autonomy/manual-defect")
+async def post_manual_defect(
+    request: Request,
+    x_autonomy_admin_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Create or update a defect_links row (admin-only)."""
+    body = await _guard_admin_request(request, x_autonomy_admin_token)
+    try:
+        data = json.loads(body)
+        if not isinstance(data, dict):
+            raise HTTPException(
+                status_code=422, detail="Body must be a JSON object"
+            )
+        payload = ManualDefectIn(**data)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {exc}") from exc
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    conn = _open_conn()
+    try:
+        if payload.pr_run_id is not None:
+            pr_run_id = payload.pr_run_id
+            exists = conn.execute(
+                "SELECT 1 FROM pr_runs WHERE id = ?", (pr_run_id,)
+            ).fetchone()
+            if exists is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"pr_run_id={pr_run_id} not found",
+                )
+        else:
+            if not (
+                payload.repo_full_name
+                and payload.pr_number is not None
+                and payload.head_sha
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Must provide pr_run_id or "
+                        "(repo_full_name + pr_number + head_sha)"
+                    ),
+                )
+            row = get_pr_run_by_unique(
+                conn,
+                payload.repo_full_name,
+                payload.pr_number,
+                payload.head_sha,
+            )
+            if row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="pr_run not found for given (repo, pr_number, head_sha)",
+                )
+            pr_run_id = int(row["id"])
+
+        defect_id = insert_defect_link(
+            conn,
+            pr_run_id=pr_run_id,
+            defect_key=payload.defect_key,
+            source=payload.source,
+            severity=payload.severity,
+            reported_at=payload.reported_at,
+            confirmed=1 if payload.confirmed else 0,
+            notes=payload.notes,
+            category=payload.category,
+        )
+        insert_manual_override(
+            conn,
+            override_type="defect_link",
+            target_id=str(defect_id),
+            payload_json=json.dumps(payload.model_dump()),
+        )
+    finally:
+        conn.close()
+
+    logger.info(
+        "autonomy_manual_defect_recorded",
+        pr_run_id=pr_run_id,
+        defect_link_id=defect_id,
+        defect_key=payload.defect_key,
+        category=payload.category,
+    )
+
+    return {
+        "status": "accepted",
+        "defect_link_id": defect_id,
+        "pr_run_id": pr_run_id,
+    }
+
+
+@router.post("/api/autonomy/manual-match")
+async def post_manual_match(
+    request: Request,
+    x_autonomy_admin_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Promote a suggested match or create a manual match (admin-only)."""
+    body = await _guard_admin_request(request, x_autonomy_admin_token)
+    try:
+        data = json.loads(body)
+        if not isinstance(data, dict):
+            raise HTTPException(
+                status_code=422, detail="Body must be a JSON object"
+            )
+        payload = ManualMatchIn(**data)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {exc}") from exc
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    conn = _open_conn()
+    try:
+        if payload.mode == "promote":
+            if payload.match_id is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="promote mode requires match_id",
+                )
+            ok = promote_match_to_counted(conn, match_id=payload.match_id)
+            if not ok:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"match_id={payload.match_id} not found or not in "
+                        "'suggested' state"
+                    ),
+                )
+            logger.info(
+                "autonomy_manual_match_promoted",
+                match_id=payload.match_id,
+            )
+            return {
+                "status": "accepted",
+                "mode": "promote",
+                "match_id": payload.match_id,
+            }
+
+        # mode == "create"
+        if payload.human_issue_id is None or payload.ai_issue_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "create mode requires human_issue_id and ai_issue_id"
+                ),
+            )
+        try:
+            match_id = create_manual_match(
+                conn,
+                human_issue_id=payload.human_issue_id,
+                ai_issue_id=payload.ai_issue_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        logger.info(
+            "autonomy_manual_match_created",
+            match_id=match_id,
+            human_issue_id=payload.human_issue_id,
+            ai_issue_id=payload.ai_issue_id,
+        )
+        return {
+            "status": "accepted",
+            "mode": "create",
+            "match_id": match_id,
+        }
+    finally:
+        conn.close()
+
+
+@router.post("/api/autonomy/defect-sweep-heartbeat")
+async def post_defect_sweep_heartbeat(
+    request: Request,
+    x_autonomy_admin_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Record operator's 'I've reviewed defects through T' marker (admin-only)."""
+    body = await _guard_admin_request(request, x_autonomy_admin_token)
+    try:
+        data = json.loads(body)
+        if not isinstance(data, dict):
+            raise HTTPException(
+                status_code=422, detail="Body must be a JSON object"
+            )
+        payload = DefectSweepHeartbeatIn(**data)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {exc}") from exc
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    conn = _open_conn()
+    try:
+        override_id = record_defect_sweep_heartbeat(
+            conn,
+            client_profile=payload.client_profile,
+            swept_through_iso=payload.swept_through,
+        )
+    finally:
+        conn.close()
+
+    logger.info(
+        "autonomy_defect_sweep_heartbeat_recorded",
+        client_profile=payload.client_profile,
+        swept_through=payload.swept_through,
+        override_id=override_id,
+    )
+
+    return {
+        "status": "accepted",
+        "client_profile": payload.client_profile,
+        "swept_through": payload.swept_through,
     }
 
 
