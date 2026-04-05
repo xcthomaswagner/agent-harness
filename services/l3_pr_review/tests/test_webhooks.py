@@ -1119,3 +1119,133 @@ async def test_forward_skip_when_no_token_does_not_backlog(tmp_path) -> None:
         await l3_main._forward_autonomy_event(event)
 
     assert not backlog_path.exists()
+
+
+# --- Phase 4: Auto-merge trigger integration ---
+
+
+class TestAutoMergeTrigger:
+    async def test_review_approved_calls_evaluate_and_maybe_merge(self) -> None:
+        payload = _base_pr_payload("submitted")
+        payload["review"] = {
+            "state": "approved",
+            "id": 1,
+            "body": "",
+            "html_url": "https://github.com/org/repo/pull/42",
+            "user": {"login": "lead"},
+        }
+
+        mock_eval = AsyncMock(return_value={"status": "dry_run"})
+        with (
+            patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+            patch.object(
+                l3_main, "_forward_autonomy_event", new_callable=AsyncMock
+            ),
+            patch.object(
+                l3_main, "_forward_human_issue", new_callable=AsyncMock
+            ),
+            patch.object(l3_main, "evaluate_and_maybe_merge", mock_eval),
+            patch("main.httpx.AsyncClient") as mock_client,
+        ):
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.raise_for_status = MagicMock()
+            mock_inst = AsyncMock()
+            mock_inst.post = AsyncMock(return_value=mock_resp)
+            mock_client.return_value.__aenter__.return_value = mock_inst
+
+            async with await _make_client() as client:
+                response = await _post_webhook(
+                    client, payload, "pull_request_review"
+                )
+
+            assert response.status_code == 202
+            import asyncio as _asyncio
+
+            await _asyncio.sleep(0.1)
+
+            assert mock_eval.await_count == 1
+            kwargs = mock_eval.await_args.kwargs
+            assert kwargs["repo_full_name"] == "org/repo"
+            assert kwargs["pr_number"] == 42
+            assert kwargs["head_sha"] == "abc123"
+            assert kwargs["ticket_id"] == "SCRUM-16"
+            assert kwargs["trigger_event"] == "review_approved"
+
+    async def test_ci_passed_calls_evaluate_and_maybe_merge(self) -> None:
+        payload = {
+            "action": "completed",
+            "check_suite": {
+                "conclusion": "success",
+                "status": "completed",
+                "head_branch": "ai/SCRUM-16",
+                "head_sha": "abc123",
+                "pull_requests": [{"number": 42}],
+            },
+            "repository": {"full_name": "org/repo"},
+        }
+
+        mock_eval = AsyncMock(return_value={"status": "dry_run"})
+        mock_get_state = AsyncMock(
+            return_value={"labels": ["bug"], "head_sha": "abc123"}
+        )
+        with (
+            patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+            patch.object(l3_main, "evaluate_and_maybe_merge", mock_eval),
+            patch.object(l3_main, "get_pr_state", mock_get_state),
+        ):
+            async with await _make_client() as client:
+                response = await _post_webhook(client, payload, "check_suite")
+
+            assert response.status_code == 202
+            import asyncio as _asyncio
+
+            await _asyncio.sleep(0.1)
+
+            assert mock_eval.await_count == 1
+            kwargs = mock_eval.await_args.kwargs
+            assert kwargs["repo_full_name"] == "org/repo"
+            assert kwargs["pr_number"] == 42
+            assert kwargs["trigger_event"] == "ci_passed"
+            assert kwargs["ticket_type"] == "bug"
+            assert kwargs["ticket_id"] == "SCRUM-16"
+
+    async def test_evaluate_exception_does_not_break_webhook(self) -> None:
+        payload = _base_pr_payload("submitted")
+        payload["review"] = {
+            "state": "approved",
+            "id": 1,
+            "body": "",
+            "html_url": "https://github.com/org/repo/pull/42",
+            "user": {"login": "lead"},
+        }
+
+        mock_eval = AsyncMock(side_effect=RuntimeError("boom"))
+        with (
+            patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+            patch.object(
+                l3_main, "_forward_autonomy_event", new_callable=AsyncMock
+            ),
+            patch.object(
+                l3_main, "_forward_human_issue", new_callable=AsyncMock
+            ),
+            patch.object(l3_main, "evaluate_and_maybe_merge", mock_eval),
+            patch("main.httpx.AsyncClient") as mock_client,
+        ):
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.raise_for_status = MagicMock()
+            mock_inst = AsyncMock()
+            mock_inst.post = AsyncMock(return_value=mock_resp)
+            mock_client.return_value.__aenter__.return_value = mock_inst
+
+            async with await _make_client() as client:
+                response = await _post_webhook(
+                    client, payload, "pull_request_review"
+                )
+
+            assert response.status_code == 202
+            import asyncio as _asyncio
+
+            await _asyncio.sleep(0.1)
+            assert mock_eval.await_count == 1

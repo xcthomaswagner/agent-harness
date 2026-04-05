@@ -1271,3 +1271,261 @@ class TestIngestJiraBug:
         assert r2["status"] == "accepted"
         assert r1["defect_link_id"] == r2["defect_link_id"]
         assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: auto-merge decisions + toggle + profile-by-repo
+# ---------------------------------------------------------------------------
+
+def test_post_auto_merge_decision_requires_internal_token(
+    test_app: FastAPI,
+) -> None:
+    c = TestClient(test_app)
+    r = c.post(
+        "/api/internal/autonomy/auto-merge-decisions",
+        json={
+            "repo_full_name": "a/b",
+            "pr_number": 1,
+            "head_sha": "abc",
+            "decision": "merged",
+            "reason": "ok",
+            "evaluated_at": "2026-04-05T00:00:00+00:00",
+        },
+    )
+    assert r.status_code == 401
+
+
+def test_post_auto_merge_decision_writes_row(test_app: FastAPI) -> None:
+    c = TestClient(test_app)
+    r = c.post(
+        "/api/internal/autonomy/auto-merge-decisions",
+        json={
+            "repo_full_name": "a/b",
+            "pr_number": 7,
+            "head_sha": "sha1",
+            "ticket_id": "ROC-9",
+            "client_profile": "rockwell",
+            "recommended_mode": "semi_autonomous",
+            "ticket_type": "bug",
+            "decision": "merged",
+            "reason": "all gates passed",
+            "gates": {"ci": True, "reviewer": True},
+            "dry_run": False,
+            "evaluated_at": "2026-04-05T00:00:00+00:00",
+        },
+        headers={"X-Internal-Api-Token": "test-token"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["decision_id"] > 0
+    # Verify stored row
+    db_path = Path(settings.autonomy_db_path)
+    conn = open_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM manual_overrides WHERE id = ?",
+            (body["decision_id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert row["override_type"] == "auto_merge_decision"
+    assert row["target_id"] == "a/b#7"
+
+
+def test_post_auto_merge_toggle_requires_admin_token(
+    admin_app: FastAPI,
+) -> None:
+    c = TestClient(admin_app)
+    r = c.post(
+        "/api/autonomy/auto-merge-toggle",
+        json={"client_profile": "rockwell", "enabled": True},
+    )
+    assert r.status_code == 401
+
+
+def test_post_auto_merge_toggle_fail_closed_when_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "autonomy_db_path", str(tmp_path / "a.db"))
+    monkeypatch.setattr(settings, "autonomy_admin_token", "")
+    autonomy_ingest._bucket = TokenBucket(capacity=100, refill_per_sec=100.0)
+    app = FastAPI()
+    app.include_router(router)
+    c = TestClient(app)
+    r = c.post(
+        "/api/autonomy/auto-merge-toggle",
+        json={"client_profile": "rockwell", "enabled": True},
+        headers={"X-Autonomy-Admin-Token": "anything"},
+    )
+    assert r.status_code == 503
+
+
+def test_post_auto_merge_toggle_writes_and_gets_reflect(
+    admin_app: FastAPI,
+) -> None:
+    c = TestClient(admin_app)
+    r = c.post(
+        "/api/autonomy/auto-merge-toggle",
+        json={"client_profile": "prof-x", "enabled": True},
+        headers={"X-Autonomy-Admin-Token": "admin-token"},
+    )
+    assert r.status_code == 200
+    assert r.json()["enabled"] is True
+
+
+def test_get_auto_merge_toggle_returns_yaml_default(
+    admin_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Stub load_profile to return a profile with yaml enabled=True
+    class FakeProfile:
+        auto_merge_enabled = True
+
+    import autonomy_ingest as ai_module
+
+    monkeypatch.setattr(
+        ai_module, "load_profile", lambda name: FakeProfile()
+    )
+    c = TestClient(admin_app)
+    r = c.get(
+        "/api/autonomy/auto-merge-toggle",
+        params={"client_profile": "no-runtime-toggle"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["source"] == "yaml"
+    assert body["enabled"] is True
+    assert body["yaml_default"] is True
+
+
+def test_get_auto_merge_toggle_runtime_overrides_yaml(
+    admin_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeProfile:
+        auto_merge_enabled = True  # YAML says true
+
+    import autonomy_ingest as ai_module
+
+    monkeypatch.setattr(
+        ai_module, "load_profile", lambda name: FakeProfile()
+    )
+    c = TestClient(admin_app)
+    # Set runtime toggle to False
+    r = c.post(
+        "/api/autonomy/auto-merge-toggle",
+        json={"client_profile": "override-me", "enabled": False},
+        headers={"X-Autonomy-Admin-Token": "admin-token"},
+    )
+    assert r.status_code == 200
+    r = c.get(
+        "/api/autonomy/auto-merge-toggle",
+        params={"client_profile": "override-me"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["source"] == "runtime_toggle"
+    assert body["enabled"] is False
+    assert body["yaml_default"] is True
+
+
+def test_get_auto_merge_decisions_lists_recent(test_app: FastAPI) -> None:
+    c = TestClient(test_app)
+    for pr in (1, 2, 3):
+        c.post(
+            "/api/internal/autonomy/auto-merge-decisions",
+            json={
+                "repo_full_name": "acme/widgets",
+                "pr_number": pr,
+                "head_sha": f"sha{pr}",
+                "client_profile": "rockwell",
+                "decision": "merged",
+                "reason": "ok",
+                "evaluated_at": "2026-04-05T00:00:00+00:00",
+            },
+            headers={"X-Internal-Api-Token": "test-token"},
+        )
+    r = c.get("/api/autonomy/auto-merge-decisions", params={"limit": 10})
+    assert r.status_code == 200
+    decisions = r.json()["decisions"]
+    assert len(decisions) == 3
+    # DESC order
+    assert decisions[0]["target_id"] == "acme/widgets#3"
+    # JSON payload is merged into result dict
+    assert decisions[0]["decision"] == "merged"
+
+    # Filter by repo
+    r = c.get(
+        "/api/autonomy/auto-merge-decisions",
+        params={"repo_full_name": "acme/widgets", "limit": 10},
+    )
+    assert r.status_code == 200
+    assert len(r.json()["decisions"]) == 3
+
+    # Filter by profile
+    r = c.get(
+        "/api/autonomy/auto-merge-decisions",
+        params={"client_profile": "rockwell", "limit": 10},
+    )
+    assert r.status_code == 200
+    assert len(r.json()["decisions"]) == 3
+
+
+def test_get_profile_by_repo_found(
+    test_app: FastAPI, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Point find_profile_by_repo to a temp profiles directory
+    profiles_dir = tmp_path / "profiles"
+    profiles_dir.mkdir()
+    (profiles_dir / "acme.yaml").write_text(
+        "client: Acme\n"
+        "client_repo:\n"
+        "  github_repo: acme/widgets\n"
+        "autonomy:\n"
+        "  auto_merge_enabled: true\n"
+        "  low_risk_ticket_types: [bug, chore]\n"
+    )
+    import client_profile as cp_module
+
+    monkeypatch.setattr(cp_module, "PROFILES_DIR", profiles_dir)
+    c = TestClient(test_app)
+    r = c.get(
+        "/api/internal/autonomy/profile-by-repo",
+        params={"repo_full_name": "acme/widgets"},
+        headers={"X-Internal-Api-Token": "test-token"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["client_profile"] == "acme"
+    assert body["auto_merge_enabled_yaml"] is True
+    assert body["low_risk_ticket_types"] == ["bug", "chore"]
+
+
+def test_get_profile_by_repo_not_found(
+    test_app: FastAPI, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profiles_dir = tmp_path / "profiles"
+    profiles_dir.mkdir()
+    import client_profile as cp_module
+
+    monkeypatch.setattr(cp_module, "PROFILES_DIR", profiles_dir)
+    c = TestClient(test_app)
+    r = c.get(
+        "/api/internal/autonomy/profile-by-repo",
+        params={"repo_full_name": "nope/nada"},
+        headers={"X-Internal-Api-Token": "test-token"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["client_profile"] == ""
+    assert body["auto_merge_enabled_yaml"] is False
+    assert body["low_risk_ticket_types"] == []
+
+
+def test_get_profile_by_repo_auth_required(test_app: FastAPI) -> None:
+    c = TestClient(test_app)
+    r = c.get(
+        "/api/internal/autonomy/profile-by-repo",
+        params={"repo_full_name": "a/b"},
+    )
+    assert r.status_code == 401

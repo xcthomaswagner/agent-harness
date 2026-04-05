@@ -9,3 +9,7 @@ ticket_source:
 client_repo:
   local_path: /Users/thomaswagner/Desktop/Projects.nosync/harness-test-client
   github_repo: xcthomaswagner/harness-test-client
+
+autonomy:
+  auto_merge_enabled: false
+  low_risk_ticket_types: [bug, chore, config, dependency, docs]

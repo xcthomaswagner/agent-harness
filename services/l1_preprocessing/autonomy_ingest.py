@@ -26,18 +26,22 @@ from autonomy_store import (
     drain_pending_ai_issues,
     ensure_schema,
     find_latest_merged_pr_run_by_ticket,
+    get_auto_merge_toggle,
     get_pr_run_by_unique,
     insert_defect_link,
     insert_manual_override,
     insert_review_issue,
     list_client_profiles,
+    list_recent_auto_merge_decisions,
     open_connection,
     promote_match_to_counted,
+    record_auto_merge_decision,
     record_defect_sweep_heartbeat,
     resolve_db_path,
+    set_auto_merge_toggle,
     upsert_pr_run,
 )
-from client_profile import find_profile_by_project_key
+from client_profile import find_profile_by_project_key, find_profile_by_repo, load_profile
 from config import settings
 
 logger = structlog.get_logger()
@@ -902,6 +906,219 @@ def _aggregate_profile(
         "notes": metrics.pop("data_quality_notes"),
     }
     return metrics
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: auto-merge decisions + kill-switch toggle + repo → profile
+# ---------------------------------------------------------------------------
+
+class AutoMergeDecisionIn(BaseModel):
+    """Payload for POST /api/internal/autonomy/auto-merge-decisions."""
+
+    repo_full_name: str
+    pr_number: int
+    head_sha: str
+    ticket_id: str = ""
+    client_profile: str = ""
+    recommended_mode: str = ""
+    ticket_type: str = ""
+    decision: Literal["merged", "skipped", "dry_run", "failed"]
+    reason: str
+    gates: dict[str, bool] = {}
+    dry_run: bool = False
+    evaluated_at: str
+
+
+class AutoMergeToggleIn(BaseModel):
+    """Payload for POST /api/autonomy/auto-merge-toggle."""
+
+    client_profile: str
+    enabled: bool
+    created_by: str = "admin"
+
+
+@router.post("/api/internal/autonomy/auto-merge-decisions")
+async def post_auto_merge_decision(
+    request: Request,
+    x_internal_api_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Log an auto-merge decision from L3. Internal-auth gated."""
+    body = await _guard_internal_request(request, x_internal_api_token)
+    try:
+        data = json.loads(body)
+        if not isinstance(data, dict):
+            raise HTTPException(
+                status_code=422, detail="Body must be a JSON object"
+            )
+        payload = AutoMergeDecisionIn(**data)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {exc}") from exc
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    conn = _open_conn()
+    try:
+        decision_id = record_auto_merge_decision(
+            conn,
+            repo_full_name=payload.repo_full_name,
+            pr_number=payload.pr_number,
+            decision=payload.decision,
+            reason=payload.reason,
+            payload=payload.model_dump(),
+            created_by="l3_auto_merge",
+        )
+    finally:
+        conn.close()
+
+    logger.info(
+        "autonomy_auto_merge_decision_recorded",
+        repo_full_name=payload.repo_full_name,
+        pr_number=payload.pr_number,
+        decision=payload.decision,
+        reason=payload.reason,
+        decision_id=decision_id,
+    )
+    return {"status": "accepted", "decision_id": decision_id}
+
+
+@router.post("/api/autonomy/auto-merge-toggle")
+async def post_auto_merge_toggle(
+    request: Request,
+    x_autonomy_admin_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Set the runtime auto-merge kill-switch for a client profile."""
+    body = await _guard_admin_request(request, x_autonomy_admin_token)
+    try:
+        data = json.loads(body)
+        if not isinstance(data, dict):
+            raise HTTPException(
+                status_code=422, detail="Body must be a JSON object"
+            )
+        payload = AutoMergeToggleIn(**data)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {exc}") from exc
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    conn = _open_conn()
+    try:
+        row_id = set_auto_merge_toggle(
+            conn,
+            client_profile=payload.client_profile,
+            enabled=payload.enabled,
+            created_by=payload.created_by,
+        )
+    finally:
+        conn.close()
+
+    logger.info(
+        "autonomy_auto_merge_toggle_set",
+        client_profile=payload.client_profile,
+        enabled=payload.enabled,
+        override_id=row_id,
+    )
+    return {"status": "ok", "override_id": row_id, "enabled": payload.enabled}
+
+
+@router.get("/api/autonomy/auto-merge-toggle")
+async def get_auto_merge_toggle_effective(
+    client_profile: str,
+) -> dict[str, Any]:
+    """Return the effective auto_merge_enabled for a profile.
+
+    Precedence: runtime toggle (if ever set) > YAML auto_merge_enabled.
+    """
+    conn = _open_conn()
+    try:
+        runtime_toggle = get_auto_merge_toggle(conn, client_profile)
+    finally:
+        conn.close()
+    yaml_enabled = False
+    profile = load_profile(client_profile)
+    if profile is not None:
+        yaml_enabled = profile.auto_merge_enabled
+    if runtime_toggle is not None:
+        return {
+            "client_profile": client_profile,
+            "enabled": runtime_toggle,
+            "source": "runtime_toggle",
+            "yaml_default": yaml_enabled,
+        }
+    return {
+        "client_profile": client_profile,
+        "enabled": yaml_enabled,
+        "source": "yaml",
+        "yaml_default": yaml_enabled,
+    }
+
+
+@router.get("/api/autonomy/auto-merge-decisions")
+async def get_auto_merge_decisions(
+    client_profile: str | None = None,
+    repo_full_name: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """List recent auto-merge decisions for the dashboard."""
+    conn = _open_conn()
+    try:
+        rows = list_recent_auto_merge_decisions(
+            conn,
+            limit=min(max(limit, 1), 500),
+            repo_full_name=repo_full_name,
+            client_profile=client_profile,
+        )
+    finally:
+        conn.close()
+    decisions: list[dict[str, Any]] = []
+    for r in rows:
+        try:
+            payload = json.loads(r["payload_json"])
+        except (json.JSONDecodeError, TypeError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        decisions.append(
+            {
+                "id": r["id"],
+                "target_id": r["target_id"],
+                "created_at": r["created_at"],
+                "created_by": r["created_by"],
+                **payload,
+            }
+        )
+    return {"decisions": decisions}
+
+
+@router.get("/api/internal/autonomy/profile-by-repo")
+async def get_profile_by_repo(
+    repo_full_name: str,
+    x_internal_api_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """L3 helper: resolve a GitHub repo → client_profile + autonomy settings.
+
+    Returns empty strings / defaults if not matched. Auth via the shared
+    internal API token.
+    """
+    if not settings.l1_internal_api_token:
+        raise HTTPException(status_code=503, detail="Internal API not configured")
+    if (
+        not x_internal_api_token
+        or x_internal_api_token != settings.l1_internal_api_token
+    ):
+        raise HTTPException(status_code=401, detail="Invalid or missing token")
+
+    profile = find_profile_by_repo(repo_full_name)
+    if profile is None:
+        return {
+            "client_profile": "",
+            "auto_merge_enabled_yaml": False,
+            "low_risk_ticket_types": [],
+        }
+    return {
+        "client_profile": profile.name,
+        "auto_merge_enabled_yaml": profile.auto_merge_enabled,
+        "low_risk_ticket_types": profile.low_risk_ticket_types,
+    }
 
 
 @router.get("/api/autonomy")

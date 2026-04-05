@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from client_profile import ClientProfile, list_profiles, load_profile
+from client_profile import (
+    ClientProfile,
+    find_profile_by_repo,
+    list_profiles,
+    load_profile,
+)
 
 
 @pytest.fixture
@@ -108,3 +113,90 @@ class TestListProfiles:
         (profiles_dir / "readme.md").write_text("not yaml")
         result = list_profiles(profiles_dir=profiles_dir)
         assert result == []
+
+
+class TestFindProfileByRepo:
+    def test_find_profile_by_repo_matches_exact(self, profiles_dir: Path) -> None:
+        (profiles_dir / "alpha.yaml").write_text(
+            "client: Alpha\nclient_repo:\n  github_repo: acme/widgets\n"
+        )
+        (profiles_dir / "beta.yaml").write_text(
+            "client: Beta\nclient_repo:\n  github_repo: other/repo\n"
+        )
+        profile = find_profile_by_repo("acme/widgets", profiles_dir=profiles_dir)
+        assert profile is not None
+        assert profile.name == "alpha"
+
+    def test_find_profile_by_repo_matches_case_insensitive(
+        self, profiles_dir: Path
+    ) -> None:
+        (profiles_dir / "alpha.yaml").write_text(
+            "client: Alpha\nclient_repo:\n  github_repo: Acme/Widgets\n"
+        )
+        profile = find_profile_by_repo("acme/widgets", profiles_dir=profiles_dir)
+        assert profile is not None
+        assert profile.name == "alpha"
+
+    def test_find_profile_by_repo_matches_url(self, profiles_dir: Path) -> None:
+        (profiles_dir / "alpha.yaml").write_text(
+            "client: Alpha\n"
+            "client_repo:\n"
+            "  url: https://github.com/acme/widgets.git\n"
+        )
+        profile = find_profile_by_repo("acme/widgets", profiles_dir=profiles_dir)
+        assert profile is not None
+        assert profile.name == "alpha"
+
+    def test_find_profile_by_repo_returns_none_when_no_match(
+        self, profiles_dir: Path
+    ) -> None:
+        (profiles_dir / "alpha.yaml").write_text(
+            "client: Alpha\nclient_repo:\n  github_repo: acme/widgets\n"
+        )
+        profile = find_profile_by_repo("nope/nada", profiles_dir=profiles_dir)
+        assert profile is None
+
+    def test_find_profile_by_repo_skips_schema(self, profiles_dir: Path) -> None:
+        (profiles_dir / "schema.yaml").write_text(
+            "client: X\nclient_repo:\n  github_repo: acme/widgets\n"
+        )
+        profile = find_profile_by_repo("acme/widgets", profiles_dir=profiles_dir)
+        assert profile is None
+
+    def test_find_profile_by_repo_empty_input(self, profiles_dir: Path) -> None:
+        assert find_profile_by_repo("", profiles_dir=profiles_dir) is None
+
+
+class TestAutonomyAccessors:
+    def test_auto_merge_enabled_defaults_false(self) -> None:
+        profile = ClientProfile({})
+        assert profile.auto_merge_enabled is False
+
+    def test_auto_merge_enabled_respects_yaml(self) -> None:
+        profile = ClientProfile({"autonomy": {"auto_merge_enabled": True}})
+        assert profile.auto_merge_enabled is True
+
+    def test_auto_merge_enabled_truthy_values(self) -> None:
+        profile = ClientProfile({"autonomy": {"auto_merge_enabled": "yes"}})
+        assert profile.auto_merge_enabled is True
+
+    def test_low_risk_ticket_types_defaults(self) -> None:
+        profile = ClientProfile({})
+        assert profile.low_risk_ticket_types == [
+            "bug",
+            "chore",
+            "config",
+            "dependency",
+            "docs",
+        ]
+
+    def test_low_risk_ticket_types_custom_yaml(self) -> None:
+        profile = ClientProfile(
+            {"autonomy": {"low_risk_ticket_types": ["Bug", "Task"]}}
+        )
+        assert profile.low_risk_ticket_types == ["bug", "task"]
+
+    def test_low_risk_ticket_types_empty_list_falls_back(self) -> None:
+        profile = ClientProfile({"autonomy": {"low_risk_ticket_types": []}})
+        # empty list → fall back to defaults
+        assert "bug" in profile.low_risk_ticket_types

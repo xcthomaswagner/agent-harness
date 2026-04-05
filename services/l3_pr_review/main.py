@@ -24,8 +24,10 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "l1_preprocessing"))
 from tracer import append_trace, generate_trace_id, read_trace
 
+from auto_merge import evaluate_and_maybe_merge
 from backlog import append_backlog, backlog_status, drain_backlog
 from event_classifier import EventType, classify_event
+from github_api import get_pr_state
 from spawner import SessionSpawner
 
 load_dotenv()
@@ -680,15 +682,30 @@ async def _handle_review_approved(payload: dict[str, Any]) -> None:
                 log.error("l1_notification_failed", url=l1_url,
                           ticket_id=completion_json["ticket_id"])
 
-    # TODO: Phase 4 - check recommended mode from L1 /api/autonomy for this
-    # repo's client_profile and merge if semi/full_autonomous
-    # For now, just log the approval
     log.info(
         "pr_approved",
         ticket_type=ticket_type,
         branch=branch,
         repo=repo,
     )
+
+    # Phase 4: evaluate auto-merge policy
+    try:
+        ticket_id = (
+            branch.replace("ai/", "")
+            if branch.startswith("ai/")
+            else _ticket_id_from_payload(payload)
+        )
+        await evaluate_and_maybe_merge(
+            repo_full_name=repo,
+            pr_number=pr_number,
+            head_sha=pr.get("head", {}).get("sha", ""),
+            ticket_id=ticket_id,
+            ticket_type=ticket_type,
+            trigger_event="review_approved",
+        )
+    except Exception:
+        log.exception("auto_merge_evaluation_failed")
 
 
 async def _handle_review_comment_created(payload: dict[str, Any]) -> None:
@@ -762,8 +779,14 @@ async def _handle_pr_merged(payload: dict[str, Any]) -> None:
 async def _handle_ci_passed(payload: dict[str, Any]) -> None:
     """Handle CI passing — check if PR is approved and ready for auto-merge."""
     check = payload.get("check_suite", payload.get("check_run", {}))
-    pr_numbers = [pr.get("number", 0) for pr in check.get("pull_requests", [])]
+    pr_entries = check.get("pull_requests", []) or []
+    pr_numbers = [pr.get("number", 0) for pr in pr_entries]
     branch = check.get("head_branch", "")
+    head_sha = check.get("head_sha", "") or check.get("head_commit", {}).get("id", "")
+    repo_full_name = (
+        payload.get("repository", {}).get("full_name", "")
+        or check.get("repository", {}).get("full_name", "")
+    )
 
     if not pr_numbers:
         return
@@ -771,8 +794,31 @@ async def _handle_ci_passed(payload: dict[str, Any]) -> None:
     log = logger.bind(pr_numbers=pr_numbers, branch=branch)
     log.info("ci_passed", branch=branch)
 
-    # TODO: If PR is already approved and autonomy allows, trigger auto-merge
-    # This requires checking the PR's review state via GitHub API
+    # Derive ticket_id from branch (ai/TICKET-123)
+    match = _AI_BRANCH_PATTERN.match(branch or "")
+    ticket_id = match.group(1) if match else ""
+
+    # Phase 4: evaluate auto-merge for each PR (check suite may be attached to multiple)
+    for pr_number in pr_numbers:
+        try:
+            # We need ticket_type; fetch labels via PR state
+            ticket_type = ""
+            pr_state = await get_pr_state(repo_full_name, pr_number)
+            if pr_state:
+                for label in pr_state.get("labels", []):
+                    if label in ("bug", "chore", "config", "dependency", "docs", "story"):
+                        ticket_type = label
+                        break
+            await evaluate_and_maybe_merge(
+                repo_full_name=repo_full_name,
+                pr_number=pr_number,
+                head_sha=head_sha,
+                ticket_id=ticket_id,
+                ticket_type=ticket_type,
+                trigger_event="ci_passed",
+            )
+        except Exception:
+            log.exception("auto_merge_evaluation_failed", pr_number=pr_number)
 
 
 # Route map

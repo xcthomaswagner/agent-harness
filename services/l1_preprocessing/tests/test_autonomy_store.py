@@ -1306,3 +1306,203 @@ class TestFindLatestMergedPrRunByTicket:
             assert row["head_sha"] == "sha_new"
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: auto-merge decisions + toggle
+# ---------------------------------------------------------------------------
+
+class TestAutoMergeDecisions:
+    def test_record_auto_merge_decision_writes_row(self, db_path: Path) -> None:
+        from autonomy_store import record_auto_merge_decision
+
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            decision_id = record_auto_merge_decision(
+                conn,
+                repo_full_name="acme/widgets",
+                pr_number=42,
+                decision="merged",
+                reason="all gates passed",
+                payload={"client_profile": "rockwell", "gates": {"ci": True}},
+            )
+            assert decision_id > 0
+            row = conn.execute(
+                "SELECT * FROM manual_overrides WHERE id = ?", (decision_id,)
+            ).fetchone()
+            assert row["override_type"] == "auto_merge_decision"
+            assert row["target_id"] == "acme/widgets#42"
+            assert row["created_by"] == "l3_auto_merge"
+            import json as _json
+            payload = _json.loads(row["payload_json"])
+            assert payload["decision"] == "merged"
+            assert payload["reason"] == "all gates passed"
+            assert payload["client_profile"] == "rockwell"
+        finally:
+            conn.close()
+
+    def test_get_auto_merge_toggle_returns_none_when_absent(
+        self, db_path: Path
+    ) -> None:
+        from autonomy_store import get_auto_merge_toggle
+
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            assert get_auto_merge_toggle(conn, "rockwell") is None
+        finally:
+            conn.close()
+
+    def test_set_and_get_auto_merge_toggle_roundtrip(
+        self, db_path: Path
+    ) -> None:
+        from autonomy_store import get_auto_merge_toggle, set_auto_merge_toggle
+
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            set_auto_merge_toggle(conn, client_profile="rockwell", enabled=True)
+            assert get_auto_merge_toggle(conn, "rockwell") is True
+        finally:
+            conn.close()
+
+    def test_toggle_latest_wins(self, db_path: Path) -> None:
+        from autonomy_store import get_auto_merge_toggle, set_auto_merge_toggle
+
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            set_auto_merge_toggle(conn, client_profile="p", enabled=True)
+            set_auto_merge_toggle(conn, client_profile="p", enabled=False)
+            assert get_auto_merge_toggle(conn, "p") is False
+        finally:
+            conn.close()
+
+    def test_list_recent_auto_merge_decisions_ordered_desc(
+        self, db_path: Path
+    ) -> None:
+        from autonomy_store import (
+            list_recent_auto_merge_decisions,
+            record_auto_merge_decision,
+        )
+
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            id1 = record_auto_merge_decision(
+                conn,
+                repo_full_name="a/b",
+                pr_number=1,
+                decision="merged",
+                reason="ok",
+                payload={},
+            )
+            id2 = record_auto_merge_decision(
+                conn,
+                repo_full_name="a/b",
+                pr_number=2,
+                decision="skipped",
+                reason="gate failed",
+                payload={},
+            )
+            rows = list_recent_auto_merge_decisions(conn, limit=10)
+            assert len(rows) == 2
+            assert rows[0]["id"] == id2
+            assert rows[1]["id"] == id1
+        finally:
+            conn.close()
+
+    def test_list_recent_filters_by_since_iso(self, db_path: Path) -> None:
+        from autonomy_store import (
+            list_recent_auto_merge_decisions,
+            record_auto_merge_decision,
+        )
+
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            record_auto_merge_decision(
+                conn,
+                repo_full_name="a/b",
+                pr_number=1,
+                decision="merged",
+                reason="ok",
+                payload={},
+            )
+            # since_iso far in the future → no rows
+            future = "2099-01-01T00:00:00+00:00"
+            rows = list_recent_auto_merge_decisions(conn, since_iso=future)
+            assert rows == []
+            # since_iso far in the past → row included
+            past = "1999-01-01T00:00:00+00:00"
+            rows = list_recent_auto_merge_decisions(conn, since_iso=past)
+            assert len(rows) == 1
+        finally:
+            conn.close()
+
+    def test_list_recent_filters_by_repo_full_name(self, db_path: Path) -> None:
+        from autonomy_store import (
+            list_recent_auto_merge_decisions,
+            record_auto_merge_decision,
+        )
+
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            record_auto_merge_decision(
+                conn,
+                repo_full_name="a/b",
+                pr_number=1,
+                decision="merged",
+                reason="ok",
+                payload={},
+            )
+            record_auto_merge_decision(
+                conn,
+                repo_full_name="c/d",
+                pr_number=7,
+                decision="skipped",
+                reason="nope",
+                payload={},
+            )
+            rows = list_recent_auto_merge_decisions(
+                conn, repo_full_name="a/b"
+            )
+            assert len(rows) == 1
+            assert rows[0]["target_id"] == "a/b#1"
+        finally:
+            conn.close()
+
+    def test_list_recent_filters_by_client_profile(self, db_path: Path) -> None:
+        from autonomy_store import (
+            list_recent_auto_merge_decisions,
+            record_auto_merge_decision,
+        )
+
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            record_auto_merge_decision(
+                conn,
+                repo_full_name="a/b",
+                pr_number=1,
+                decision="merged",
+                reason="ok",
+                payload={"client_profile": "rockwell"},
+            )
+            record_auto_merge_decision(
+                conn,
+                repo_full_name="c/d",
+                pr_number=2,
+                decision="merged",
+                reason="ok",
+                payload={"client_profile": "harness-test"},
+            )
+            rows = list_recent_auto_merge_decisions(
+                conn, client_profile="rockwell"
+            )
+            assert len(rows) == 1
+            assert rows[0]["target_id"] == "a/b#1"
+        finally:
+            conn.close()

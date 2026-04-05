@@ -26,6 +26,7 @@ SECRET_VARS: frozenset[str] = frozenset({
     "API_KEY",            # L1 control-plane auth — must not leak to agents
     "L1_INTERNAL_API_TOKEN",  # L1 autonomy internal API — must not leak to agents
     "AUTONOMY_ADMIN_TOKEN",   # L1 autonomy admin writes — must not leak to agents
+    "JIRA_BUG_WEBHOOK_TOKEN", # Jira bug webhook bearer — must not leak to agents
 })
 
 

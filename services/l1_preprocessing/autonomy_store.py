@@ -12,6 +12,7 @@ import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import structlog
 from pydantic import BaseModel
@@ -1135,3 +1136,111 @@ def get_latest_defect_sweep_heartbeat(
         if isinstance(value, str) and value:
             return value
     return None
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: auto-merge decisions + kill-switch toggle
+# ---------------------------------------------------------------------------
+
+def record_auto_merge_decision(
+    conn: sqlite3.Connection,
+    *,
+    repo_full_name: str,
+    pr_number: int,
+    decision: str,
+    reason: str,
+    payload: dict[str, Any],
+    created_by: str = "l3_auto_merge",
+) -> int:
+    """Log an auto-merge decision via manual_overrides.
+
+    override_type='auto_merge_decision', target_id='{repo}#{pr_number}'.
+    payload_json merges {decision, reason} with the caller-supplied payload.
+    """
+    merged = {"decision": decision, "reason": reason, **payload}
+    return insert_manual_override(
+        conn,
+        override_type="auto_merge_decision",
+        target_id=f"{repo_full_name}#{pr_number}",
+        payload_json=json.dumps(merged),
+        created_by=created_by,
+    )
+
+
+def get_auto_merge_toggle(
+    conn: sqlite3.Connection, client_profile: str
+) -> bool | None:
+    """Read the latest per-profile auto-merge runtime toggle.
+
+    Returns None if no toggle has ever been set (caller falls back to YAML).
+    """
+    row = conn.execute(
+        "SELECT payload_json FROM manual_overrides "
+        "WHERE override_type = 'auto_merge_toggle' AND target_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (client_profile,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row["payload_json"])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return bool(payload.get("enabled"))
+
+
+def set_auto_merge_toggle(
+    conn: sqlite3.Connection,
+    *,
+    client_profile: str,
+    enabled: bool,
+    created_by: str = "admin",
+) -> int:
+    """Insert a new toggle row for `client_profile`. Latest wins."""
+    return insert_manual_override(
+        conn,
+        override_type="auto_merge_toggle",
+        target_id=client_profile,
+        payload_json=json.dumps({"enabled": bool(enabled)}),
+        created_by=created_by,
+    )
+
+
+def list_recent_auto_merge_decisions(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 50,
+    since_iso: str | None = None,
+    repo_full_name: str | None = None,
+    client_profile: str | None = None,
+) -> list[sqlite3.Row]:
+    """Return recent auto-merge decision rows from manual_overrides.
+
+    Filters:
+      * since_iso — created_at >= value
+      * repo_full_name — target_id starts with "{repo}#"
+      * client_profile — payload JSON contains this profile name
+
+    Ordered by id DESC, capped at `limit`.
+    """
+    clauses = ["override_type = 'auto_merge_decision'"]
+    params: list[Any] = []
+    if since_iso:
+        clauses.append("created_at >= ?")
+        params.append(since_iso)
+    if repo_full_name:
+        clauses.append("target_id LIKE ?")
+        params.append(f"{repo_full_name}#%")
+    if client_profile:
+        # Crude substring match on serialized JSON — sufficient for dashboard.
+        clauses.append("payload_json LIKE ?")
+        params.append(f'%"client_profile": "{client_profile}"%')
+    sql = (
+        "SELECT * FROM manual_overrides WHERE "
+        + " AND ".join(clauses)
+        + " ORDER BY id DESC LIMIT ?"
+    )
+    params.append(limit)
+    return list(conn.execute(sql, params).fetchall())

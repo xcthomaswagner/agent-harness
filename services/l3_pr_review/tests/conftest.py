@@ -17,3 +17,16 @@ def _isolate_backlog_path(
     import backlog as backlog_mod
 
     monkeypatch.setattr(backlog_mod, "BACKLOG_PATH", tmp_path / "backlog.jsonl")
+
+
+@pytest.fixture(autouse=True)
+def _clear_auto_merge_state() -> None:
+    """Reset auto-merge dedup set and autonomy policy cache between tests."""
+    import auto_merge
+    import autonomy_policy
+
+    auto_merge._clear_dedup()
+    autonomy_policy._cache_clear()
+    yield
+    auto_merge._clear_dedup()
+    autonomy_policy._cache_clear()

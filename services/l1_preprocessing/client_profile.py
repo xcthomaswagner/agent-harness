@@ -60,6 +60,27 @@ class ClientProfile:
     def project_key(self) -> str:
         return str(self.ticket_source.get("project_key", ""))
 
+    @property
+    def auto_merge_enabled(self) -> bool:
+        """Read autonomy.auto_merge_enabled from YAML (default False)."""
+        autonomy = self._data.get("autonomy", {})
+        if not isinstance(autonomy, dict):
+            return False
+        return bool(autonomy.get("auto_merge_enabled", False))
+
+    @property
+    def low_risk_ticket_types(self) -> list[str]:
+        """Read autonomy.low_risk_ticket_types from YAML.
+
+        Defaults to a hardcoded set when the YAML does not specify a list.
+        """
+        autonomy = self._data.get("autonomy", {})
+        if isinstance(autonomy, dict):
+            custom = autonomy.get("low_risk_ticket_types")
+            if isinstance(custom, list) and custom:
+                return [str(t).lower() for t in custom]
+        return ["bug", "chore", "config", "dependency", "docs"]
+
 
 def load_profile(name: str, profiles_dir: Path | None = None) -> ClientProfile | None:
     """Load a client profile by name.
@@ -115,6 +136,59 @@ def find_profile_by_project_key(
                 project_key=project_key,
             )
             return ClientProfile(data, path.stem)
+
+    return None
+
+
+def find_profile_by_repo(
+    repo_full_name: str, profiles_dir: Path | None = None
+) -> ClientProfile | None:
+    """Find a client profile whose client_repo matches `repo_full_name`.
+
+    Matches either `client_repo.github_repo` ("owner/repo") or
+    `client_repo.url` (a full URL containing the repo path). Comparison is
+    case-insensitive. Scans all *.yaml in profiles_dir (skipping schema.yaml);
+    returns the first match or None.
+    """
+    directory = profiles_dir or PROFILES_DIR
+    if not directory.exists() or not repo_full_name:
+        return None
+
+    target = repo_full_name.strip().lower()
+    if not target:
+        return None
+
+    for path in sorted(directory.glob("*.yaml")):
+        if path.stem == "schema":
+            continue
+        try:
+            data = yaml.safe_load(path.read_text())
+        except yaml.YAMLError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        client_repo = data.get("client_repo", {})
+        if not isinstance(client_repo, dict):
+            continue
+        github_repo = str(client_repo.get("github_repo", "")).strip().lower()
+        url = str(client_repo.get("url", "")).strip().lower()
+        if github_repo and github_repo == target:
+            logger.info(
+                "client_profile_matched_by_repo",
+                name=path.stem,
+                repo_full_name=repo_full_name,
+            )
+            return ClientProfile(data, path.stem)
+        if url:
+            # URL may be https://github.com/owner/repo[.git] — match suffix.
+            url_clean = url.rstrip("/").removesuffix(".git")
+            if url_clean.endswith("/" + target) or url_clean.endswith(target):
+                logger.info(
+                    "client_profile_matched_by_repo",
+                    name=path.stem,
+                    repo_full_name=repo_full_name,
+                )
+                return ClientProfile(data, path.stem)
 
     return None
 

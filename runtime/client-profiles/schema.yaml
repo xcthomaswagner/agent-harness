@@ -38,3 +38,10 @@ test_framework:
 
 client_repo:
   local_path: ""            # Local path to the client repo for spawning agents
+  github_repo: ""           # "owner/repo" — used by L3 to resolve repo → profile
+  url: ""                   # Optional: full GitHub URL (alternative to github_repo)
+
+# Autonomy engine settings (Phase 4 auto-merge)
+autonomy:
+  auto_merge_enabled: false                                          # Default OFF — set true to let harness auto-merge PRs when recommended_mode permits
+  low_risk_ticket_types: [bug, chore, config, dependency, docs]      # Types eligible in semi_autonomous mode
