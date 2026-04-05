@@ -1005,6 +1005,19 @@ def create_manual_match(
     if int(ai["is_valid"]) != 1:
         raise ValueError("ai_issue_id must have is_valid=1")
 
+    # Emulated uniqueness guard — issue_matches has no UNIQUE constraint
+    # in v1 schema so we check here to prevent duplicate manual matches.
+    existing = conn.execute(
+        "SELECT id FROM issue_matches WHERE human_issue_id = ? "
+        "AND ai_issue_id = ?",
+        (human_issue_id, ai_issue_id),
+    ).fetchone()
+    if existing is not None:
+        raise ValueError(
+            f"match already exists between human_issue_id={human_issue_id} "
+            f"and ai_issue_id={ai_issue_id}"
+        )
+
     now = _now_iso()
     with conn:
         cur = conn.execute(

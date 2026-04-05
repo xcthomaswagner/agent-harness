@@ -656,13 +656,8 @@ def autonomy_dashboard(
         else:
             table_rows = list_pr_runs(conn, since_iso=cutoff)
 
-        # Scope for unmatched/suggested sections = all pr_runs shown in cards.
-        scoped_pr_run_ids: list[int] = []
-        for m in profile_metrics:
-            for r in m.get("recent_rows", []):
-                scoped_pr_run_ids.append(int(r["id"]))
-        # recent_rows on each card is capped at 20; for the issue sections
-        # we want the full window scope, so recompute via table_rows too.
+        # Scope for unmatched/suggested sections = full window of pr_runs
+        # (table_rows), not the 20-row recent_rows cap on each card.
         scoped_pr_run_ids = [int(r["id"]) for r in table_rows]
 
         unmatched_rows = _query_unmatched_human_issues(conn, scoped_pr_run_ids)
