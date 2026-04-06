@@ -51,3 +51,10 @@ mypy_path = [".", "../l1_preprocessing", ".."]
 [[tool.mypy.overrides]]
 module = ["structlog.*", "shared.*", "tracer", "pydantic_settings.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["config"]
+# L3 mypy follows imports into L1's config.py which subclasses
+# pydantic_settings.BaseSettings — an unavailable stub in L3's env.
+# Suppress the "cannot subclass Any" error for this transitive import.
+disable_error_code = ["misc"]
