@@ -605,10 +605,11 @@ def _render_auto_merge_decisions_section(
         reason = _e(_truncate(str(payload.get("reason") or ""), 100))
         mode = _e(str(payload.get("recommended_mode") or "—"))
         dry_run_val = payload.get("dry_run")
-        if isinstance(dry_run_val, bool):
-            dry_run_cell = "yes" if dry_run_val else "no"
-        else:
-            dry_run_cell = "—"
+        dry_run_cell = (
+            ("yes" if dry_run_val else "no")
+            if isinstance(dry_run_val, bool)
+            else "—"
+        )
         gates_cell = _e(_truncate(_format_gates_summary(payload.get("gates")), 120))
         body_parts.append(
             f"<tr><td>{created_at}</td><td>{target_cell}</td>"
@@ -722,7 +723,8 @@ def _build_sparklines_html(
         f'<span>{_render_sparkline_svg(fpa_points, label="FPA trend (7-day avg)")}</span>'
         '</div>'
         '<div class="metric-row">'
-        '<span class="metric-label">Defect escape trend <span class="meta">(7-day avg)</span></span>'
+        '<span class="metric-label">Defect escape trend '
+        '<span class="meta">(7-day avg)</span></span>'
         f'<span>{_render_sparkline_svg(esc_points, label="Defect escape trend (7-day avg)")}</span>'
         '</div>'
         '<div class="metric-row">'

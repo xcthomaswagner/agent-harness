@@ -173,7 +173,7 @@ def extract_ticket_rows(
                     escalated = 1
             break
 
-        _, pr_number_int = parse_pr_url(pr_url) or ("", 0)
+        _, _pr_number_int = parse_pr_url(pr_url) or ("", 0)
         rows.append(
             BackfillRow(
                 ticket_id=ticket_id,

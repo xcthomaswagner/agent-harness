@@ -636,7 +636,7 @@ def test_rolling_trend_smooths_spikes(tmp_path: Path) -> None:
     finally:
         conn.close()
     assert len(trend) == 1
-    date_str, value, n = trend[0]
+    _date_str, value, n = trend[0]
     assert value is not None
     assert 0.30 <= value <= 0.36
     assert n == 3
