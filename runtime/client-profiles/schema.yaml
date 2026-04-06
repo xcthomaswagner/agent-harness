@@ -9,8 +9,9 @@ ticket_source:
   type: "jira"  # jira | ado
   instance: "https://client.atlassian.net"
   project_key: "PROJ"
-  ai_label: "ai-implement"           # Label that triggers the pipeline
-  quick_label: "ai-quick"            # Label for single-agent quick mode
+  ado_project_name: ""               # (ADO only) Actual ADO project name for webhook routing
+  ai_label: "ai-implement"           # Label/tag that triggers the pipeline
+  quick_label: "ai-quick"            # Label/tag for single-agent quick mode
   clarification_status: "Needs Info" # Status set when analyst needs more info
   done_status: "Done"                # Status set on PR creation
   custom_fields:

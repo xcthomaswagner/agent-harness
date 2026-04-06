@@ -61,6 +61,16 @@ class ClientProfile:
         return str(self.ticket_source.get("project_key", ""))
 
     @property
+    def ticket_source_type(self) -> str:
+        """Read ticket_source.type from YAML (jira | ado)."""
+        return str(self.ticket_source.get("type", ""))
+
+    @property
+    def ado_project_name(self) -> str:
+        """Read ticket_source.ado_project_name from YAML."""
+        return str(self.ticket_source.get("ado_project_name", ""))
+
+    @property
     def auto_merge_enabled(self) -> bool:
         """Read autonomy.auto_merge_enabled from YAML (default False)."""
         autonomy = self._data.get("autonomy", {})
@@ -134,6 +144,48 @@ def find_profile_by_project_key(
                 "client_profile_matched_by_project_key",
                 name=path.stem,
                 project_key=project_key,
+            )
+            return ClientProfile(data, path.stem)
+
+    return None
+
+
+def find_profile_by_ado_project(
+    ado_project_name: str, profiles_dir: Path | None = None
+) -> ClientProfile | None:
+    """Find a client profile whose ado_project_name matches (case-insensitive).
+
+    Only considers profiles with ticket_source.type == 'ado'.
+    Returns None if no profile matches.
+    """
+    directory = profiles_dir or PROFILES_DIR
+    if not directory.exists() or not ado_project_name:
+        return None
+
+    target = ado_project_name.strip().lower()
+    if not target:
+        return None
+
+    for path in sorted(directory.glob("*.yaml")):
+        if path.stem == "schema":
+            continue
+        try:
+            data = yaml.safe_load(path.read_text())
+        except yaml.YAMLError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        ts = data.get("ticket_source", {})
+        if not isinstance(ts, dict):
+            continue
+        if str(ts.get("type", "")).lower() != "ado":
+            continue
+        profile_ado_name = str(ts.get("ado_project_name", "")).strip().lower()
+        if profile_ado_name and profile_ado_name == target:
+            logger.info(
+                "client_profile_matched_by_ado_project",
+                name=path.stem,
+                ado_project_name=ado_project_name,
             )
             return ClientProfile(data, path.stem)
 

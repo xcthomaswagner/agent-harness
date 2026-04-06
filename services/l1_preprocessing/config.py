@@ -26,9 +26,10 @@ class Settings(BaseSettings):
     # Fallback bearer auth for Jira Automation (can't compute HMAC)
     jira_bug_webhook_token: str = ""
 
-    # ADO (Phase 2)
+    # ADO
     ado_org_url: str = ""
     ado_pat: str = ""
+    ado_webhook_token: str = ""  # Shared secret for ADO webhook auth (X-ADO-Webhook-Token header)
 
     # GitHub
     github_token: str = ""

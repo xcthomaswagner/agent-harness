@@ -1,0 +1,43 @@
+# Client Profile: XC SF 30in30
+# Azure DevOps project connected to the GitHub test client repo.
+
+client: "XC SF 30in30"
+platform_profile: "salesforce"  # Salesforce-focused project
+
+ticket_source:
+  type: "ado"
+  instance: "https://xc-devops.visualstudio.com"
+  project_key: "XCSF30"
+  ado_project_name: "XC-SF-30in30"  # Actual ADO project name for webhook routing
+  ai_label: "ai-implement"
+  quick_label: "ai-quick"
+  clarification_status: "Needs Info"
+  done_status: "Done"
+  custom_fields: {}
+
+source_control:
+  type: "github"
+  org: "xcthomaswagner"
+  repo: "harness-test-client"
+  default_branch: "main"
+  branch_prefix: "ai/"
+  pr_reviewers: []
+
+ci_pipeline:
+  test_command: "npm test"
+  lint_command: ""
+  build_command: ""
+  e2e_command: ""
+
+test_framework:
+  unit: "jest"
+  integration: ""
+  e2e: ""
+
+client_repo:
+  local_path: "/Users/thomaswagner/Desktop/Projects.nosync/harness-test-client"
+  github_repo: "xcthomaswagner/harness-test-client"
+
+autonomy:
+  auto_merge_enabled: false
+  low_risk_ticket_types: [bug, chore, config, dependency, docs]

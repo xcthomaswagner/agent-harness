@@ -26,6 +26,7 @@ from autonomy_ingest import ingest_jira_bug
 from autonomy_ingest import router as autonomy_router
 from autonomy_jira_bug import normalize_jira_bug
 from autonomy_store import ensure_schema, open_connection, resolve_db_path
+from client_profile import find_profile_by_ado_project
 from config import settings
 from models import TicketPayload
 from pipeline import Pipeline
@@ -195,6 +196,7 @@ async def health() -> dict[str, object]:
         "status": "ok",
         "anthropic_api_key": bool(settings.anthropic_api_key),
         "jira_configured": bool(settings.jira_base_url and settings.jira_api_token),
+        "ado_configured": bool(settings.ado_org_url and settings.ado_pat),
         "webhook_secret": bool(settings.webhook_secret),
         "client_repo": bool(settings.default_client_repo),
     }
@@ -309,10 +311,67 @@ async def ado_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
     x_hub_signature: str | None = Header(default=None, alias="x-hub-signature"),
+    x_ado_webhook_token: str | None = Header(default=None, alias="x-ado-webhook-token"),
 ) -> dict[str, str]:
-    """Receive an Azure DevOps Service Hook webhook and enqueue for processing."""
-    payload = await _validate_and_parse_webhook(request, x_hub_signature)
+    """Receive an Azure DevOps Service Hook webhook and enqueue for processing.
+
+    Auth: accepts HMAC signature (x-hub-signature) OR a shared token
+    (X-ADO-Webhook-Token). Rejects if neither succeeds and at least one
+    secret is configured.
+    """
+    body = await request.body()
+
+    # --- Auth: dual-mode (HMAC or token) ---
+    auth_ok = False
+    if settings.webhook_secret and x_hub_signature:
+        expected = hmac.new(
+            settings.webhook_secret.encode(), body, hashlib.sha256
+        ).hexdigest()
+        sig_value = x_hub_signature.removeprefix("sha256=")
+        if hmac.compare_digest(expected, sig_value):
+            auth_ok = True
+    if (
+        not auth_ok
+        and settings.ado_webhook_token
+        and x_ado_webhook_token
+        and hmac.compare_digest(x_ado_webhook_token, settings.ado_webhook_token)
+    ):
+        auth_ok = True
+    if not auth_ok:
+        if not settings.webhook_secret and not settings.ado_webhook_token:
+            # Neither secret configured — open access (local dev)
+            auth_ok = True
+        else:
+            raise HTTPException(status_code=401, detail="Invalid ADO webhook auth")
+
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON body: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Webhook payload must be a JSON object")
+
+    # --- Normalize the ADO payload ---
     ticket = _get_ado_adapter().normalize(payload)
+
+    # --- Profile resolution + ticket ID remapping ---
+    resource = payload.get("resource", {})
+    work_item = resource.get("revision", resource)
+    fields = work_item.get("fields", {})
+    ado_project = fields.get("System.TeamProject", "")
+    work_item_id = str(work_item.get("id", resource.get("workItemId", "")))
+
+    profile = find_profile_by_ado_project(ado_project) if ado_project else None
+    if profile:
+        # Remap ticket ID to use the profile's project_key prefix
+        ticket.id = f"{profile.project_key}-{work_item_id}"
+
+    # --- Tag check: skip if ai_label tag is not present ---
+    tags_raw = (fields.get("System.Tags", "") or "").lower()
+    ai_label = profile.ai_label if profile else "ai-implement"
+    if ai_label.lower() not in tags_raw:
+        reason = f"Tag '{ai_label}' not found"
+        return {"status": "skipped", "ticket_id": ticket.id, "reason": reason}
 
     trace_id = generate_trace_id()
     logger.info("ado_webhook_received", ticket_id=ticket.id, ticket_type=ticket.ticket_type)

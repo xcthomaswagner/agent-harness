@@ -101,17 +101,35 @@ async def test_jira_webhook_skips_signature_when_no_secret() -> None:
 # --- ADO Webhook ---
 
 
-async def test_ado_webhook_accepts_valid_payload() -> None:
-    payload = {
+def _ado_payload(
+    *,
+    work_item_id: int = 10,
+    title: str = "ADO test task",
+    project: str = "TestProject",
+    tags: str = "ai-implement",
+    work_item_type: str = "Task",
+) -> dict[str, object]:
+    """Build a minimal ADO Service Hook payload for tests."""
+    return {
         "eventType": "workitem.updated",
         "resource": {
-            "id": 10,
-            "fields": {
-                "System.WorkItemType": "Task",
-                "System.Title": "ADO test task",
+            "workItemId": work_item_id,
+            "revision": {
+                "id": work_item_id,
+                "fields": {
+                    "System.WorkItemType": work_item_type,
+                    "System.Title": title,
+                    "System.TeamProject": project,
+                    "System.Tags": tags,
+                },
             },
         },
     }
+
+
+async def test_ado_webhook_accepts_valid_payload() -> None:
+    """When no auth secrets are configured, webhook is accepted (local dev)."""
+    payload = _ado_payload(tags="ai-implement")
     async with await _make_client() as client:
         response = await client.post("/webhooks/ado", json=payload)
         assert response.status_code == 202
@@ -126,6 +144,116 @@ async def test_ado_webhook_rejects_non_json() -> None:
             headers={"Content-Type": "application/json"},
         )
         assert response.status_code == 422
+
+
+async def test_ado_webhook_accepts_token_header() -> None:
+    """ADO webhook accepts X-ADO-Webhook-Token header."""
+    payload = _ado_payload(tags="ai-implement")
+    body = json.dumps(payload).encode()
+
+    with patch("main.settings") as mock_settings:
+        mock_settings.webhook_secret = ""
+        mock_settings.ado_webhook_token = "ado-secret-abc"
+        mock_settings.ado_org_url = ""
+        mock_settings.ado_pat = ""
+
+        async with await _make_client() as client:
+            response = await client.post(
+                "/webhooks/ado",
+                content=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-ado-webhook-token": "ado-secret-abc",
+                },
+            )
+            assert response.status_code == 202
+
+
+async def test_ado_webhook_rejects_without_auth() -> None:
+    """When ado_webhook_token is set, requests without auth are rejected."""
+    payload = _ado_payload(tags="ai-implement")
+
+    with patch("main.settings") as mock_settings:
+        mock_settings.webhook_secret = ""
+        mock_settings.ado_webhook_token = "ado-secret-abc"
+
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/ado", json=payload)
+            assert response.status_code == 401
+
+
+async def test_ado_webhook_rejects_wrong_token() -> None:
+    """Wrong token value is rejected."""
+    payload = _ado_payload(tags="ai-implement")
+
+    with patch("main.settings") as mock_settings:
+        mock_settings.webhook_secret = ""
+        mock_settings.ado_webhook_token = "ado-secret-abc"
+
+        async with await _make_client() as client:
+            response = await client.post(
+                "/webhooks/ado",
+                json=payload,
+                headers={"x-ado-webhook-token": "wrong-token"},
+            )
+            assert response.status_code == 401
+
+
+async def test_ado_webhook_skips_when_no_ai_tag() -> None:
+    """Work items without the ai-implement tag are skipped."""
+    payload = _ado_payload(tags="sprint-7; enhancement")
+    async with await _make_client() as client:
+        response = await client.post("/webhooks/ado", json=payload)
+        assert response.status_code == 202
+        data = response.json()
+        assert data["status"] == "skipped"
+        assert "ai-implement" in data["reason"]
+
+
+async def test_ado_webhook_processes_when_ai_tag_present() -> None:
+    """Work items with the ai-implement tag are accepted."""
+    payload = _ado_payload(tags="ai-implement; sprint-7")
+    async with await _make_client() as client:
+        response = await client.post("/webhooks/ado", json=payload)
+        assert response.status_code == 202
+        assert response.json()["status"] == "accepted"
+
+
+async def test_ado_webhook_remaps_ticket_id(tmp_path: Path) -> None:
+    """When a matching ADO profile exists, ticket ID is remapped to project_key prefix."""
+    profiles_dir = tmp_path / "profiles"
+    profiles_dir.mkdir()
+    (profiles_dir / "xcsf30.yaml").write_text(
+        "client: XCSF\n"
+        "ticket_source:\n"
+        "  type: ado\n"
+        "  project_key: XCSF30\n"
+        "  ado_project_name: XC-SF-30in30\n"
+        "  ai_label: ai-implement\n"
+    )
+
+    payload = _ado_payload(work_item_id=123, project="XC-SF-30in30", tags="ai-implement")
+
+    with patch("main.find_profile_by_ado_project") as mock_find:
+        from client_profile import ClientProfile
+
+        profile_data = {
+            "client": "XCSF",
+            "ticket_source": {
+                "type": "ado",
+                "project_key": "XCSF30",
+                "ado_project_name": "XC-SF-30in30",
+                "ai_label": "ai-implement",
+            },
+        }
+        mock_find.return_value = ClientProfile(profile_data, name="xcsf30")
+
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/ado", json=payload)
+            assert response.status_code == 202
+            data = response.json()
+            assert data["status"] == "accepted"
+            assert data["ticket_id"] == "XCSF30-123"
 
 
 # --- Manual Process Ticket ---

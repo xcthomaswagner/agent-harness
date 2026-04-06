@@ -8,6 +8,7 @@ import pytest
 
 from client_profile import (
     ClientProfile,
+    find_profile_by_ado_project,
     find_profile_by_repo,
     list_profiles,
     load_profile,
@@ -165,6 +166,88 @@ class TestFindProfileByRepo:
 
     def test_find_profile_by_repo_empty_input(self, profiles_dir: Path) -> None:
         assert find_profile_by_repo("", profiles_dir=profiles_dir) is None
+
+
+class TestAdoProperties:
+    def test_ticket_source_type(self) -> None:
+        data = {"ticket_source": {"type": "ado"}}
+        profile = ClientProfile(data)
+        assert profile.ticket_source_type == "ado"
+
+    def test_ticket_source_type_defaults_empty(self) -> None:
+        profile = ClientProfile({})
+        assert profile.ticket_source_type == ""
+
+    def test_ado_project_name(self) -> None:
+        data = {"ticket_source": {"type": "ado", "ado_project_name": "XC-SF-30in30"}}
+        profile = ClientProfile(data)
+        assert profile.ado_project_name == "XC-SF-30in30"
+
+    def test_ado_project_name_defaults_empty(self) -> None:
+        profile = ClientProfile({})
+        assert profile.ado_project_name == ""
+
+
+class TestFindProfileByAdoProject:
+    def test_matches(self, profiles_dir: Path) -> None:
+        (profiles_dir / "xcsf30.yaml").write_text(
+            "client: XCSF\n"
+            "ticket_source:\n"
+            "  type: ado\n"
+            "  project_key: XCSF30\n"
+            "  ado_project_name: XC-SF-30in30\n"
+        )
+        profile = find_profile_by_ado_project("XC-SF-30in30", profiles_dir=profiles_dir)
+        assert profile is not None
+        assert profile.name == "xcsf30"
+        assert profile.project_key == "XCSF30"
+
+    def test_case_insensitive(self, profiles_dir: Path) -> None:
+        (profiles_dir / "xcsf30.yaml").write_text(
+            "client: XCSF\n"
+            "ticket_source:\n"
+            "  type: ado\n"
+            "  project_key: XCSF30\n"
+            "  ado_project_name: XC-SF-30in30\n"
+        )
+        profile = find_profile_by_ado_project("xc-sf-30in30", profiles_dir=profiles_dir)
+        assert profile is not None
+        assert profile.name == "xcsf30"
+
+    def test_skips_jira_profiles(self, profiles_dir: Path) -> None:
+        (profiles_dir / "jira_client.yaml").write_text(
+            "client: Jira Client\n"
+            "ticket_source:\n"
+            "  type: jira\n"
+            "  project_key: JIRA\n"
+            "  ado_project_name: XC-SF-30in30\n"  # Even if this field exists
+        )
+        profile = find_profile_by_ado_project("XC-SF-30in30", profiles_dir=profiles_dir)
+        assert profile is None
+
+    def test_returns_none_when_no_match(self, profiles_dir: Path) -> None:
+        (profiles_dir / "xcsf30.yaml").write_text(
+            "client: XCSF\n"
+            "ticket_source:\n"
+            "  type: ado\n"
+            "  project_key: XCSF30\n"
+            "  ado_project_name: XC-SF-30in30\n"
+        )
+        profile = find_profile_by_ado_project("NonexistentProject", profiles_dir=profiles_dir)
+        assert profile is None
+
+    def test_returns_none_for_empty_input(self, profiles_dir: Path) -> None:
+        assert find_profile_by_ado_project("", profiles_dir=profiles_dir) is None
+
+    def test_skips_schema_yaml(self, profiles_dir: Path) -> None:
+        (profiles_dir / "schema.yaml").write_text(
+            "client: Schema\n"
+            "ticket_source:\n"
+            "  type: ado\n"
+            "  ado_project_name: XC-SF-30in30\n"
+        )
+        profile = find_profile_by_ado_project("XC-SF-30in30", profiles_dir=profiles_dir)
+        assert profile is None
 
 
 class TestAutonomyAccessors:
