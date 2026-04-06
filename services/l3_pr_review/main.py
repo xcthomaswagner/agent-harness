@@ -186,9 +186,10 @@ async def _forward_autonomy_event(event: dict[str, Any]) -> None:
     Short-circuits (without backlog) if L1_INTERNAL_API_TOKEN is unset.
     """
     if not L1_INTERNAL_API_TOKEN:
-        logger.info(
+        logger.warning(
             "l1_autonomy_event_forward_skipped",
-            reason="L1_INTERNAL_API_TOKEN unset",
+            reason="L1_INTERNAL_API_TOKEN unset — autonomy events are being dropped. "
+            "Set L1_INTERNAL_API_TOKEN to enable forwarding.",
             event_type=event.get("event_type"),
         )
         return
@@ -257,9 +258,10 @@ async def _forward_human_issue(payload: dict[str, Any]) -> None:
     Short-circuits (without backlog) if L1_INTERNAL_API_TOKEN is unset.
     """
     if not L1_INTERNAL_API_TOKEN:
-        logger.info(
+        logger.warning(
             "l1_human_issue_forward_skipped",
-            reason="L1_INTERNAL_API_TOKEN unset",
+            reason="L1_INTERNAL_API_TOKEN unset — human review issues are being dropped. "
+            "Set L1_INTERNAL_API_TOKEN to enable forwarding.",
             event_type=payload.get("event_type"),
         )
         return
@@ -370,9 +372,10 @@ async def _forward_github_defect(payload: dict[str, Any]) -> None:
     Short-circuits (without backlog) if L1_INTERNAL_API_TOKEN is unset.
     """
     if not L1_INTERNAL_API_TOKEN:
-        logger.info(
+        logger.warning(
             "l1_github_defect_forward_skipped",
-            reason="L1_INTERNAL_API_TOKEN unset",
+            reason="L1_INTERNAL_API_TOKEN unset — GitHub defect links are being dropped. "
+            "Set L1_INTERNAL_API_TOKEN to enable forwarding.",
             issue_number=payload.get("issue_number"),
         )
         return

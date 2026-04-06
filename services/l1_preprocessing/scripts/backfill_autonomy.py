@@ -300,7 +300,7 @@ def run_backfill(
                     merged_at=r.merged_at,
                     merged=r.merged,
                     escalated=r.escalated,
-                    first_pass_accepted=0,
+                    first_pass_accepted=None,  # unknown — excluded from FPA metric
                     backfilled=1,
                 )
                 upsert_pr_run(conn, upsert)

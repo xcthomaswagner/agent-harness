@@ -58,6 +58,37 @@ def _seed_pr(
     )
 
 
+def test_backfilled_rows_excluded_from_fpa(tmp_path: Path) -> None:
+    """Backfilled PRs (first_pass_accepted unknown) must not drag down FPA.
+
+    Regression: historically the backfill hard-coded first_pass_accepted=0
+    and metrics included them, tanking the dashboard to 0% immediately.
+    """
+    conn = _mk_conn(tmp_path / "a.db")
+    try:
+        # 1 live PR with first_pass_accepted=1
+        _seed_pr(conn, ticket_id="RW-1", pr_number=1, head_sha="s1",
+                 first_pass_accepted=1)
+        # 5 backfilled PRs (first_pass_accepted doesn't matter)
+        for i in range(5):
+            upsert_pr_run(conn, PrRunUpsert(
+                ticket_id=f"RW-BF-{i}",
+                pr_number=100 + i,
+                repo_full_name="acme/widgets",
+                head_sha=f"bf{i}",
+                client_profile="rockwell",
+                opened_at="2026-04-01T12:00:00+00:00",
+                backfilled=1,
+            ))
+        m = compute_profile_metrics(conn, "rockwell", 30)
+    finally:
+        conn.close()
+    # FPA computed from live rows only → 1/1 = 100%
+    assert m["first_pass_acceptance_rate"] == 1.0
+    # But sample_size includes all for totals
+    assert m["sample_size"] == 6
+
+
 def test_self_review_catch_none_when_no_humans(tmp_path: Path) -> None:
     conn = _mk_conn(tmp_path / "a.db")
     try:

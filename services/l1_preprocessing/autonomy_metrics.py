@@ -110,9 +110,14 @@ def compute_profile_metrics(
     rows = list_pr_runs(conn, client_profile=profile, since_iso=cutoff)
     sample_size = len(rows)
     merged_count = sum(1 for r in rows if int(r["merged"]) == 1)
-    first_pass_count = sum(1 for r in rows if int(r["first_pass_accepted"]) == 1)
+    # Exclude backfilled rows from FPA — their first_pass_accepted is unknown,
+    # not a confirmed failure. Including them would systematically bias the
+    # dashboard toward conservative mode.
+    live_rows = [r for r in rows if not int(r["backfilled"])]
+    live_count = len(live_rows)
+    first_pass_count = sum(1 for r in live_rows if int(r["first_pass_accepted"]) == 1)
     first_pass_acceptance_rate = (
-        round(first_pass_count / sample_size, 3) if sample_size else 0.0
+        round(first_pass_count / live_count, 3) if live_count else 0.0
     )
 
     pr_run_ids = [int(r["id"]) for r in rows]

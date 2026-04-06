@@ -407,10 +407,13 @@ def ingest_jira_bug(
 
     Returns a dict with status: 'ignored' | 'deferred' | 'accepted'.
     """
-    if bug.issuetype.lower() != "bug":
+    # Accept common defect issue type names across Jira configurations.
+    # Projects may use "Bug", "Defect", custom types like "Production Bug", etc.
+    _defect_types = {"bug", "defect", "incident", "production bug", "production defect"}
+    if bug.issuetype.lower() not in _defect_types:
         return {
             "status": "ignored",
-            "reason": "not_a_bug",
+            "reason": "not_a_defect_type",
             "issuetype": bug.issuetype,
         }
     if not bug.candidate_parent_keys:

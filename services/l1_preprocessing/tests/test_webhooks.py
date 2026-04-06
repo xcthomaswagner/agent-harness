@@ -626,4 +626,4 @@ class TestJiraBugWebhook:
         assert r.status_code == 202
         body = r.json()
         assert body["status"] == "ignored"
-        assert body["reason"] == "not_a_bug"
+        assert body["reason"] == "not_a_defect_type"

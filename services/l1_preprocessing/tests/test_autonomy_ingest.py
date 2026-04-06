@@ -168,6 +168,21 @@ def test_apply_event_changes_requested_sets_fpa_zero(conn: Any) -> None:
 def test_apply_event_approved_after_changes_keeps_zero(conn: Any) -> None:
     apply_event(conn, _base_event(event_type="pr_opened"), "harness-test")
     apply_event(conn, _base_event(event_type="review_changes_requested"), "harness-test")
+    # In production, L3 also creates a human_review issue with
+    # is_code_change_request=1. Simulate that so the approval path detects
+    # the explicit downgrade.
+    from autonomy_store import insert_review_issue
+    pr_run_id = conn.execute(
+        "SELECT id FROM pr_runs WHERE head_sha = 'abc123'"
+    ).fetchone()["id"]
+    insert_review_issue(
+        conn,
+        pr_run_id=pr_run_id,
+        source="human_review",
+        external_id="cr-1",
+        summary="changes requested",
+        is_code_change_request=1,
+    )
     apply_event(conn, _base_event(event_type="review_approved"), "harness-test")
     row = conn.execute(
         "SELECT * FROM pr_runs WHERE repo_full_name=? AND pr_number=? AND head_sha=?",
@@ -1151,7 +1166,7 @@ class TestIngestJiraBug:
         finally:
             conn.close()
 
-    def test_ignores_when_not_a_bug(self, tmp_path: Path) -> None:
+    def test_ignores_when_not_a_defect_type(self, tmp_path: Path) -> None:
         from autonomy_ingest import ingest_jira_bug
         db_path = tmp_path / "a.db"
         bug = self._make_bug(issuetype="Story")
@@ -1162,7 +1177,21 @@ class TestIngestJiraBug:
         finally:
             conn.close()
         assert result["status"] == "ignored"
-        assert result["reason"] == "not_a_bug"
+        assert result["reason"] == "not_a_defect_type"
+
+    def test_accepts_defect_issuetype(self, tmp_path: Path) -> None:
+        """Jira projects using 'Defect' instead of 'Bug' must be accepted."""
+        from autonomy_ingest import ingest_jira_bug
+        db_path = tmp_path / "a.db"
+        bug = self._make_bug(issuetype="Defect")
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            result = ingest_jira_bug(conn, bug)
+        finally:
+            conn.close()
+        # Will be deferred (no matching merged PR) but not ignored
+        assert result["status"] in ("deferred", "accepted")
 
     def test_ignores_when_no_candidates(self, tmp_path: Path) -> None:
         from autonomy_ingest import ingest_jira_bug
