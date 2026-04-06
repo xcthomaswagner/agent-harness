@@ -366,11 +366,13 @@ async def ado_webhook(
         # Remap ticket ID to use the profile's project_key prefix
         ticket.id = f"{profile.project_key}-{work_item_id}"
 
-    # --- Tag check: skip if ai_label tag is not present ---
-    tags_raw = (fields.get("System.Tags", "") or "").lower()
-    ai_label = profile.ai_label if profile else "ai-implement"
-    if ai_label.lower() not in tags_raw:
-        reason = f"Tag '{ai_label}' not found"
+    # --- Tag check: skip if neither ai_label nor quick_label is present ---
+    # Use the already-tokenized labels from the adapter (exact match, not substring)
+    ticket_labels_lower = {lbl.lower() for lbl in ticket.labels}
+    ai_label = (profile.ai_label if profile else "ai-implement").lower()
+    quick_label = (profile.quick_label if profile else "ai-quick").lower()
+    if ai_label not in ticket_labels_lower and quick_label not in ticket_labels_lower:
+        reason = f"Neither '{ai_label}' nor '{quick_label}' tag found"
         return {"status": "skipped", "ticket_id": ticket.id, "reason": reason}
 
     trace_id = generate_trace_id()
@@ -634,7 +636,11 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
         log.exception("worktree_consolidation_failed", worktree=worktree_path)
         # Continue — don't block Jira updates because consolidation failed
 
-    adapter = _get_jira_adapter()
+    # Route to the correct adapter based on ticket source
+    if payload.source == "ado":
+        adapter: JiraAdapter | AdoAdapter = _get_ado_adapter()
+    else:
+        adapter = _get_jira_adapter()
 
     try:
         if payload.pr_url:
@@ -647,14 +653,15 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
             await adapter.write_comment(payload.ticket_id, comment)
 
         # Upload final screenshot if it exists in the worktree
+        # Note: ADO adapter doesn't have upload_attachment yet — skip for ADO
         screenshot_path = Path(worktree_path) / ".harness" / "screenshots" / "final.png"
-        if screenshot_path.exists():
+        if screenshot_path.exists() and isinstance(adapter, JiraAdapter):
             await adapter.upload_attachment(
                 payload.ticket_id,
                 str(screenshot_path),
                 filename=f"{payload.ticket_id}-implementation.png",
             )
-            log.info("screenshot_uploaded_to_jira", path=str(screenshot_path))
+            log.info("screenshot_uploaded", path=str(screenshot_path))
 
         if payload.status == "complete":
             await adapter.transition_status(payload.ticket_id, "Done")
@@ -663,7 +670,6 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
             label = "needs-human" if payload.status == "escalated" else "partial-implementation"
             await adapter.add_label(payload.ticket_id, label)
 
-            # Auto-file failed units as Jira sub-tasks
             for unit in payload.failed_units:
                 sub_comment = (
                     f"*AI Pipeline — Failed Unit: {unit.unit_id}*\n\n"

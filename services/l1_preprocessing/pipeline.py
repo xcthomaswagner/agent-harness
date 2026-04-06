@@ -16,6 +16,7 @@ from typing import Any
 
 import structlog
 
+from adapters.ado_adapter import AdoAdapter
 from adapters.jira_adapter import JiraAdapter
 from analyst import TicketAnalyst
 from client_profile import ClientProfile, find_profile_by_project_key, load_profile
@@ -30,6 +31,7 @@ from models import (
     EnrichedTicket,
     InfoRequest,
     TicketPayload,
+    TicketSource,
     classify_analyst_output,
 )
 from tracer import append_trace, generate_trace_id
@@ -48,11 +50,13 @@ class Pipeline:
         settings: Settings,
         analyst: TicketAnalyst | None = None,
         jira_adapter: JiraAdapter | None = None,
+        ado_adapter: AdoAdapter | None = None,
         figma_extractor: FigmaExtractor | None = None,
     ) -> None:
         self._settings = settings
         self._analyst = analyst or TicketAnalyst(settings=settings)
         self._jira_adapter = jira_adapter or JiraAdapter(settings=settings)
+        self._ado_adapter = ado_adapter or AdoAdapter(settings=settings)
         self._figma_extractor = figma_extractor or FigmaExtractor(
             api_token=settings.figma_api_token
         )
@@ -60,12 +64,13 @@ class Pipeline:
 
     def _get_adapter(
         self, ticket: EnrichedTicket | InfoRequest | DecompositionPlan
-    ) -> JiraAdapter:
+    ) -> JiraAdapter | AdoAdapter:
         """Return the appropriate adapter for write-back operations.
 
-        Currently only Jira is supported. ADO adapter will be added when
-        the pipeline routes ADO tickets through here.
+        Routes to JiraAdapter or AdoAdapter based on ticket.source.
         """
+        if ticket.source == TicketSource.ADO:
+            return self._ado_adapter
         return self._jira_adapter
 
     async def process(
@@ -152,9 +157,15 @@ class Pipeline:
 
         dest_dir = tempfile.mkdtemp(prefix=f"attachments-{ticket.id}-")
         self._temp_dirs.append(dest_dir)
-        adapter = self._jira_adapter  # TODO: route by ticket.source for ADO
-        updated = await adapter.download_image_attachments(ticket.attachments, dest_dir)
-        ticket.attachments = updated
+        # Route attachment download by source — ADO adapter lacks this method
+        # so we skip for ADO tickets (attachments stay as URL-only references)
+        if ticket.source == TicketSource.ADO:
+            log.info("attachment_download_skipped_ado")
+        else:
+            updated = await self._jira_adapter.download_image_attachments(
+                ticket.attachments, dest_dir
+            )
+            ticket.attachments = updated
 
         downloaded = sum(1 for a in updated if a.local_path)
         log.info(
@@ -230,7 +241,7 @@ class Pipeline:
                 log.warning("status_transition_failed", target="In Progress")
                 append_trace(
                     enriched.id, tid, "pipeline", "error",
-                    error_type="JiraTransitionFailed",
+                    error_type="TransitionFailed",
                     error_message=str(exc)[:500],
                 )
 
@@ -245,12 +256,13 @@ class Pipeline:
             comment = "\n\n".join(parts)
             try:
                 await adapter.write_comment(enriched.id, comment)
-                log.info("enrichment_written_to_jira")
+                log.info("enrichment_written_to_ticket_source")
             except Exception as exc:
                 log.warning("enrichment_comment_failed", error=str(exc)[:200])
 
         ticket_path = self._write_ticket_json(enriched)
-        pipeline_mode = "quick" if "ai-quick" in enriched.labels else "multi"
+        quick_label = profile.quick_label if profile else "ai-quick"
+        pipeline_mode = "quick" if quick_label in enriched.labels else "multi"
 
         client_repo = (
             (profile.client_repo_path if profile else "")
@@ -281,7 +293,7 @@ class Pipeline:
     async def _handle_info_request(
         self, info_req: InfoRequest, log: Any
     ) -> dict[str, Any]:
-        """Handle an info request — post questions to Jira, change status."""
+        """Handle an info request — post questions to ticket source, change status."""
         questions_text = "\n".join(f"- {q}" for q in info_req.questions)
         comment = (
             f"*AI Analyst — Information Needed:*\n\n{questions_text}"
