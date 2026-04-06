@@ -161,13 +161,13 @@ class Pipeline:
         # so we skip for ADO tickets (attachments stay as URL-only references)
         if ticket.source == TicketSource.ADO:
             log.info("attachment_download_skipped_ado")
+            downloaded = 0
         else:
             updated = await self._jira_adapter.download_image_attachments(
                 ticket.attachments, dest_dir
             )
             ticket.attachments = updated
-
-        downloaded = sum(1 for a in updated if a.local_path)
+            downloaded = sum(1 for a in updated if a.local_path)
         log.info(
             "image_attachments_downloaded",
             downloaded=downloaded,

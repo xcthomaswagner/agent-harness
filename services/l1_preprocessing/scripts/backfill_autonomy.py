@@ -300,7 +300,11 @@ def run_backfill(
                     merged_at=r.merged_at,
                     merged=r.merged,
                     escalated=r.escalated,
-                    first_pass_accepted=None,  # unknown — excluded from FPA metric
+                    # first_pass_accepted intentionally omitted (defaults to 0
+                    # via schema). The value is unknown for historical PRs, not a
+                    # confirmed failure. autonomy_metrics.py excludes backfilled=1
+                    # rows from FPA computation so the stored 0 doesn't affect
+                    # the dashboard.
                     backfilled=1,
                 )
                 upsert_pr_run(conn, upsert)

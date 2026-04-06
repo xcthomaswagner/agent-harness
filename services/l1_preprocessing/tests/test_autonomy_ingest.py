@@ -166,23 +166,14 @@ def test_apply_event_changes_requested_sets_fpa_zero(conn: Any) -> None:
 
 
 def test_apply_event_approved_after_changes_keeps_zero(conn: Any) -> None:
+    """review_changes_requested → review_approved: fpa stays 0.
+
+    apply_event now inserts a sentinel human_review row on
+    changes_requested so the approval path detects the downgrade
+    even when L3 doesn't forward a human issue (empty review body).
+    """
     apply_event(conn, _base_event(event_type="pr_opened"), "harness-test")
     apply_event(conn, _base_event(event_type="review_changes_requested"), "harness-test")
-    # In production, L3 also creates a human_review issue with
-    # is_code_change_request=1. Simulate that so the approval path detects
-    # the explicit downgrade.
-    from autonomy_store import insert_review_issue
-    pr_run_id = conn.execute(
-        "SELECT id FROM pr_runs WHERE head_sha = 'abc123'"
-    ).fetchone()["id"]
-    insert_review_issue(
-        conn,
-        pr_run_id=pr_run_id,
-        source="human_review",
-        external_id="cr-1",
-        summary="changes requested",
-        is_code_change_request=1,
-    )
     apply_event(conn, _base_event(event_type="review_approved"), "harness-test")
     row = conn.execute(
         "SELECT * FROM pr_runs WHERE repo_full_name=? AND pr_number=? AND head_sha=?",
@@ -1733,6 +1724,8 @@ def test_review_approved_keeps_fpa_1_when_no_followup_commit(
 def test_review_approved_after_changes_requested_keeps_fpa_0(
     conn: Any,
 ) -> None:
+    """Duplicates the Phase 1 test with timestamps. Sentinel row created
+    by apply_event on changes_requested ensures fpa stays 0."""
     apply_event(
         conn,
         _base_event(event_type="pr_opened", event_at="2026-04-05T11:00:00+00:00"),
@@ -1745,19 +1738,6 @@ def test_review_approved_after_changes_requested_keeps_fpa_0(
             event_at="2026-04-05T12:00:00+00:00",
         ),
         "harness-test",
-    )
-    # In production, L3 also creates a human_review issue with
-    # is_code_change_request=1. Simulate that here so the approval
-    # path can detect the explicit downgrade.
-    pr_run_id = conn.execute(
-        "SELECT id FROM pr_runs WHERE head_sha = 'abc123'"
-    ).fetchone()["id"]
-    _insert_human_comment(
-        conn,
-        pr_run_id=pr_run_id,
-        external_id="changes-req-1",
-        created_at="2026-04-05T12:00:00+00:00",
-        is_code_change_request=1,
     )
     apply_event(
         conn,

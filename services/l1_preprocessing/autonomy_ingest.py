@@ -247,6 +247,7 @@ def apply_event(
     # the follow-up-commit signal (deferred until after the pr_run upsert).
     approval_pending = False
     prior_fpa_was_downgraded = False
+    _changes_req_sentinel = False
     if et == "pr_opened":
         upsert.opened_at = event.event_at
     elif et == "pr_synchronized":
@@ -287,6 +288,10 @@ def apply_event(
         approval_pending = True
     elif et == "review_changes_requested":
         upsert.first_pass_accepted = 0
+        # Record a sentinel human_review issue so the approval path can
+        # always detect this downgrade, even when L3 doesn't forward a
+        # human issue (e.g., changes_requested with an empty review body).
+        _changes_req_sentinel = True
     elif et == "review_comment":
         pass
     elif et == "pr_merged":
@@ -294,6 +299,27 @@ def apply_event(
         upsert.merged_at = event.merged_at or event.event_at
 
     pr_run_id = upsert_pr_run(conn, upsert)
+
+    # Insert a sentinel human_review row for changes_requested so the
+    # approval path can always detect the downgrade, even when L3 doesn't
+    # forward a human issue (empty review body). Idempotent via external_id.
+    if _changes_req_sentinel:
+        ext_id = f"changes-req-{event.review_id or event.event_at}"
+        existing_sentinel = conn.execute(
+            "SELECT 1 FROM review_issues WHERE pr_run_id = ? "
+            "AND source = 'human_review' AND external_id = ?",
+            (pr_run_id, ext_id),
+        ).fetchone()
+        if existing_sentinel is None:
+            insert_review_issue(
+                conn,
+                pr_run_id=pr_run_id,
+                source="human_review",
+                external_id=ext_id,
+                summary="changes_requested",
+                is_code_change_request=1,
+                is_valid=1,
+            )
 
     # Record commit history for follow-up-commit attribution. pr_opened and
     # pr_synchronized both carry the current head_sha + a timestamp; insert
