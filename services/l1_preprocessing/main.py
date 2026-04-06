@@ -31,6 +31,7 @@ from models import TicketPayload
 from pipeline import Pipeline
 from trace_dashboard import router as trace_router
 from tracer import append_trace, consolidate_worktree_logs, generate_trace_id
+from unified_dashboard import router as unified_router
 
 logger = structlog.get_logger()
 
@@ -51,6 +52,7 @@ app = FastAPI(
     description="Receives Jira/ADO webhooks, enriches tickets, dispatches to Agent Teams.",
     version="0.1.0",
 )
+app.include_router(unified_router)
 app.include_router(trace_router)
 app.include_router(autonomy_router)
 app.include_router(autonomy_dashboard_router)

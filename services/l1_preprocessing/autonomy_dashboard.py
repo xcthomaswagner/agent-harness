@@ -892,6 +892,7 @@ def autonomy_dashboard(
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
   <h1>Autonomy Metrics{title_suffix}</h1>
   <div class="meta">
+    <a href="/dashboard">Dashboard</a> <span class="sep">|</span>
     <a href="/traces">Traces</a> <span class="sep">|</span>
     <a href="/autonomy">Autonomy</a>
   </div>
