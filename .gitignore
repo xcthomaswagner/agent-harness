@@ -47,8 +47,10 @@ htmlcov/
 .ruff_cache/
 .benchmarks/
 
-# Trace data (runtime artifacts, not source code)
+# Runtime data (not source code)
 data/logs/
+data/*.db
+data/*.json
 
 # Binary documents (deliverables, not source)
 *.docx
