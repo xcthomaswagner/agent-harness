@@ -49,5 +49,5 @@ explicit_package_bases = true
 mypy_path = [".", "../l1_preprocessing", ".."]
 
 [[tool.mypy.overrides]]
-module = ["structlog.*", "shared.*", "tracer"]
+module = ["structlog.*", "shared.*", "tracer", "pydantic_settings.*"]
 ignore_missing_imports = true
