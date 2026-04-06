@@ -255,10 +255,34 @@ def apply_event(
     elif et == "review_approved":
         upsert.approved_at = event.event_at
         if existing is not None:
-            # If we've previously downgraded to 0, keep it there.
-            prior_fpa = int(existing["first_pass_accepted"])
-            was_updated = existing["updated_at"] != existing["created_at"]
-            if prior_fpa == 0 and was_updated:
+            # Detect if a prior review_changes_requested explicitly
+            # downgraded this PR. Two reliable signals:
+            # 1. A review_issues row with is_code_change_request=1
+            #    (created by the L3 human-issues endpoint when it
+            #    forwards the changes_requested event).
+            # 2. The pr_run's first_pass_accepted is 0 AND there
+            #    are NO prior review_approved events (approved_at
+            #    is empty or matches this event's timestamp).
+            #    If approved_at is already set to a *different*
+            #    timestamp, a prior approval happened — meaning fpa=0
+            #    was set by an intervening changes_requested.
+            #
+            # Don't use updated_at — pr_synchronized also bumps it.
+            changes_req_rows = conn.execute(
+                "SELECT 1 FROM review_issues WHERE pr_run_id = ? "
+                "AND source = 'human_review' AND is_code_change_request = 1 "
+                "LIMIT 1",
+                (int(existing["id"]),),
+            ).fetchone()
+            if changes_req_rows is not None:
+                prior_fpa_was_downgraded = True
+            elif (
+                int(existing["first_pass_accepted"]) == 0
+                and existing["approved_at"]
+                and existing["approved_at"] != event.event_at
+            ):
+                # fpa=0 + a prior approval timestamp that isn't this one
+                # → a changes_requested intervened between approvals
                 prior_fpa_was_downgraded = True
         approval_pending = True
     elif et == "review_changes_requested":

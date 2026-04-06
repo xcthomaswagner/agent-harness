@@ -1542,13 +1542,14 @@ def _insert_human_comment(
     pr_run_id: int,
     external_id: str,
     created_at: str,
+    is_code_change_request: int = 0,
 ) -> int:
     """Insert a human_review review_issues row with an explicit created_at."""
     cur = conn.execute(
         "INSERT INTO review_issues (pr_run_id, source, external_id, "
         "created_at, summary, is_code_change_request) "
-        "VALUES (?, 'human_review', ?, ?, ?, 0)",
-        (pr_run_id, external_id, created_at, "comment"),
+        "VALUES (?, 'human_review', ?, ?, ?, ?)",
+        (pr_run_id, external_id, created_at, "comment", is_code_change_request),
     )
     conn.commit()
     return int(cur.lastrowid or 0)
@@ -1716,6 +1717,19 @@ def test_review_approved_after_changes_requested_keeps_fpa_0(
         ),
         "harness-test",
     )
+    # In production, L3 also creates a human_review issue with
+    # is_code_change_request=1. Simulate that here so the approval
+    # path can detect the explicit downgrade.
+    pr_run_id = conn.execute(
+        "SELECT id FROM pr_runs WHERE head_sha = 'abc123'"
+    ).fetchone()["id"]
+    _insert_human_comment(
+        conn,
+        pr_run_id=pr_run_id,
+        external_id="changes-req-1",
+        created_at="2026-04-05T12:00:00+00:00",
+        is_code_change_request=1,
+    )
     apply_event(
         conn,
         _base_event(
@@ -1728,6 +1742,38 @@ def test_review_approved_after_changes_requested_keeps_fpa_0(
         "SELECT * FROM pr_runs WHERE head_sha = 'abc123'"
     ).fetchone()
     assert row["first_pass_accepted"] == 0
+
+
+def test_opened_synchronized_approved_keeps_fpa_1(conn: Any) -> None:
+    """pr_opened → pr_synchronized → review_approved with no human comments.
+    The pr_synchronized bumps updated_at but must NOT fool the approval
+    into treating fpa=0 as a prior downgrade. Regression test for the
+    updated_at heuristic false-negative."""
+    apply_event(
+        conn,
+        _base_event(event_type="pr_opened", event_at="2026-04-05T11:00:00+00:00"),
+        "harness-test",
+    )
+    apply_event(
+        conn,
+        _base_event(
+            event_type="pr_synchronized",
+            event_at="2026-04-05T11:30:00+00:00",
+        ),
+        "harness-test",
+    )
+    apply_event(
+        conn,
+        _base_event(
+            event_type="review_approved",
+            event_at="2026-04-05T12:00:00+00:00",
+        ),
+        "harness-test",
+    )
+    row = conn.execute(
+        "SELECT * FROM pr_runs WHERE head_sha = 'abc123'"
+    ).fetchone()
+    assert row["first_pass_accepted"] == 1
 
 
 def test_concurrent_comments_only_latest_flagged(conn: Any) -> None:

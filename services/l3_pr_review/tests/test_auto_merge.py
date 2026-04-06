@@ -66,7 +66,10 @@ def _patch_fetches(
     return mocks
 
 
-async def test_dedup_prevents_second_call(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_dedup_allows_reevaluation_after_non_merge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """approval → dry_run should NOT block the ci_passed re-evaluation."""
     mocks = _patch_fetches(monkeypatch)
     r1 = await evaluate_and_maybe_merge(
         repo_full_name="acme/repo",
@@ -85,8 +88,38 @@ async def test_dedup_prevents_second_call(monkeypatch: pytest.MonkeyPatch) -> No
         trigger_event="ci_passed",
     )
     assert r1["status"] == "dry_run"
+    # Second call re-evaluates (not deduped) because first wasn't "merged"
+    assert r2["status"] == "dry_run"
+    assert mocks["fetch_profile_by_repo"].call_count == 2
+
+
+async def test_dedup_blocks_after_merge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a successful merge, same sha should be deduped."""
+    _patch_fetches(
+        monkeypatch,
+        merge_result=(True, "merged"),
+    )
+    monkeypatch.setenv("AUTO_MERGE_ENABLED", "true")
+    r1 = await evaluate_and_maybe_merge(
+        repo_full_name="acme/repo",
+        pr_number=1,
+        head_sha="abc123",
+        ticket_id="T-1",
+        ticket_type="bug",
+        trigger_event="review_approved",
+    )
+    r2 = await evaluate_and_maybe_merge(
+        repo_full_name="acme/repo",
+        pr_number=1,
+        head_sha="abc123",
+        ticket_id="T-1",
+        ticket_type="bug",
+        trigger_event="ci_passed",
+    )
+    assert r1["status"] == "merged"
     assert r2["status"] == "deduped"
-    assert mocks["fetch_profile_by_repo"].call_count == 1
 
 
 async def test_no_profile_skips(monkeypatch: pytest.MonkeyPatch) -> None:

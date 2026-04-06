@@ -72,14 +72,18 @@ async def get_pr_state(
             if cs_resp.status_code == 200:
                 suites = cs_resp.json().get("check_suites", [])
                 if suites:
-                    # All non-skipped suites must be "success"
-                    meaningful = [
-                        s for s in suites if s.get("status") == "completed"
-                    ]
-                    checks_passed = bool(meaningful) and all(
-                        s.get("conclusion") in ("success", "skipped", "neutral")
-                        for s in meaningful
+                    # ALL suites must be completed — if any are still
+                    # queued or in_progress, checks_passed stays False
+                    # to prevent premature merge decisions.
+                    all_done = all(
+                        s.get("status") == "completed" for s in suites
                     )
+                    if all_done:
+                        checks_passed = all(
+                            s.get("conclusion")
+                            in ("success", "skipped", "neutral")
+                            for s in suites
+                        )
 
         return {
             "author": (pr.get("user") or {}).get("login", ""),

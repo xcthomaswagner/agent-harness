@@ -19,8 +19,8 @@ from github_api import get_pr_state, merge_pr
 
 logger = structlog.get_logger()
 
-# Track recent evaluations to dedup (CI-passed + review-approved firing together)
-_recent_evaluations: set[str] = set()
+# Track recent merge outcomes to dedup (only block re-evaluation after a merge)
+_recent_merge_outcomes: dict[str, str] = {}  # key -> last decision
 _MAX_RECENT = 200
 
 
@@ -30,7 +30,7 @@ def _dedup_key(repo: str, pr_number: int, head_sha: str) -> str:
 
 def _clear_dedup() -> None:
     """Test hook."""
-    _recent_evaluations.clear()
+    _recent_merge_outcomes.clear()
 
 
 async def _record_decision(
@@ -105,13 +105,14 @@ async def evaluate_and_maybe_merge(
     bot_username = os.getenv("BOT_GITHUB_USERNAME", "xcagentrockwell")
 
     dedup = _dedup_key(repo_full_name, pr_number, head_sha)
-    if dedup in _recent_evaluations:
-        logger.info("auto_merge_dedup_skipped", dedup=dedup)
+    prior = _recent_merge_outcomes.get(dedup)
+    if prior == "merged":
+        # Already merged on this sha — don't re-merge
+        logger.info("auto_merge_dedup_skipped", dedup=dedup, prior=prior)
         return {"status": "deduped"}
-    # Simple LRU-ish trim
-    if len(_recent_evaluations) >= _MAX_RECENT:
-        _recent_evaluations.clear()
-    _recent_evaluations.add(dedup)
+    # LRU-ish trim
+    if len(_recent_merge_outcomes) >= _MAX_RECENT:
+        _recent_merge_outcomes.clear()
 
     log = logger.bind(
         repo=repo_full_name, pr=pr_number, ticket=ticket_id, trigger=trigger_event
@@ -203,5 +204,8 @@ async def evaluate_and_maybe_merge(
         gates=gates,
         dry_run=not global_enabled,
     )
+
+    # Record outcome so "merged" blocks future attempts on same sha
+    _recent_merge_outcomes[dedup] = decision
 
     return {"status": decision, "reason": reason, "dry_run": not global_enabled}

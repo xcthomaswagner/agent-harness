@@ -171,6 +171,66 @@ async def test_get_pr_state_checks_passed_false_if_any_failure() -> None:
     assert state["checks_passed"] is False
 
 
+async def test_get_pr_state_checks_passed_false_if_suite_still_running() -> None:
+    """One suite success + one still in_progress must NOT produce checks_passed=True."""
+    pr_json = {
+        "user": {"login": "bot"},
+        "merged": False,
+        "mergeable": True,
+        "mergeable_state": "clean",
+        "head": {"sha": "abc"},
+        "labels": [],
+    }
+    suites_json = {
+        "check_suites": [
+            {"status": "completed", "conclusion": "success"},
+            {"status": "in_progress", "conclusion": None},
+        ]
+    }
+    client = _mk_client(
+        [
+            _mk_response(200, pr_json),
+            _mk_response(200, []),
+            _mk_response(200, suites_json),
+        ]
+    )
+    state = await get_pr_state(
+        "acme/repo", 1, github_token="tok", client=client
+    )
+    assert state is not None
+    assert state["checks_passed"] is False
+
+
+async def test_get_pr_state_checks_passed_false_if_suite_queued() -> None:
+    """Queued suite must block checks_passed."""
+    pr_json = {
+        "user": {"login": "bot"},
+        "merged": False,
+        "mergeable": True,
+        "mergeable_state": "clean",
+        "head": {"sha": "abc"},
+        "labels": [],
+    }
+    suites_json = {
+        "check_suites": [
+            {"status": "completed", "conclusion": "success"},
+            {"status": "queued", "conclusion": None},
+        ]
+    }
+    client = _mk_client(
+        [
+            _mk_response(200, pr_json),
+            _mk_response(200, []),
+            _mk_response(200, suites_json),
+        ]
+    )
+    state = await get_pr_state(
+        "acme/repo", 1, github_token="tok", client=client
+    )
+    assert state is not None
+    assert state["checks_passed"] is False
+
+
 # --- merge_pr ---
 
 
