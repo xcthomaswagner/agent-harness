@@ -195,6 +195,7 @@ def _render_trace_table(traces: list[dict[str, Any]], total: int, page: int, per
         status = t.get("status", "")
         badge_cls = _STATUS_BADGE.get(status, "badge-secondary")
         mode = t.get("pipeline_mode", "")
+        title = t.get("ticket_title", "")
         review = t.get("review_verdict", "")
         qa = t.get("qa_result", "")
         pr = t.get("pr_url", "")
@@ -233,6 +234,9 @@ def _render_trace_table(traces: list[dict[str, Any]], total: int, page: int, per
             f'<tr data-status="{_e(status)}" data-mode="{_e(mode)}" data-ticket="{tid}" '
             f'onclick="location.href=\'/traces/{tid}\'" style="cursor:pointer">'
             f'<td><a href="/traces/{tid}" style="font-weight:500">{tid}</a></td>'
+            f'<td style="overflow:hidden;text-overflow:ellipsis;max-width:300px" '
+            f'title="{_e(title)}">'
+            f'<span class="meta">{_e(title)}</span></td>'
             f'<td>{_badge(status, badge_cls)}</td>'
             f'<td>{mode_html}</td>'
             f'<td>{review_html}</td>'
@@ -307,11 +311,11 @@ tbody tr:last-child td {{ border-bottom:none }}
 {filters}
 <table>
 <thead><tr>
-  <th style="width:110px">Ticket</th><th style="width:110px">Status</th>
-  <th style="width:65px">Mode</th><th style="width:90px">Review</th>
-  <th style="width:65px">QA</th><th style="width:160px">Duration</th>
-  <th style="width:100px">Phases</th><th style="width:60px">PR</th>
-  <th>Started</th>
+  <th style="width:100px">Ticket</th><th>Title</th><th style="width:110px">Status</th>
+  <th style="width:65px">Mode</th><th style="width:80px">Review</th>
+  <th style="width:55px">QA</th><th style="width:140px">Duration</th>
+  <th style="width:100px">Phases</th><th style="width:55px">PR</th>
+  <th style="width:100px">Started</th>
 </tr></thead>
 <tbody>{rows}</tbody>
 </table>

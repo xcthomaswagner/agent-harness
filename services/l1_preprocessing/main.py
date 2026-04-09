@@ -243,7 +243,8 @@ async def jira_webhook(
     trace_id = generate_trace_id()
     logger.info("jira_webhook_received", ticket_id=ticket.id, ticket_type=ticket.ticket_type)
     append_trace(ticket.id, trace_id, "webhook", "jira_webhook_received",
-                 ticket_type=ticket.ticket_type, source="jira")
+                 ticket_type=ticket.ticket_type, source="jira",
+                 ticket_title=ticket.title)
 
     dispatch = _enqueue_or_background(ticket, background_tasks, trace_id=trace_id)
     if dispatch == "duplicate":
@@ -380,7 +381,8 @@ async def ado_webhook(
     trace_id = generate_trace_id()
     logger.info("ado_webhook_received", ticket_id=ticket.id, ticket_type=ticket.ticket_type)
     append_trace(ticket.id, trace_id, "webhook", "ado_webhook_received",
-                 ticket_type=ticket.ticket_type, source="ado")
+                 ticket_type=ticket.ticket_type, source="ado",
+                 ticket_title=ticket.title)
 
     dispatch = _enqueue_or_background(ticket, background_tasks, trace_id=trace_id)
     if dispatch == "duplicate":

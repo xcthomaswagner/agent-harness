@@ -100,10 +100,13 @@ def list_traces(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
         review_verdict = ""
         qa_result = ""
         pipeline_mode = ""
+        ticket_title = ""
         total_phases = len({e.get("phase") for e in entries})
         events = [e.get("event", "") for e in entries]
 
         for e in entries:
+            if e.get("ticket_title") and not ticket_title:
+                ticket_title = str(e["ticket_title"])
             if e.get("pr_url"):
                 pr_url = str(e["pr_url"])
             if e.get("review_verdict"):
@@ -182,6 +185,7 @@ def list_traces(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
 
         traces.append({
             "ticket_id": ticket_id,
+            "ticket_title": ticket_title,
             "trace_id": first.get("trace_id", ""),
             "started_at": first.get("timestamp", ""),
             "run_started_at": run_started_at or first.get("timestamp", ""),
