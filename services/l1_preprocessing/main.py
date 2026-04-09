@@ -175,6 +175,11 @@ async def _process_ticket(ticket: TicketPayload, trace_id: str = "") -> None:
         log.info("processing_ticket_completed", **result)
         trace_data = {k: v for k, v in result.items() if k != "ticket_id"}
         append_trace(ticket.id, tid, "pipeline", "processing_completed", **trace_data)
+        # Only release if L2 was NOT spawned — spawned tickets stay claimed
+        # until /api/agent-complete is called. This prevents duplicate processing
+        # from ADO webhooks triggered by our own comment/status write-backs.
+        if not result.get("spawn_triggered"):
+            _release_ticket(ticket.id)
     except Exception as exc:
         log.exception("processing_ticket_failed")
         append_trace(
@@ -182,7 +187,6 @@ async def _process_ticket(ticket: TicketPayload, trace_id: str = "") -> None:
             error_type=type(exc).__name__,
             error_message=str(exc)[:500],
         )
-    finally:
         _release_ticket(ticket.id)
 
 
