@@ -24,6 +24,7 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "l1_preprocessing"))
 from tracer import append_trace, generate_trace_id, read_trace
 
+from ado_event_classifier import classify_ado_event
 from auto_merge import evaluate_and_maybe_merge
 from backlog import append_backlog, backlog_status, drain_backlog
 from event_classifier import EventType, classify_event
@@ -1135,3 +1136,106 @@ async def github_webhook(
         return {"status": "accepted", "event_type": event_type}
 
     return {"status": "unhandled", "event_type": event_type}
+
+
+# --- ADO Service Hook webhook ---
+
+ADO_WEBHOOK_TOKEN = os.getenv("ADO_WEBHOOK_TOKEN", "")
+
+_ADO_BRANCH_PATTERN = re.compile(r"^refs/heads/ai/([A-Za-z0-9]+-\d+)")
+
+
+def _ticket_id_from_ado_payload(payload: dict[str, Any]) -> str:
+    """Extract ticket ID from ADO PR source branch (e.g., refs/heads/ai/SCRUM-16 -> SCRUM-16)."""
+    resource = payload.get("resource", {})
+    source_ref = resource.get("sourceRefName", "")
+    match = _ADO_BRANCH_PATTERN.match(source_ref)
+    return match.group(1) if match else ""
+
+
+async def _handle_ado_pr_opened(payload: dict[str, Any]) -> None:
+    """Handle a new ADO pull request -- log and prepare for spawner integration."""
+    resource = payload.get("resource", {})
+    pr_id = resource.get("pullRequestId", 0)
+    repo_name = resource.get("repository", {}).get("name", "")
+    project = resource.get("repository", {}).get("project", {}).get("name", "")
+    source_ref = resource.get("sourceRefName", "")
+    title = resource.get("title", "")
+    ticket_id = _ticket_id_from_ado_payload(payload)
+
+    log = logger.bind(
+        pr_id=pr_id,
+        repo=repo_name,
+        project=project,
+        ticket_id=ticket_id,
+        source_control_type="azure-repos",
+    )
+    log.info(
+        "handling_ado_pr_opened",
+        title=title,
+        source_ref=source_ref,
+    )
+
+    if ticket_id:
+        append_trace(
+            ticket_id,
+            _lookup_trace_id(ticket_id),
+            "l3_pr_review",
+            "ado_pr_review_spawned",
+            pr_id=pr_id,
+            source_control_type="azure-repos",
+        )
+
+    # TODO: Wire into spawner with source_control_type="azure-repos"
+    # once SessionSpawner supports ADO PR review sessions.
+    log.info("ado_pr_opened_logged", note="spawner integration pending")
+
+
+@app.post("/webhooks/ado-pr", status_code=202)
+async def ado_pr_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_ado_webhook_token: str | None = Header(
+        default=None, alias="x-ado-webhook-token"
+    ),
+) -> dict[str, str]:
+    """Receive Azure DevOps Service Hook webhooks for PR events."""
+    # Validate token if configured (constant-time comparison)
+    if ADO_WEBHOOK_TOKEN and (
+        not x_ado_webhook_token
+        or not hmac.compare_digest(x_ado_webhook_token, ADO_WEBHOOK_TOKEN)
+    ):
+        raise HTTPException(status_code=401, detail="Invalid ADO webhook token")
+
+    body = await request.body()
+    try:
+        payload: dict[str, Any] = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {exc}") from exc
+
+    event_type = classify_ado_event(payload)
+
+    resource = payload.get("resource", {})
+    pr_id = resource.get("pullRequestId", 0)
+    repo_id = resource.get("repository", {}).get("id", "")
+    project = resource.get("repository", {}).get("project", {}).get("name", "")
+
+    logger.info(
+        "ado_webhook_received",
+        event_type=event_type,
+        ado_event_type=payload.get("eventType", ""),
+        pr_id=pr_id,
+        project=project,
+        repo_id=repo_id,
+    )
+
+    if event_type == EventType.IGNORED:
+        return {"status": "ignored", "event_type": event_type}
+
+    if event_type == EventType.PR_OPENED:
+        background_tasks.add_task(_handle_ado_pr_opened, payload)
+        return {"status": "accepted", "event_type": event_type}
+
+    # Other ADO event types — log but don't act yet
+    logger.info("ado_event_not_yet_handled", event_type=event_type, pr_id=pr_id)
+    return {"status": "accepted", "event_type": event_type}
