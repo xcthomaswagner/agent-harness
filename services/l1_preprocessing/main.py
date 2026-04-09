@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -115,6 +116,7 @@ def _get_pipeline() -> Pipeline:
 
 _active_tickets: set[str] = set()
 _active_tickets_lock = __import__("threading").Lock()
+_BACKGROUND_TASKS: set[asyncio.Task[None]] = set()  # prevent GC of fire-and-forget tasks
 
 
 def _try_claim_ticket(ticket_id: str) -> bool:
@@ -640,8 +642,14 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
     log = logger.bind(ticket_id=payload.ticket_id, status=payload.status)
     log.info("agent_completion_received", pr_url=payload.pr_url)
 
-    # Clear idempotency guard so ticket can be reprocessed if needed
-    _release_ticket(payload.ticket_id)
+    # Delay releasing the ticket — ADO fires webhooks when we post comments
+    # and transition status below. Keep the ticket claimed for 60s to absorb
+    # those self-triggered webhooks before allowing reprocessing.
+    async def _delayed_release(ticket_id: str, delay: int = 60) -> None:
+        await asyncio.sleep(delay)
+        _release_ticket(ticket_id)
+
+    _BACKGROUND_TASKS.add(asyncio.ensure_future(_delayed_release(payload.ticket_id)))
 
     # Trace: record completion — reuse the trace_id from the spawn chain
     # so live-reported entries and completion entries share the same trace_id
