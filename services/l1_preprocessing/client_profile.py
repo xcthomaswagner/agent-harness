@@ -53,6 +53,10 @@ class ClientProfile:
         return str(self.ticket_source.get("done_status", "Done"))
 
     @property
+    def in_progress_status(self) -> str:
+        return str(self.ticket_source.get("in_progress_status", "In Progress"))
+
+    @property
     def jira_instance(self) -> str:
         return str(self.ticket_source.get("instance", ""))
 

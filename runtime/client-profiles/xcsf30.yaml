@@ -12,16 +12,19 @@ ticket_source:
   ai_label: "ai-implement"
   quick_label: "ai-quick"
   clarification_status: "Needs Info"
+  in_progress_status: "Active"       # ADO Agile process uses "Active", not "In Progress"
   done_status: "Done"
   custom_fields: {}
 
 source_control:
-  type: "github"
-  org: "xcthomaswagner"
-  repo: "harness-test-client"
+  type: "azure-repos"
+  org: "https://xc-devops.visualstudio.com"
+  repo: "XC-SF-30in30"
   default_branch: "main"
   branch_prefix: "ai/"
   pr_reviewers: []
+  ado_project: "XC-SF-30in30"
+  ado_repository_id: "7bacb9f6-54df-4e5e-a87d-7bbb0f5fe2d6"
 
 ci_pipeline:
   test_command: "npm test"
@@ -35,8 +38,8 @@ test_framework:
   e2e: ""
 
 client_repo:
-  local_path: "/Users/thomaswagner/Desktop/Projects.nosync/harness-test-client"
-  github_repo: "xcthomaswagner/harness-test-client"
+  local_path: "/tmp/ado-repo-init/XC-SF-30in30"
+  github_repo: ""
 
 autonomy:
   auto_merge_enabled: false

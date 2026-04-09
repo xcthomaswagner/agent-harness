@@ -230,15 +230,16 @@ class Pipeline:
         await self._extract_figma_if_needed(enriched, log)
         self._resolve_platform_profile(enriched, profile, log)
 
-        done_status = profile.done_status if profile else "In Progress"
+        done_status = profile.done_status if profile else "Done"
+        in_progress_status = profile.in_progress_status if profile else "In Progress"
 
         if enriched.callback:
             try:
-                target_status = "In Progress" if done_status == "Done" else done_status
+                target_status = in_progress_status if done_status == "Done" else done_status
                 await adapter.transition_status(enriched.id, target_status)
-                log.info("ticket_transitioned_to_in_progress")
+                log.info("ticket_transitioned", target=target_status)
             except Exception as exc:
-                log.warning("status_transition_failed", target="In Progress")
+                log.warning("status_transition_failed", target=target_status)
                 append_trace(
                     enriched.id, tid, "pipeline", "error",
                     error_type="TransitionFailed",

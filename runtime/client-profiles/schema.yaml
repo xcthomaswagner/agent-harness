@@ -13,6 +13,7 @@ ticket_source:
   ai_label: "ai-implement"           # Label/tag that triggers the pipeline
   quick_label: "ai-quick"            # Label/tag for single-agent quick mode
   clarification_status: "Needs Info" # Status set when analyst needs more info
+  in_progress_status: "In Progress"  # Status set when pipeline starts (ADO Agile uses "Active")
   done_status: "Done"                # Status set on PR creation
   custom_fields:
     acceptance_criteria: "customfield_10429"
