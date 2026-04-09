@@ -58,7 +58,10 @@ _STATUS_BADGE: dict[str, str] = {
     "Complete": "badge-success",
     "PR Created": "badge-success",
     "Escalated": "badge-error",
+    "Failed": "badge-error",
+    "Timed Out": "badge-error",
     "Agent Done (no PR)": "badge-error",
+    "Cleaned Up": "badge-secondary",
     "Dispatched": "badge-error",
     "QA Done": "badge-warning",
     "Review Done": "badge-blue",
@@ -91,7 +94,7 @@ _STUCK_THRESHOLDS: dict[str, float] = {
     "Planned": 2, "Implementing": 2, "Merged": 2,
     "Review Done": 2, "QA Done": 2, "PR Created": 2, "CI Fix": 2,
 }
-_FAILED_STATUSES = {"Escalated", "Agent Done (no PR)"}
+_FAILED_STATUSES = {"Escalated", "Agent Done (no PR)", "Failed", "Timed Out"}
 _COMPLETED_STATUSES = {"Complete"}
 
 
@@ -175,6 +178,7 @@ def _render_trace_table(traces: list[dict[str, Any]], total: int, page: int, per
         '<select id="f-status" style="font-size:11.2px;padding:5px 8px;border:1px solid #E2E8F0;'
         'border-radius:6px;font-family:inherit" onchange="filterTable()">'
         '<option value="">All</option><option>Complete</option><option>Dispatched</option>'
+        '<option>Failed</option><option>Timed Out</option><option>Cleaned Up</option>'
         '<option>Escalated</option><option>Processing</option><option>Enriched</option>'
         '</select>'
         '<span class="meta" style="margin-right:-4px">Mode</span>'

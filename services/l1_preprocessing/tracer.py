@@ -117,8 +117,18 @@ def list_traces(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
                 qa_result = str(e.get("qa_result", ""))
 
         # --- Derive meaningful status from event history ---
-        if "Escalated" in events:
+        if "stale_worktree_cleaned" in events:
+            # This run was cleaned up by a subsequent spawn — mark it clearly
+            status = "Cleaned Up"
+        elif "Escalated" in events:
             status = "Escalated"
+        elif any(
+            e.get("event") == "agent_finished" and e.get("status") == "escalated"
+            for e in entries
+        ):
+            status = "Failed"
+        elif any("timed out" in ev.lower() for ev in events):
+            status = "Timed Out"
         elif "Pipeline complete" in events:
             status = "Complete"
         elif pr_url and not any("Pipeline complete" in ev for ev in events):
