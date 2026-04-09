@@ -21,6 +21,9 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -37,6 +40,54 @@ def run_git(client_repo: str, *args: str, check: bool = True) -> subprocess.Comp
     )
 
 
+def _trace_watcher(
+    jsonl_path: Path, config_path: Path, stop_event: threading.Event
+) -> None:
+    """Tail pipeline.jsonl and POST new entries to L1 for live dashboard updates.
+
+    Runs as a daemon thread alongside the agent process. Fire-and-forget —
+    failures are silently ignored so the agent is never blocked.
+    """
+    if not config_path.exists():
+        return
+    try:
+        config = json.loads(config_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return
+
+    l1_url = config.get("l1_url", "")
+    ticket_id = config.get("ticket_id", "")
+    trace_id = config.get("trace_id", "")
+    if not l1_url or not ticket_id:
+        return
+
+    # Wait for the file to be created by the agent
+    while not jsonl_path.exists() and not stop_event.is_set():
+        stop_event.wait(1)
+    if stop_event.is_set():
+        return
+
+    with jsonl_path.open("r") as f:
+        while not stop_event.is_set():
+            line = f.readline()
+            if line.strip():
+                try:
+                    entry = json.loads(line)
+                    entry["ticket_id"] = ticket_id
+                    entry["trace_id"] = trace_id
+                    data = json.dumps(entry).encode()
+                    req = urllib.request.Request(
+                        f"{l1_url}/api/agent-trace",
+                        data=data,
+                        headers={"Content-Type": "application/json"},
+                    )
+                    urllib.request.urlopen(req, timeout=3)
+                except Exception:
+                    pass  # Fire-and-forget
+            else:
+                stop_event.wait(2)  # Poll every 2 seconds
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Spawn an Agent Team session")
     parser.add_argument("--client-repo", required=True, help="Path to the client git repository")
@@ -44,6 +95,7 @@ def main() -> None:
     parser.add_argument("--branch-name", required=True, help="Branch name (e.g., ai/PROJ-123)")
     parser.add_argument("--platform-profile", default="", help="Platform profile (sitecore, salesforce)")
     parser.add_argument("--client-profile", default="", help="Client profile name (e.g., xcsf30)")
+    parser.add_argument("--trace-id", default="", help="Trace ID from L1 for live trace reporting")
     parser.add_argument("--mode", default="multi", choices=["multi", "quick"], help="Pipeline mode")
     args = parser.parse_args()
 
@@ -213,10 +265,24 @@ def main() -> None:
         else:
             print(f"[spawn] WARNING: Client profile '{args.client_profile}' not found")
 
-    # --- Step 3: Write ticket, mode, and copy attachments ---
+    # --- Step 3: Write ticket, mode, trace config, and copy attachments ---
     shutil.copy2(ticket_json, worktree_dir / ".harness" / "ticket.json")
     (worktree_dir / ".harness" / "pipeline-mode").write_text(pipeline_mode)
     print(f"[spawn] Ticket written to .harness/ticket.json (mode: {pipeline_mode})")
+
+    # Write trace config so the file-watcher can report to L1
+    with ticket_json.open() as f:
+        _ticket_id = json.load(f).get("id", "")
+    l1_url = os.environ.get("L1_SERVICE_URL", "http://localhost:8000")
+    trace_config = {
+        "ticket_id": _ticket_id,
+        "trace_id": args.trace_id or "",
+        "l1_url": l1_url,
+    }
+    trace_config_path = worktree_dir / ".harness" / "trace-config.json"
+    with trace_config_path.open("w") as f:
+        json.dump(trace_config, f, indent=2)
+    print(f"[spawn] Trace config written (trace_id={args.trace_id[:12] or 'none'})")
 
     # Copy downloaded image attachments into the worktree
     with ticket_json.open() as f:
@@ -267,6 +333,19 @@ def main() -> None:
     agent_lock = worktree_dir / ".harness" / ".agent.lock"
     agent_lock.write_text(str(os.getpid()))
 
+    # Start live trace watcher — tails pipeline.jsonl and POSTs to L1
+    trace_stop = threading.Event()
+    trace_watcher = threading.Thread(
+        target=_trace_watcher,
+        args=(
+            worktree_dir / ".harness" / "logs" / "pipeline.jsonl",
+            worktree_dir / ".harness" / "trace-config.json",
+            trace_stop,
+        ),
+        daemon=True,
+    )
+    trace_watcher.start()
+
     session_log = worktree_dir / ".harness" / "logs" / "session.log"
     timed_out = False
     with session_log.open("w") as log_file:
@@ -286,6 +365,10 @@ def main() -> None:
             print(f"[spawn] Session timed out after {timeout_seconds}s")
 
     agent_lock.unlink(missing_ok=True)
+
+    # Stop the live trace watcher (give it a moment to flush final entries)
+    trace_stop.set()
+    trace_watcher.join(timeout=5)
     if timed_out:
         print(f"[spawn] Session TIMED OUT after {timeout_seconds}s")
     else:
@@ -340,6 +423,7 @@ def main() -> None:
 
     completion_data: dict[str, object] = {
         "ticket_id": ticket_id,
+        "trace_id": args.trace_id or "",
         "status": status,
         "pr_url": pr_url,
         "branch": branch_name,
@@ -349,9 +433,6 @@ def main() -> None:
 
     print(f"[spawn] Notifying L1: ticket={ticket_id} status={status} pr={pr_url} source={ticket_source}")
     try:
-        import urllib.error
-        import urllib.request
-
         data = json.dumps(completion_data).encode()
         req = urllib.request.Request(
             f"{l1_url}/api/agent-complete",

@@ -445,6 +445,9 @@ class Pipeline:
         if client_profile_name:
             cmd.extend(["--client-profile", client_profile_name])
 
+        if trace_id:
+            cmd.extend(["--trace-id", trace_id])
+
         if pipeline_mode == "quick":
             cmd.extend(["--mode", "quick"])
 

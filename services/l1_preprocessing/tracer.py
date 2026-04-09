@@ -673,20 +673,23 @@ def consolidate_worktree_logs(
     Called by the completion callback after the agent finishes.
     Idempotent — skips if agent entries for this trace_id are already consolidated.
     """
-    # Guard: check if this trace_id's agent entries already exist
+    # Build dedup set from existing live-reported agent entries
     existing = read_trace(ticket_id)
-    if any(
-        e.get("trace_id") == trace_id and e.get("source") == "agent"
-        for e in existing
-    ):
-        logger.info("consolidation_skipped_already_imported",
-                     ticket_id=ticket_id, trace_id=trace_id)
-        return
+    existing_keys: set[tuple[str, str]] = set()
+    for e in existing:
+        if e.get("source") == "agent":
+            existing_keys.add((e.get("phase", ""), e.get("event", "")))
+
+    if existing_keys:
+        logger.info("consolidation_dedup_active",
+                     ticket_id=ticket_id, live_entries=len(existing_keys))
 
     wt = Path(worktree_path)
 
-    # Import pipeline.jsonl entries
+    # Import pipeline.jsonl entries (skip any already live-reported)
     pipeline_log = wt / ".harness" / "logs" / "pipeline.jsonl"
+    imported = 0
+    skipped = 0
     if pipeline_log.exists():
         for line in pipeline_log.read_text().splitlines():
             line = line.strip()
@@ -694,14 +697,22 @@ def consolidate_worktree_logs(
                 continue
             try:
                 entry = json.loads(line)
+                dedup_key = (entry.get("phase", ""), entry.get("event", ""))
+                if dedup_key in existing_keys:
+                    skipped += 1
+                    continue
                 entry["trace_id"] = trace_id
                 entry["ticket_id"] = ticket_id
                 entry["source"] = "agent"
                 path = trace_path(ticket_id)
                 with path.open("a") as f:
                     f.write(json.dumps(entry) + "\n")
+                imported += 1
             except json.JSONDecodeError:
                 pass
+    if imported or skipped:
+        logger.info("consolidation_complete",
+                     ticket_id=ticket_id, imported=imported, skipped=skipped)
 
     # Import span detail files — matches the Observability Model in harness-CLAUDE.md
     artifact_files = {

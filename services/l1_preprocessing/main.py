@@ -563,6 +563,7 @@ class CompletionPayload(BaseModel):
 
     ticket_id: str
     source: str = "jira"
+    trace_id: str = ""  # From trace-config.json — correlates with live-reported entries
     status: str  # "complete", "partial", "escalated"
     pr_url: str = ""
     branch: str = ""
@@ -611,6 +612,25 @@ def _derive_repo_full_name(worktree_path: str) -> str:
     return ""
 
 
+@app.post("/api/agent-trace", status_code=200)
+async def agent_trace(request: Request) -> dict[str, str]:
+    """Accept live trace events from running agents.
+
+    Called by the file-watcher thread in spawn_team.py as the agent
+    writes to pipeline.jsonl. Entries appear in the dashboard in real-time.
+    No auth required — internal network only (same host as spawn_team.py).
+    """
+    body = await request.json()
+    ticket_id = str(body.pop("ticket_id", ""))
+    trace_id = str(body.pop("trace_id", ""))
+    phase = str(body.pop("phase", ""))
+    event = str(body.pop("event", ""))
+    body.pop("timestamp", None)  # append_trace generates its own timestamp
+    if ticket_id and event:
+        append_trace(ticket_id, trace_id, phase, event, source="agent", **body)
+    return {"status": "ok"}
+
+
 @app.post("/api/agent-complete", status_code=200, dependencies=[Depends(_require_api_key)])
 async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
     """Called by the spawn script when the agent finishes.
@@ -623,8 +643,9 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
     # Clear idempotency guard so ticket can be reprocessed if needed
     _release_ticket(payload.ticket_id)
 
-    # Trace: record completion and consolidate worktree logs
-    trace_id = generate_trace_id()
+    # Trace: record completion — reuse the trace_id from the spawn chain
+    # so live-reported entries and completion entries share the same trace_id
+    trace_id = payload.trace_id or generate_trace_id()
     append_trace(payload.ticket_id, trace_id, "completion", "agent_finished",
                  status=payload.status, pr_url=payload.pr_url, branch=payload.branch)
 
