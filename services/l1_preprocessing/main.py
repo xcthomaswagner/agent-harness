@@ -652,6 +652,14 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
             )
             await adapter.write_comment(payload.ticket_id, comment)
 
+        # Link ADO work item to PR (if source is ADO and PR was created)
+        if payload.pr_url and isinstance(adapter, AdoAdapter):
+            try:
+                await adapter.link_work_item_to_pr(payload.ticket_id, payload.pr_url)
+                log.info("ado_work_item_linked_to_pr")
+            except Exception:
+                log.warning("ado_work_item_pr_link_failed")
+
         # Upload final screenshot if it exists in the worktree
         # Note: ADO adapter doesn't have upload_attachment yet — skip for ADO
         screenshot_path = Path(worktree_path) / ".harness" / "screenshots" / "final.png"

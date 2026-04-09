@@ -253,6 +253,48 @@ class AdoAdapter:
         await self.update_fields(ticket_id, {"System.State": target_status})
         logger.info("ado_status_transitioned", ticket_id=ticket_id, target=target_status)
 
+    async def link_work_item_to_pr(
+        self, ticket_id: str, pr_url: str, repo_id: str = ""
+    ) -> None:
+        """Link an ADO work item to a pull request via ArtifactLink relation.
+
+        Args:
+            ticket_id: Composite ticket ID (e.g., "PROJECT-123").
+            pr_url: Full PR URL or just the PR ID. Used to construct the artifact URI.
+            repo_id: Azure Repos repository GUID (needed for artifact URI construction).
+        """
+        project, wi_id = self._parse_ticket_id(ticket_id)
+
+        # Extract PR ID from URL if needed (e.g., ".../pullrequests/42" → "42")
+        pr_id = pr_url.rsplit("/", 1)[-1] if "/" in pr_url else pr_url
+
+        # ADO artifact URI format for pull requests
+        artifact_uri = (
+            f"vstfs:///Git/PullRequestId/{project}%2F{repo_id}%2F{pr_id}"
+            if repo_id
+            else f"vstfs:///Git/PullRequestId/{project}%2F{pr_id}"
+        )
+
+        url = f"/{project}/_apis/wit/workItems/{wi_id}?api-version=7.1"
+        patch_ops = [
+            {
+                "op": "add",
+                "path": "/relations/-",
+                "value": {
+                    "rel": "ArtifactLink",
+                    "url": artifact_uri,
+                    "attributes": {"name": "Pull Request"},
+                },
+            }
+        ]
+        response = await self._client.patch(url, json=patch_ops)
+        response.raise_for_status()
+        logger.info(
+            "ado_work_item_linked_to_pr",
+            ticket_id=ticket_id,
+            pr_id=pr_id,
+        )
+
     async def add_label(self, ticket_id: str, label: str) -> None:
         """Add a tag to an ADO work item."""
         project, wi_id = self._parse_ticket_id(ticket_id)
