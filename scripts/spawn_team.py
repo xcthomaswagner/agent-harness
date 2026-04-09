@@ -48,25 +48,42 @@ def _trace_watcher(
     Runs as a daemon thread alongside the agent process. Fire-and-forget —
     failures are silently ignored so the agent is never blocked.
     """
+    # Watcher log for debugging (spawn_team stdout goes to /dev/null)
+    watcher_log = jsonl_path.parent / "trace-watcher.log"
+
+    def _log(msg: str) -> None:
+        try:
+            with watcher_log.open("a") as lf:
+                lf.write(f"{msg}\n")
+        except OSError:
+            pass
+
     if not config_path.exists():
+        _log("No trace-config.json — exiting")
         return
     try:
         config = json.loads(config_path.read_text())
     except (json.JSONDecodeError, OSError):
+        _log("Failed to read trace-config.json — exiting")
         return
 
     l1_url = config.get("l1_url", "")
     ticket_id = config.get("ticket_id", "")
     trace_id = config.get("trace_id", "")
     if not l1_url or not ticket_id:
+        _log(f"Missing l1_url={l1_url!r} or ticket_id={ticket_id!r} — exiting")
         return
+    _log(f"Started for {ticket_id} → {l1_url}")
 
     # Wait for the file to be created by the agent
     while not jsonl_path.exists() and not stop_event.is_set():
         stop_event.wait(1)
     if stop_event.is_set():
+        _log("Stop event received before file appeared")
         return
 
+    _log(f"Tailing {jsonl_path}")
+    posted = 0
     with jsonl_path.open("r") as f:
         while not stop_event.is_set():
             line = f.readline()
@@ -82,10 +99,13 @@ def _trace_watcher(
                         headers={"Content-Type": "application/json"},
                     )
                     urllib.request.urlopen(req, timeout=3)
-                except Exception:
-                    pass  # Fire-and-forget
+                    posted += 1
+                    _log(f"Posted: {entry.get('phase')}/{entry.get('event', '')[:40]}")
+                except Exception as exc:
+                    _log(f"POST failed: {exc}")
             else:
                 stop_event.wait(2)  # Poll every 2 seconds
+    _log(f"Stopped after posting {posted} entries")
 
 
 def main() -> None:
@@ -335,13 +355,12 @@ def main() -> None:
 
     # Start live trace watcher — tails pipeline.jsonl and POSTs to L1
     trace_stop = threading.Event()
+    _watcher_jsonl = worktree_dir / ".harness" / "logs" / "pipeline.jsonl"
+    _watcher_config = worktree_dir / ".harness" / "trace-config.json"
+    print(f"[spawn] Starting trace watcher (config={_watcher_config.exists()}, log={_watcher_jsonl.exists()})")
     trace_watcher = threading.Thread(
         target=_trace_watcher,
-        args=(
-            worktree_dir / ".harness" / "logs" / "pipeline.jsonl",
-            worktree_dir / ".harness" / "trace-config.json",
-            trace_stop,
-        ),
+        args=(_watcher_jsonl, _watcher_config, trace_stop),
         daemon=True,
     )
     trace_watcher.start()
