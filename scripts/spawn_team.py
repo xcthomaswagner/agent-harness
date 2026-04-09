@@ -14,8 +14,6 @@ Usage:
 
 from __future__ import annotations
 
-from __future__ import annotations
-
 import argparse
 import json
 import os
@@ -45,6 +43,7 @@ def main() -> None:
     parser.add_argument("--ticket-json", required=True, help="Path to the enriched ticket JSON file")
     parser.add_argument("--branch-name", required=True, help="Branch name (e.g., ai/PROJ-123)")
     parser.add_argument("--platform-profile", default="", help="Platform profile (sitecore, salesforce)")
+    parser.add_argument("--client-profile", default="", help="Client profile name (e.g., xcsf30)")
     parser.add_argument("--mode", default="multi", choices=["multi", "quick"], help="Pipeline mode")
     args = parser.parse_args()
 
@@ -137,6 +136,58 @@ def main() -> None:
     if not claude_md.exists():
         print(f"[spawn] ERROR: CLAUDE.md not found at {claude_md} after injection")
         sys.exit(1)
+
+    # --- Step 2b: Write source control context from client profile ---
+    profile = None
+    if args.client_profile:
+        from l1_preprocessing.client_profile import load_profile
+
+        profile = load_profile(args.client_profile)
+        if profile:
+            sc = profile.source_control
+            sc_context = {
+                "type": profile.source_control_type,
+                "org": sc.get("org", ""),
+                "repo": sc.get("repo", ""),
+                "default_branch": sc.get("default_branch", "main"),
+                "branch_prefix": sc.get("branch_prefix", "ai/"),
+                "ado_project": profile.ado_project,
+                "ado_repository_id": profile.ado_repository_id,
+            }
+            sc_path = worktree_dir / ".harness" / "source-control.json"
+            sc_path.parent.mkdir(parents=True, exist_ok=True)
+            with sc_path.open("w") as f:
+                json.dump(sc_context, f, indent=2)
+            print(f"[spawn] Source control context written ({profile.source_control_type})")
+
+            # Rewrite git remote for Azure Repos PAT auth
+            if profile.is_azure_repos:
+                ado_pat = os.environ.get("ADO_PAT", "")
+                org_url = sc.get("org", "")  # e.g., https://dev.azure.com/myorg
+                ado_project = profile.ado_project
+                repo_name = sc.get("repo", "")
+                if ado_pat and org_url and ado_project and repo_name:
+                    # Strip protocol and trailing slash for URL construction
+                    host = org_url.replace("https://", "").replace("http://", "").rstrip("/")
+                    auth_url = f"https://ado-agent:{ado_pat}@{host}/{ado_project}/_git/{repo_name}"
+                    result = run_git(str(worktree_dir), "remote", "set-url", "origin", auth_url, check=False)
+                    if result.returncode != 0:
+                        print("[spawn] ERROR: Failed to set Azure Repos remote URL")
+                    else:
+                        print(f"[spawn] Azure Repos remote set: {host}/{ado_project}/_git/{repo_name}")
+                else:
+                    missing = []
+                    if not ado_pat:
+                        missing.append("ADO_PAT")
+                    if not org_url:
+                        missing.append("source_control.org")
+                    if not ado_project:
+                        missing.append("source_control.ado_project")
+                    if not repo_name:
+                        missing.append("source_control.repo")
+                    print(f"[spawn] WARNING: Azure Repos auth incomplete, missing: {', '.join(missing)}")
+        else:
+            print(f"[spawn] WARNING: Client profile '{args.client_profile}' not found")
 
     # --- Step 3: Write ticket, mode, and copy attachments ---
     shutil.copy2(ticket_json, worktree_dir / ".harness" / "ticket.json")
@@ -258,15 +309,21 @@ def main() -> None:
                 continue
 
     l1_url = os.environ.get("L1_SERVICE_URL", "http://localhost:8000")
+    # Derive ticket source from profile so L1 routes to the right adapter
+    ticket_source = "jira"
+    if profile and profile.ticket_source_type:
+        ticket_source = profile.ticket_source_type
+
     completion_data: dict[str, object] = {
         "ticket_id": ticket_id,
         "status": status,
         "pr_url": pr_url,
         "branch": branch_name,
         "failed_units": failed_units,
+        "source": ticket_source,
     }
 
-    print(f"[spawn] Notifying L1: ticket={ticket_id} status={status} pr={pr_url}")
+    print(f"[spawn] Notifying L1: ticket={ticket_id} status={status} pr={pr_url} source={ticket_source}")
     try:
         import urllib.error
         import urllib.request

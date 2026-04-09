@@ -70,6 +70,28 @@ class ClientProfile:
         """Read ticket_source.ado_project_name from YAML."""
         return str(self.ticket_source.get("ado_project_name", ""))
 
+    # --- Source control properties ---
+
+    @property
+    def source_control_type(self) -> str:
+        """Read source_control.type from YAML (github | azure-repos)."""
+        return str(self.source_control.get("type", "github"))
+
+    @property
+    def is_azure_repos(self) -> bool:
+        """True when source_control.type is azure-repos."""
+        return self.source_control_type == "azure-repos"
+
+    @property
+    def ado_project(self) -> str:
+        """Read source_control.ado_project from YAML (Azure Repos only)."""
+        return str(self.source_control.get("ado_project", ""))
+
+    @property
+    def ado_repository_id(self) -> str:
+        """Read source_control.ado_repository_id from YAML (Azure Repos only)."""
+        return str(self.source_control.get("ado_repository_id", ""))
+
     @property
     def auto_merge_enabled(self) -> bool:
         """Read autonomy.auto_merge_enabled from YAML (default False)."""
@@ -186,6 +208,49 @@ def find_profile_by_ado_project(
                 "client_profile_matched_by_ado_project",
                 name=path.stem,
                 ado_project_name=ado_project_name,
+            )
+            return ClientProfile(data, path.stem)
+
+    return None
+
+
+def find_profile_by_ado_repo(
+    ado_repository_id: str, profiles_dir: Path | None = None
+) -> ClientProfile | None:
+    """Find a client profile whose source_control.ado_repository_id matches.
+
+    Used by L3 to resolve an ADO PR webhook to a client profile.
+    Only considers profiles with source_control.type == 'azure-repos'.
+    Returns None if no profile matches.
+    """
+    directory = profiles_dir or PROFILES_DIR
+    if not directory.exists() or not ado_repository_id:
+        return None
+
+    target = ado_repository_id.strip().lower()
+    if not target:
+        return None
+
+    for path in sorted(directory.glob("*.yaml")):
+        if path.stem == "schema":
+            continue
+        try:
+            data = yaml.safe_load(path.read_text())
+        except yaml.YAMLError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        sc = data.get("source_control", {})
+        if not isinstance(sc, dict):
+            continue
+        if str(sc.get("type", "")).lower() != "azure-repos":
+            continue
+        profile_repo_id = str(sc.get("ado_repository_id", "")).strip().lower()
+        if profile_repo_id and profile_repo_id == target:
+            logger.info(
+                "client_profile_matched_by_ado_repo",
+                name=path.stem,
+                ado_repository_id=ado_repository_id,
             )
             return ClientProfile(data, path.stem)
 

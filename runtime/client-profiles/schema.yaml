@@ -25,6 +25,9 @@ source_control:
   default_branch: "main"
   branch_prefix: "ai/"               # AI-created branches prefixed for visibility
   pr_reviewers: []                    # GitHub usernames to auto-assign as reviewers
+  # Azure Repos only (required when type: azure-repos):
+  ado_project: ""                     # ADO project name for MCP/API calls (usually same as ticket_source.ado_project_name)
+  ado_repository_id: ""               # Azure Repos repository GUID (required by ADO MCP tools)
 
 ci_pipeline:
   test_command: "npm test"

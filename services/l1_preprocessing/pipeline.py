@@ -273,6 +273,7 @@ class Pipeline:
             enriched, ticket_path, log,
             pipeline_mode=pipeline_mode, client_repo_override=client_repo,
             trace_id=tid,
+            client_profile_name=profile.name if profile else "",
         )
         self._cleanup_temp_dirs(log)
 
@@ -406,6 +407,7 @@ class Pipeline:
         pipeline_mode: str = "multi",
         client_repo_override: str = "",
         trace_id: str = "",
+        client_profile_name: str = "",
     ) -> bool:
         """Trigger L2 by calling the spawn script.
 
@@ -413,6 +415,8 @@ class Pipeline:
             pipeline_mode: "multi" (default) for full review/QA pipeline,
                           "quick" for single-agent fast mode.
             trace_id: Trace ID for error reporting.
+            client_profile_name: Client profile name (e.g., "xcsf30") for
+                                source control context in agent sessions.
 
         Returns True if spawn was triggered, False if skipped.
         """
@@ -436,6 +440,9 @@ class Pipeline:
 
         if enriched.platform_profile:
             cmd.extend(["--platform-profile", enriched.platform_profile])
+
+        if client_profile_name:
+            cmd.extend(["--client-profile", client_profile_name])
 
         if pipeline_mode == "quick":
             cmd.extend(["--mode", "quick"])
