@@ -214,11 +214,13 @@ def _render_trace_table(traces: list[dict[str, Any]], total: int, page: int, per
             f'#{pr.split("/")[-1]}</a>' if pr else '<span class="meta">&mdash;</span>')
         mode_html = _badge(mode, "badge-secondary") if mode else '<span class="meta">&mdash;</span>'
 
-        dur_html = f'<span style="color:{dur_color}">{_e(duration)}</span>' if duration else '<span class="meta">&mdash;</span>'
+        # Shorten ">24h (multi-run)" to ">24h" for table display
+        dur_display = duration.replace(" (multi-run)", "") if duration else ""
+        dur_html = f'<span style="color:{dur_color};white-space:nowrap">{_e(dur_display)}</span>' if dur_display else '<span class="meta">&mdash;</span>'
         bar_html = (
-            f'<div style="display:inline-flex;width:60px;height:6px;border-radius:3px;'
-            f'background:#F1F5F9;vertical-align:middle;margin-left:6px">'
-            f'<div style="width:{dur_pct}%;background:{dur_color};border-radius:3px"></div>'
+            f'<div style="width:80px;height:5px;border-radius:3px;'
+            f'background:#F1F5F9;margin-top:3px">'
+            f'<div style="width:{dur_pct}%;background:{dur_color};border-radius:3px;height:100%"></div>'
             f'</div>' if dur_pct else ""
         )
 
@@ -235,7 +237,7 @@ def _render_trace_table(traces: list[dict[str, Any]], total: int, page: int, per
             f'<td>{mode_html}</td>'
             f'<td>{review_html}</td>'
             f'<td>{qa_html}</td>'
-            f'<td><div style="display:flex;align-items:center;gap:4px">{dur_html}{bar_html}</div></td>'
+            f'<td><div>{dur_html}{bar_html}</div></td>'
             f'<td>{dots_html}</td>'
             f'<td>{pr_html}</td>'
             f'<td class="meta">{_e(started)}</td>'
@@ -286,7 +288,7 @@ table {{ width:100%;border-collapse:separate;border-spacing:0;border:1px solid #
 thead th {{ background:#F7F9FB;color:#64748B;font-weight:500;font-size:11.2px;text-align:left;padding:10px 12px;border-bottom:1px solid #E2E8F0;white-space:nowrap }}
 tbody tr {{ transition:background 0.1s }}
 tbody tr:hover {{ background:rgba(241,245,249,0.5) }}
-tbody td {{ padding:8px 12px;border-bottom:1px solid #E2E8F0;vertical-align:middle }}
+tbody td {{ padding:8px 12px;border-bottom:1px solid #E2E8F0;vertical-align:middle;white-space:nowrap }}
 tbody tr:last-child td {{ border-bottom:none }}
 .view-toggle {{ display:inline-flex;border:1px solid #E2E8F0;border-radius:6px;overflow:hidden }}
 .view-btn {{ padding:4px 12px;font-size:11.2px;cursor:pointer;border:none;background:#FFF;color:#64748B;font-weight:500;border-right:1px solid #E2E8F0;font-family:inherit }}
@@ -305,10 +307,10 @@ tbody tr:last-child td {{ border-bottom:none }}
 {filters}
 <table>
 <thead><tr>
-  <th style="width:110px">Ticket</th><th style="width:130px">Status</th>
-  <th style="width:80px">Mode</th><th style="width:90px">Review</th>
-  <th style="width:80px">QA</th><th style="width:120px">Duration</th>
-  <th style="width:100px">Phases</th><th style="width:50px">PR</th>
+  <th style="width:110px">Ticket</th><th style="width:110px">Status</th>
+  <th style="width:65px">Mode</th><th style="width:90px">Review</th>
+  <th style="width:65px">QA</th><th style="width:160px">Duration</th>
+  <th style="width:100px">Phases</th><th style="width:60px">PR</th>
   <th>Started</th>
 </tr></thead>
 <tbody>{rows}</tbody>
