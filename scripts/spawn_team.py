@@ -412,6 +412,37 @@ def main() -> None:
         backlog.write_text(json.dumps(completion_data, indent=2))
         print(f"[spawn] Saved completion data to {backlog}")
 
+    # --- Step 6: Post-run worktree cleanup ---
+    # Remove the worktree after successful runs to prevent accumulation.
+    # Failed/escalated runs keep the worktree for debugging.
+    # Runs where L1 notification failed keep the worktree (completion-pending.json).
+    completion_pending = worktree_dir / ".harness" / "completion-pending.json"
+    if status == "complete" and not completion_pending.exists():
+        print(f"[spawn] Cleaning up worktree (status={status})")
+        # Archive key logs to the persistent trace directory before removing
+        trace_archive = client_repo.parent / "trace-archive" / ticket_id
+        try:
+            trace_archive.mkdir(parents=True, exist_ok=True)
+            harness_logs = worktree_dir / ".harness" / "logs"
+            if harness_logs.exists():
+                for log_file in harness_logs.iterdir():
+                    if log_file.is_file():
+                        shutil.copy2(log_file, trace_archive / log_file.name)
+            print(f"[spawn] Logs archived to {trace_archive}")
+        except OSError as exc:
+            print(f"[spawn] WARNING: Log archival failed: {exc}")
+
+        # Remove worktree
+        result = run_git(str(client_repo), "worktree", "remove", str(worktree_dir), "--force", check=False)
+        if result.returncode != 0 and worktree_dir.exists():
+            shutil.rmtree(worktree_dir, ignore_errors=True)
+        run_git(str(client_repo), "worktree", "prune", check=False)
+        print("[spawn] Worktree removed")
+    elif status != "complete":
+        print(f"[spawn] Keeping worktree for debugging (status={status})")
+    else:
+        print("[spawn] Keeping worktree (L1 notification pending)")
+
     sys.exit(exit_code)
 
 
