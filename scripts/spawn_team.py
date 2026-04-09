@@ -68,114 +68,74 @@ def main() -> None:
             print(f"Error: Invalid JSON in ticket file: {ticket_json}")
             sys.exit(1)
 
-    # --- Step 0: Pre-flight cleanup — purge all stale worktrees ---
-    # Scan every worktree directory. A worktree is stale if:
-    #   - It has a .agent.lock with a dead PID, OR
-    #   - It has no .agent.lock at all (agent finished but worktree wasn't removed)
-    # Active worktrees (lock file with a live PID) are left alone.
-    worktrees_root = client_repo.parent / "worktrees"
-    if worktrees_root.exists():
-        stale_count = 0
-        for harness_dir in sorted(worktrees_root.rglob(".harness")):
-            if not harness_dir.is_dir():
-                continue
-            wt_dir = harness_dir.parent
-            lock_file_check = harness_dir / ".agent.lock"
+    # --- Step 0: Pre-flight cleanup — clean prior worktrees for THIS ticket only ---
+    # Only removes worktrees from earlier runs of the same ticket (same branch name).
+    # Other tickets' worktrees are left alone — they may be needed for debugging
+    # or have completion-pending.json awaiting retry.
+    worktree_dir_candidate = client_repo.parent / "worktrees" / branch_name
+    if worktree_dir_candidate.exists():
+        harness_dir = worktree_dir_candidate / ".harness"
+        lock_file_check = harness_dir / ".agent.lock" if harness_dir.exists() else None
 
-            # Check if an agent is actively running in this worktree
-            if lock_file_check.exists():
-                try:
-                    lock_content = lock_file_check.read_text().strip()
-                    lock_pid = int(lock_content) if lock_content.isdigit() else 0
-                    if lock_pid > 0:
-                        try:
-                            os.kill(lock_pid, 0)
-                            continue  # Agent still running — leave it alone
-                        except (ProcessLookupError, PermissionError):
-                            pass
-                except (OSError, ValueError):
-                    pass
-                stale_reason = "agent process dead, lock file stale"
-            else:
-                stale_reason = "no lock file, worktree left behind from prior run"
-
-            # Extract ticket ID for trace audit trail
-            stale_ticket_id = wt_dir.name
-            stale_ticket_json = harness_dir / "ticket.json"
-            if stale_ticket_json.exists():
-                try:
-                    stale_ticket_id = json.loads(stale_ticket_json.read_text()).get("id", wt_dir.name)
-                except (json.JSONDecodeError, OSError):
-                    pass
-
-            print(f"[spawn] Pre-flight: cleaning stale worktree {wt_dir.name} (ticket: {stale_ticket_id}, reason: {stale_reason})")
-
-            # Record cleanup in the trace so there's an audit trail
+        # Check if an agent is actively running in this worktree
+        agent_alive = False
+        if lock_file_check and lock_file_check.exists():
             try:
-                from l1_preprocessing.tracer import append_trace, generate_trace_id
-                append_trace(
-                    stale_ticket_id,
-                    generate_trace_id(),
-                    "spawn",
-                    "stale_worktree_cleaned",
-                    worktree=str(wt_dir),
-                    reason=f"Pre-flight cleanup: {stale_reason}",
-                )
-            except Exception:
-                pass  # Trace is best-effort — don't block cleanup
-
-            result = run_git(str(client_repo), "worktree", "remove", str(wt_dir), "--force", check=False)
-            if result.returncode != 0 and wt_dir.exists():
-                shutil.rmtree(wt_dir, ignore_errors=True)
-            stale_count += 1
-        if stale_count:
-            run_git(str(client_repo), "worktree", "prune", check=False)
-            print(f"[spawn] Pre-flight: cleaned {stale_count} stale worktree(s)")
-
-    # --- Step 1: Create worktree (handle collisions) ---
-    worktree_dir = client_repo.parent / "worktrees" / branch_name
-
-    lock_file = worktree_dir / ".harness" / ".agent.lock"
-
-    if worktree_dir.exists():
-        # Check lock file — if it exists and the PID is still alive, agent is running
-        try:
-            if lock_file.exists():
-                lock_content = lock_file.read_text().strip()
+                lock_content = lock_file_check.read_text().strip()
                 lock_pid = int(lock_content) if lock_content.isdigit() else 0
-
-                # Check if the PID is still alive
-                pid_alive = False
                 if lock_pid > 0:
                     try:
-                        os.kill(lock_pid, 0)  # signal 0 = check existence
-                        pid_alive = True
+                        os.kill(lock_pid, 0)
+                        agent_alive = True
                     except (ProcessLookupError, PermissionError):
                         pass
+            except (OSError, ValueError):
+                pass
 
-                if pid_alive:
-                    print(f"[spawn] Agent running for {branch_name} (PID {lock_pid}) — skipping")
-                    sys.exit(0)
-                else:
-                    print(f"[spawn] Stale lock (PID {lock_pid} not running) — removing")
-                    lock_file.unlink(missing_ok=True)
-        except (OSError, ValueError):
-            # Lock file unreadable or corrupt — safe to proceed
-            lock_file.unlink(missing_ok=True)
+        if agent_alive:
+            print(f"[spawn] Agent already running for {branch_name} — skipping")
+            sys.exit(0)
 
-        print("[spawn] Worktree exists but no agent running — cleaning up stale worktree")
-        result = run_git(
-            str(client_repo), "worktree", "remove", str(worktree_dir), "--force", check=False
-        )
-        if result.returncode != 0:
-            print(f"[spawn] WARNING: git worktree remove failed: {result.stderr.strip()}")
-            # Fallback: force remove directory
-            if worktree_dir.exists():
-                shutil.rmtree(worktree_dir)
+        # Worktree exists from a prior run — determine reason and clean up
+        if lock_file_check and lock_file_check.exists():
+            stale_reason = "agent process dead, lock file stale"
+        else:
+            stale_reason = "prior run completed but worktree not removed"
+
+        # Extract ticket ID for trace
+        stale_ticket_id = branch_name
+        stale_ticket_json = harness_dir / "ticket.json" if harness_dir.exists() else None
+        if stale_ticket_json and stale_ticket_json.exists():
+            try:
+                stale_ticket_id = json.loads(stale_ticket_json.read_text()).get("id", branch_name)
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        print(f"[spawn] Pre-flight: cleaning prior worktree for {branch_name} (ticket: {stale_ticket_id}, reason: {stale_reason})")
+
+        # Record cleanup in the trace
+        try:
+            from l1_preprocessing.tracer import append_trace, generate_trace_id
+            append_trace(
+                stale_ticket_id,
+                generate_trace_id(),
+                "spawn",
+                "stale_worktree_cleaned",
+                worktree=str(worktree_dir_candidate),
+                reason=f"Pre-flight cleanup: {stale_reason}",
+            )
+        except Exception:
+            pass  # Trace is best-effort — don't block cleanup
+
+        result = run_git(str(client_repo), "worktree", "remove", str(worktree_dir_candidate), "--force", check=False)
+        if result.returncode != 0 and worktree_dir_candidate.exists():
+            shutil.rmtree(worktree_dir_candidate, ignore_errors=True)
         run_git(str(client_repo), "worktree", "prune", check=False)
         run_git(str(client_repo), "branch", "-D", branch_name, check=False)
-        print("[spawn] Stale worktree cleaned up")
+        print("[spawn] Prior worktree cleaned up")
 
+    # --- Step 1: Create worktree ---
+    worktree_dir = client_repo.parent / "worktrees" / branch_name
     print(f"[spawn] Creating worktree at: {worktree_dir}")
     result = run_git(str(client_repo), "worktree", "add", str(worktree_dir), "-b", branch_name, check=False)
     if result.returncode != 0:
