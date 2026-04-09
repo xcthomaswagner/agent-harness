@@ -90,6 +90,7 @@ class CallbackConfig(BaseModel):
     ticket_id: str
     source: TicketSource
     auth_token: str = Field(default="", repr=False)  # Never logged
+    ado_project: str = ""  # Real ADO project name for API calls (e.g., "XC-SF-30in30")
 
     @field_validator("base_url")
     @classmethod

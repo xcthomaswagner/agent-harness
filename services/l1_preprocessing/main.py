@@ -365,6 +365,8 @@ async def ado_webhook(
     if profile:
         # Remap ticket ID to use the profile's project_key prefix
         ticket.id = f"{profile.project_key}-{work_item_id}"
+        # Register mapping so write-back methods resolve the real ADO project name
+        _get_ado_adapter()._project_key_map[profile.project_key] = ado_project
 
     # --- Tag check: skip if neither ai_label nor quick_label is present ---
     # Use the already-tokenized labels from the adapter (exact match, not substring)

@@ -39,6 +39,9 @@ class AdoAdapter:
             headers=self._auth_headers(settings),
             timeout=30.0,
         )
+        # Maps project_key prefix → real ADO project name for write-back URL construction.
+        # Populated during normalize() when the ticket ID is remapped by the webhook handler.
+        self._project_key_map: dict[str, str] = {}
 
     @staticmethod
     def _auth_headers(settings: Settings) -> dict[str, str]:
@@ -105,6 +108,7 @@ class AdoAdapter:
             ticket_id=work_item_id,
             source=TicketSource.ADO,
             auth_token=self._settings.ado_pat,
+            ado_project=project,
         ) if org_url else None
 
         return TicketPayload(
@@ -210,9 +214,12 @@ class AdoAdapter:
 
     # --- Write-back operations ---
 
-    @staticmethod
-    def _parse_ticket_id(ticket_id: str) -> tuple[str, str]:
+    def _parse_ticket_id(self, ticket_id: str) -> tuple[str, str]:
         """Extract (project, work_item_id) from composite ticket ID.
+
+        The project prefix may be a short alias (e.g., "XCSF30") rather than
+        the real ADO project name (e.g., "XC-SF-30in30"). If a mapping was
+        registered during normalize(), use the real name for API calls.
 
         Raises ValueError if the ID has no project prefix (no dash).
         """
@@ -220,8 +227,10 @@ class AdoAdapter:
             raise ValueError(
                 f"Invalid ADO ticket ID '{ticket_id}': expected 'PROJECT-123' format"
             )
-        project, wi_id = ticket_id.rsplit("-", 1)
-        return project, wi_id
+        project_key, wi_id = ticket_id.rsplit("-", 1)
+        # Resolve to real ADO project name if mapped
+        real_project = self._project_key_map.get(project_key, project_key)
+        return real_project, wi_id
 
     async def write_comment(self, ticket_id: str, comment: str) -> None:
         """Post a comment on an ADO work item."""

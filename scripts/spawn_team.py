@@ -68,6 +68,70 @@ def main() -> None:
             print(f"Error: Invalid JSON in ticket file: {ticket_json}")
             sys.exit(1)
 
+    # --- Step 0: Pre-flight cleanup — purge all stale worktrees ---
+    # Scan every worktree directory. A worktree is stale if:
+    #   - It has a .agent.lock with a dead PID, OR
+    #   - It has no .agent.lock at all (agent finished but worktree wasn't removed)
+    # Active worktrees (lock file with a live PID) are left alone.
+    worktrees_root = client_repo.parent / "worktrees"
+    if worktrees_root.exists():
+        stale_count = 0
+        for harness_dir in sorted(worktrees_root.rglob(".harness")):
+            if not harness_dir.is_dir():
+                continue
+            wt_dir = harness_dir.parent
+            lock_file_check = harness_dir / ".agent.lock"
+
+            # Check if an agent is actively running in this worktree
+            if lock_file_check.exists():
+                try:
+                    lock_content = lock_file_check.read_text().strip()
+                    lock_pid = int(lock_content) if lock_content.isdigit() else 0
+                    if lock_pid > 0:
+                        try:
+                            os.kill(lock_pid, 0)
+                            continue  # Agent still running — leave it alone
+                        except (ProcessLookupError, PermissionError):
+                            pass
+                except (OSError, ValueError):
+                    pass
+                stale_reason = "agent process dead, lock file stale"
+            else:
+                stale_reason = "no lock file, worktree left behind from prior run"
+
+            # Extract ticket ID for trace audit trail
+            stale_ticket_id = wt_dir.name
+            stale_ticket_json = harness_dir / "ticket.json"
+            if stale_ticket_json.exists():
+                try:
+                    stale_ticket_id = json.loads(stale_ticket_json.read_text()).get("id", wt_dir.name)
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            print(f"[spawn] Pre-flight: cleaning stale worktree {wt_dir.name} (ticket: {stale_ticket_id}, reason: {stale_reason})")
+
+            # Record cleanup in the trace so there's an audit trail
+            try:
+                from l1_preprocessing.tracer import append_trace, generate_trace_id
+                append_trace(
+                    stale_ticket_id,
+                    generate_trace_id(),
+                    "spawn",
+                    "stale_worktree_cleaned",
+                    worktree=str(wt_dir),
+                    reason=f"Pre-flight cleanup: {stale_reason}",
+                )
+            except Exception:
+                pass  # Trace is best-effort — don't block cleanup
+
+            result = run_git(str(client_repo), "worktree", "remove", str(wt_dir), "--force", check=False)
+            if result.returncode != 0 and wt_dir.exists():
+                shutil.rmtree(wt_dir, ignore_errors=True)
+            stale_count += 1
+        if stale_count:
+            run_git(str(client_repo), "worktree", "prune", check=False)
+            print(f"[spawn] Pre-flight: cleaned {stale_count} stale worktree(s)")
+
     # --- Step 1: Create worktree (handle collisions) ---
     worktree_dir = client_repo.parent / "worktrees" / branch_name
 
