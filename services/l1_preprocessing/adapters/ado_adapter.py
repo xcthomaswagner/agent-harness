@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 import structlog
@@ -32,6 +32,11 @@ _ADO_TYPE_MAP: dict[str, TicketType] = {
 class AdoAdapter:
     """Normalizes Azure DevOps Service Hook payloads and writes back via ADO REST API."""
 
+    # Class-level map: project_key prefix → real ADO project name.
+    # Shared across all instances so the webhook handler's registration
+    # is visible to the Pipeline's adapter instance.
+    _project_key_map: ClassVar[dict[str, str]] = {}
+
     def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
         self._settings = settings
         self._client = client or httpx.AsyncClient(
@@ -39,9 +44,6 @@ class AdoAdapter:
             headers=self._auth_headers(settings),
             timeout=30.0,
         )
-        # Maps project_key prefix → real ADO project name for write-back URL construction.
-        # Populated during normalize() when the ticket ID is remapped by the webhook handler.
-        self._project_key_map: dict[str, str] = {}
 
     @staticmethod
     def _auth_headers(settings: Settings) -> dict[str, str]:
