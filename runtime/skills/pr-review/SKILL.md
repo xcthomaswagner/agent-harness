@@ -40,10 +40,24 @@ See `SECURITY_REVIEW.md`:
 
 ### Step 5: Post Review
 
-Post findings as a GitHub PR review using `gh` CLI:
+Check `.harness/source-control.json` for source control type. If the file does not exist, default to GitHub.
+
+**GitHub:**
 ```bash
 gh pr review <PR_NUMBER> --comment --body "AI Review: ..."
 ```
+
+**Azure Repos:**
+```
+mcp__ado__repo_create_pull_request_thread(
+  repositoryId="<from source-control.json>",
+  pullRequestId=<PR_NUMBER>,
+  content="AI Review: ...",
+  status="Active"
+)
+```
+
+For file-specific findings, include `filePath` and `rightFileStartLine`/`rightFileEndLine` to place comments on the correct lines.
 
 ### Step 6: Save Local Artifact
 
@@ -53,7 +67,7 @@ Also write your review to `.harness/logs/pr-review.md` so it is captured by the 
 
 ## Output
 
-1. **GitHub PR comment** — posted via `gh pr review` (primary)
+1. **PR comment** — posted via `gh pr review` (GitHub) or `mcp__ado__repo_create_pull_request_thread` (Azure Repos)
 2. **Local artifact** — `.harness/logs/pr-review.md` in the worktree (for observability)
 
 See `REVIEW_TEMPLATE.md` for the structured format used in both outputs.

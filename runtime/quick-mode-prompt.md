@@ -74,6 +74,8 @@ If the implementation has a visual UI, start the dev server, navigate to the pag
 
 Push and open a draft PR. Include the code review verdict and QA matrix in the PR body.
 
+Follow the "PR Creation" instructions in CLAUDE.md — check `.harness/source-control.json` for the source control type (GitHub uses `gh pr create`, Azure Repos uses `mcp__ado__repo_create_pull_request`).
+
 ## Logging
 
 Log each step to `.harness/logs/pipeline.jsonl` as JSON Lines. Use actual timestamps: run `date -u +%Y-%m-%dT%H:%M:%SZ` for each entry.

@@ -97,7 +97,9 @@ After all branches are merged:
 
 ### Step 6: Open Draft PR
 
-Only when the integration branch is green:
+Only when the integration branch is green. Check `.harness/source-control.json` for source control type.
+
+**GitHub (default):**
 
 ```bash
 gh pr create \
@@ -107,6 +109,22 @@ gh pr create \
   --body "{PR description with ticket link, changes summary, test evidence}" \
   --draft
 ```
+
+**Azure Repos:**
+
+```
+mcp__ado__repo_create_pull_request(
+  repositoryId="<from source-control.json>",
+  sourceRefName="refs/heads/ai/{ticket-id}",
+  targetRefName="refs/heads/<default_branch>",
+  title="feat({ticket-id}): {ticket title}",
+  description="{PR description — max 4000 chars}",
+  isDraft=true,
+  workItems="{numeric work item ID}"
+)
+```
+
+`workItems` links the work item automatically. Use the numeric ID only (e.g., "123"), not the composite key.
 
 PR description should include:
 - Link to the source ticket
