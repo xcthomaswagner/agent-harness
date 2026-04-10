@@ -654,12 +654,19 @@ def _classify_traces(
 
 def _render_board_column(title: str, color: str, traces: list[dict[str, Any]], count: int) -> str:
     """Render a single Kanban column."""
+    # In-flight statuses get the pulsing "running" indicator
+    in_flight_statuses = {
+        "Dispatched", "Processing", "Enriched", "Planned",
+        "Implementing", "Review Done", "QA Done", "Merged", "CI Fix",
+    }
     cards = ""
     for t in traces:
         tid = _e(t["ticket_id"])
         status = t.get("status", "")
         duration = _e(t.get("duration", ""))
+        current_phase = t.get("current_phase", "")
         badge_cls = _STATUS_BADGE.get(status, "badge-secondary")
+        is_running = status in in_flight_statuses
 
         extra = ""
         if status in _FAILED_STATUSES or status in _STUCK_THRESHOLDS:
@@ -670,6 +677,18 @@ def _render_board_column(title: str, color: str, traces: list[dict[str, Any]], c
                 extra = (
                     f'<div style="margin-top:6px;font-size:11.2px;color:#64748B">{_e(hint[:120])}</div>'
                 )
+
+        # Live progress row (running tickets only)
+        progress_html = ""
+        if is_running and current_phase:
+            progress_html = (
+                f'<div style="margin-top:6px;display:flex;align-items:center;gap:6px;'
+                f'font-size:11.2px;color:#EA580C">'
+                f'<span class="pulse-dot" style="width:8px;height:8px;border-radius:50%;'
+                f'background:#EA580C;display:inline-block;animation:pulse 1.5s ease-in-out infinite"></span>'
+                f'<span>Running: <strong>{_e(current_phase)}</strong></span>'
+                f'</div>'
+            )
 
         review = t.get("review_verdict", "")
         qa = t.get("qa_result", "")
@@ -690,6 +709,7 @@ def _render_board_column(title: str, color: str, traces: list[dict[str, Any]], c
             f'<a href="/traces/{tid}" style="font-weight:500;font-size:13.2px">{tid}</a>'
             f'{_badge(status, badge_cls)}</div>'
             f'<div style="margin-top:4px;font-size:11.2px;color:#64748B">{duration} {badges}{pr_link}</div>'
+            f'{progress_html}'
             f'{extra}</div>'
         )
 
@@ -721,8 +741,13 @@ def _render_board(traces: list[dict[str, Any]], total: int) -> str:
 
     return f"""<!DOCTYPE html><html><head>
 <title>Status Board</title>
-<meta http-equiv="refresh" content="10">
-<style>{_LANGFUSE_STYLES}</style>
+<meta http-equiv="refresh" content="5">
+<style>{_LANGFUSE_STYLES}
+@keyframes pulse {{
+  0%, 100% {{ opacity: 1; transform: scale(1); }}
+  50% {{ opacity: 0.4; transform: scale(0.85); }}
+}}
+</style>
 </head><body><div class="page">
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
   <h1>Status Board <span class="meta" style="margin-left:8px">{total} tickets</span></h1>

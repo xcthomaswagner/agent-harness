@@ -196,12 +196,28 @@ def list_traces(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
             "review_verdict": review_verdict,
             "qa_result": qa_result,
             "pipeline_mode": pipeline_mode,
+            "current_phase": _derive_current_phase(entries),
             "phases": total_phases,
             "entries": len(entries),
             "_raw_entries": entries,  # cached for dashboard; excluded from JSON API
         })
 
     return traces
+
+
+def _derive_current_phase(entries: list[dict[str, Any]]) -> str:
+    """Return the most recent agent phase name for live progress display.
+
+    Walks the entries in reverse looking for the last agent-written phase.
+    Empty string if no agent activity yet.
+    """
+    run_start_idx = _find_run_start_idx(entries)
+    for e in reversed(entries[run_start_idx:]):
+        if e.get("source") == "agent":
+            phase = e.get("phase", "")
+            if phase and phase not in ("ticket_read",):
+                return str(phase)
+    return ""
 
 
 def _find_run_start_idx(entries: list[dict[str, Any]]) -> int:
