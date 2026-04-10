@@ -205,13 +205,34 @@ def list_traces(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
 
 
 def _find_run_start_idx(entries: list[dict[str, Any]]) -> int:
-    """Find the index of the last pipeline start or webhook event (run boundary)."""
-    run_start_idx = 0
+    """Find the index of the last pipeline run boundary.
+
+    A valid run boundary is a webhook_received or "Pipeline started" event
+    that is followed by either agent-written entries (pipeline.jsonl via
+    live trace) or L1 processing_started. Webhooks that were dedup-skipped
+    (no subsequent processing) are NOT run boundaries.
+    """
+    # Candidate boundary indices
+    candidates: list[int] = []
     for i, e in enumerate(entries):
         ev = e.get("event", "")
         if "Pipeline started" in ev or "webhook_received" in ev:
-            run_start_idx = i
-    return run_start_idx
+            candidates.append(i)
+
+    if not candidates:
+        return 0
+
+    # Walk candidates from latest to earliest, pick the first one that has
+    # agent entries OR processing_started after it
+    for idx in reversed(candidates):
+        for j in range(idx + 1, len(entries)):
+            after = entries[j]
+            if after.get("source") == "agent":
+                return idx
+            if after.get("event", "") == "processing_started":
+                return idx
+    # Fallback: use first candidate
+    return candidates[0]
 
 
 def compute_phase_durations(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
