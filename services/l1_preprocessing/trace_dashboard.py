@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
+from diagnostic import render_diagnostic_checklist, run_diagnostic_checklist
 from tracer import (
     build_span_tree,
     build_trace_list_row,
@@ -441,6 +442,10 @@ def _render_span_row(
     return row + art_html
 
 
+def _diag_checklist_html(entries: list[dict[str, Any]]) -> str:
+    return render_diagnostic_checklist(run_diagnostic_checklist(entries))
+
+
 def _render_detail(ticket_id: str) -> str:
     """Render the Langfuse-style trace detail view."""
     entries = read_trace(ticket_id)
@@ -636,7 +641,7 @@ def _render_detail(ticket_id: str) -> str:
 <title>Trace &mdash; {_e(ticket_id)}</title>
 <style>{_LANGFUSE_STYLES}</style>
 </head><body><div class="page">
-{breadcrumb}{title}{summary_bar}{dur_bar}{failure_box}
+{breadcrumb}{title}{_diag_checklist_html(entries)}{summary_bar}{dur_bar}{failure_box}
 {session_html}
 {l1_html}{l2_html}{l3_html}{raw_html}
 </div></body></html>"""
