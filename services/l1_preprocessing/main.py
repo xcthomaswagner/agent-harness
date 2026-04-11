@@ -118,6 +118,21 @@ _active_tickets: set[str] = set()
 _active_tickets_lock = __import__("threading").Lock()
 _BACKGROUND_TASKS: set[asyncio.Task[None]] = set()  # prevent GC of fire-and-forget tasks
 
+# Per-ticket memory of whether the ai-implement (or quick) tag was present on
+# the last webhook we processed for this ticket. Used for edge detection on
+# the trigger tag — we only dispatch a new pipeline run when the tag
+# transitions from absent → present. This prevents cascading webhook re-fires
+# from unrelated ticket updates (PR merge commits linked to the work item,
+# comments posted by other users, field edits, etc.) from re-starting the
+# whole pipeline. See session_2026_04_10_p0_p2_sf_live.md Finding 4 for the
+# incident that motivated this.
+#
+# Shape: ticket_id → True if the trigger tag was present at last observation.
+# Missing key means "never seen this ticket" which is treated as tag-absent,
+# so the first webhook-with-tag for a ticket always triggers.
+_last_trigger_state: dict[str, bool] = {}
+_last_trigger_state_lock = __import__("threading").Lock()
+
 
 def _try_claim_ticket(ticket_id: str) -> bool:
     """Atomically check if a ticket is active and claim it if not.
@@ -136,6 +151,40 @@ def _release_ticket(ticket_id: str) -> None:
     """Release a ticket from the active set."""
     with _active_tickets_lock:
         _active_tickets.discard(ticket_id)
+
+
+def _check_trigger_edge(ticket_id: str, tag_present_now: bool) -> bool:
+    """Edge-detect the trigger tag for a ticket.
+
+    Returns True if this webhook represents a new trigger (i.e., the tag
+    transitioned from absent on the previous webhook to present on this one,
+    OR we've never seen this ticket before and the tag is present now).
+    Returns False if the tag has been continuously present across the last
+    webhook AND this one, in which case this webhook is almost certainly a
+    non-trigger side effect (PR merge, comment, field edit, etc.) and should
+    not start a new pipeline run.
+
+    Also records the current tag state so the next webhook for the same
+    ticket can compare against it.
+
+    Thread-safe via lock.
+    """
+    with _last_trigger_state_lock:
+        prev = _last_trigger_state.get(ticket_id, False)
+        _last_trigger_state[ticket_id] = tag_present_now
+        # New trigger iff tag is present now AND was NOT present last time.
+        return tag_present_now and not prev
+
+
+def _clear_trigger_state(ticket_id: str) -> None:
+    """Forget the last known tag state for a ticket.
+
+    Used when the tag is observed absent — ensures the next time the tag
+    comes back we treat it as a fresh edge. Also used for manual reset in
+    tests.
+    """
+    with _last_trigger_state_lock:
+        _last_trigger_state.pop(ticket_id, None)
 
 
 # --- Pipeline processing (background) ---
@@ -388,9 +437,43 @@ async def ado_webhook(
     ticket_labels_lower = {lbl.lower() for lbl in ticket.labels}
     ai_label = (profile.ai_label if profile else "ai-implement").lower()
     quick_label = (profile.quick_label if profile else "ai-quick").lower()
-    if ai_label not in ticket_labels_lower and quick_label not in ticket_labels_lower:
+    tag_present = (
+        ai_label in ticket_labels_lower or quick_label in ticket_labels_lower
+    )
+
+    # If the tag is absent, clear any remembered state so a future re-add of
+    # the tag triggers a fresh edge. Then skip — there's nothing to do.
+    if not tag_present:
+        _clear_trigger_state(ticket.id)
         reason = f"Neither '{ai_label}' nor '{quick_label}' tag found"
         return {"status": "skipped", "ticket_id": ticket.id, "reason": reason}
+
+    # --- Trigger edge detection ---
+    # The tag is a one-shot trigger: present once → fire once. ADO fires
+    # workitem.updated on every field, relation, and comment change, so a
+    # tagged ticket can generate many webhooks after it has already been
+    # dispatched. Only dispatch when the tag transitions absent → present.
+    # Concretely this blocks the cascade where merging the agent's PR creates
+    # an ArtifactLink relation which fires a workitem.updated webhook where
+    # the tag is still present from the original dispatch. See Finding 4 in
+    # session_2026_04_10_p0_p2_sf_live.md.
+    if not _check_trigger_edge(ticket.id, tag_present):
+        logger.info(
+            "ado_webhook_not_edge",
+            ticket_id=ticket.id,
+            reason="trigger tag already present on previous webhook",
+        )
+        append_trace(
+            ticket.id, generate_trace_id(), "webhook", "ado_webhook_skipped_not_edge",
+            ticket_type=ticket.ticket_type, source="ado",
+            ticket_title=ticket.title,
+            reason="tag already present on previous webhook",
+        )
+        return {
+            "status": "skipped",
+            "ticket_id": ticket.id,
+            "reason": "trigger tag already present on previous webhook (not a new edge)",
+        }
 
     trace_id = generate_trace_id()
     logger.info("ado_webhook_received", ticket_id=ticket.id, ticket_type=ticket.ticket_type)

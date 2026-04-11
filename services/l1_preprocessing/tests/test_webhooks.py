@@ -219,6 +219,49 @@ async def test_ado_webhook_processes_when_ai_tag_present() -> None:
         assert response.json()["status"] == "accepted"
 
 
+async def test_ado_webhook_second_call_with_same_tag_is_not_a_new_edge() -> None:
+    """Regression test for Finding 4 from session 2026-04-10 post-mortem.
+
+    The trigger tag is a one-shot edge, not a level. Two consecutive webhooks
+    with the tag present (common when ADO fires workitem.updated for a merge
+    commit, comment, or field edit after the pipeline already dispatched) must
+    NOT re-trigger the pipeline. The first call edges absent→present and
+    accepts; the second sees present→present and skips.
+    """
+    payload = _ado_payload(work_item_id=7777, tags="ai-implement")
+    async with await _make_client() as client:
+        first = await client.post("/webhooks/ado", json=payload)
+        assert first.status_code == 202
+        assert first.json()["status"] == "accepted"
+
+        second = await client.post("/webhooks/ado", json=payload)
+        assert second.status_code == 202
+        assert second.json()["status"] == "skipped"
+        assert "not a new edge" in second.json()["reason"]
+
+
+async def test_ado_webhook_tag_removed_then_readded_retriggers() -> None:
+    """If the tag is removed and then re-added, that IS a new edge and the
+    pipeline should fire again. Without clearing state on tag-absent webhooks
+    a re-add after the first cascade would be silently skipped forever."""
+    async with await _make_client() as client:
+        # First fire: absent → present. Accepted.
+        p1 = _ado_payload(work_item_id=8888, tags="ai-implement")
+        r1 = await client.post("/webhooks/ado", json=p1)
+        assert r1.json()["status"] == "accepted"
+
+        # Tag removed. Webhook arrives with no trigger tags. State cleared.
+        p2 = _ado_payload(work_item_id=8888, tags="sprint-7")
+        r2 = await client.post("/webhooks/ado", json=p2)
+        assert r2.json()["status"] == "skipped"
+        assert "ai-implement" in r2.json()["reason"]  # reason is "tag not found"
+
+        # Tag re-added. Should be treated as a fresh edge, accepted again.
+        p3 = _ado_payload(work_item_id=8888, tags="ai-implement")
+        r3 = await client.post("/webhooks/ado", json=p3)
+        assert r3.json()["status"] == "accepted"
+
+
 async def test_ado_webhook_remaps_ticket_id(tmp_path: Path) -> None:
     """When a matching ADO profile exists, ticket ID is remapped to project_key prefix."""
     profiles_dir = tmp_path / "profiles"
