@@ -368,6 +368,14 @@ async def ado_webhook(
     ado_project = fields.get("System.TeamProject", "")
     work_item_id = str(work_item.get("id", resource.get("workItemId", "")))
 
+    # ADO work item webhook payloads do not contain repository information —
+    # work items are project-scoped and only loosely linked to repos via
+    # outbound ArtifactLinks at commit/branch/PR time. The finest routing
+    # granularity we get from the webhook alone is System.TeamProject, so
+    # client profiles are keyed 1:1 on ado_project_name. If two profiles share
+    # the same ado_project_name, the alphabetically-first one wins and the
+    # second is unreachable via this path. L3 (PR webhooks) has repo GUID in
+    # its payload and uses find_profile_by_ado_repo instead.
     profile = find_profile_by_ado_project(ado_project) if ado_project else None
     if profile:
         # Remap ticket ID to use the profile's project_key prefix
