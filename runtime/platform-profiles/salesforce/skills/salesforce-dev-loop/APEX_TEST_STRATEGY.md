@@ -1,6 +1,8 @@
 # Apex Test Strategy
 
-Apex tests run **in the org**, not locally. There is no `pytest` or `jest` equivalent for Apex. You invoke them via `sf_apex_test` against the scratch org and parse the result JSON.
+Apex tests run **in the org**, not locally. There is no `pytest` or `jest` equivalent for Apex. You invoke them via the `mcp__salesforce__sf_apex_test` MCP tool against the scratch org and read the structured result JSON.
+
+**Do not shell out to `sf apex run test` via Bash.** If `mcp__salesforce__sf_apex_test` is in your tool list, use it. The CLI fallback at the bottom of this file is only for the rare case where the MCP is literally unavailable.
 
 Coverage is enforced at deploy time by the platform itself — the org will reject a production deploy if overall coverage falls below 75% or if any class lacks ≥1% direct coverage. These gates are non-negotiable, so they become part of the dev loop, not an afterthought.
 
@@ -15,26 +17,32 @@ The platform also requires **every trigger** to have ≥1% coverage. In practice
 
 ## How to Run Tests
 
-### Via MCP (preferred)
+### Via MCP (the only acceptable path when the MCP is available)
+
+Full local test run with coverage:
 
 ```
-sf_apex_test(
-  testLevel: "RunLocalTests",
-  codeCoverage: true
+mcp__salesforce__sf_apex_test(
+  testLevel="RunLocalTests",
+  codeCoverage=true
 )
 ```
 
-For faster feedback on a specific test class:
+For faster feedback on a specific test class during self-correction:
 
 ```
-sf_apex_test(
-  classNames: ["AccountServiceTest", "AccountServiceHelperTest"],
-  testLevel: "RunSpecifiedTests",
-  codeCoverage: true
+mcp__salesforce__sf_apex_test(
+  classNames=["AccountServiceTest", "AccountServiceHelperTest"],
+  testLevel="RunSpecifiedTests",
+  codeCoverage=true
 )
 ```
 
-### Via CLI fallback
+Before the final handoff, always run a full `RunLocalTests` pass to confirm nothing else regressed. Partial runs (`RunSpecifiedTests`) are for speed during iteration; full runs are for verification.
+
+### CLI fallback — last resort only
+
+**Do not use this unless `mcp__salesforce__sf_apex_test` is not in your tool list.**
 
 ```bash
 sf apex run test \
@@ -170,10 +178,10 @@ When a test fails:
 Running the full test suite every self-correction cycle is wasteful. During self-correction, use `RunSpecifiedTests` with just the failing classes:
 
 ```
-sf_apex_test(
-  classNames: ["AccountServiceTest"],  # just the failing one
-  testLevel: "RunSpecifiedTests",
-  codeCoverage: true
+mcp__salesforce__sf_apex_test(
+  classNames=["AccountServiceTest"],
+  testLevel="RunSpecifiedTests",
+  codeCoverage=true
 )
 ```
 
@@ -183,7 +191,7 @@ sf_apex_test(
 
 Sometimes you see 87% in the scratch org but the production deploy rejects with "Average test coverage across all Apex Classes and Triggers is 68%". Causes:
 
-1. **Stale coverage data.** The org caches coverage results. Force a fresh run with `sf_apex_test` — do not rely on `sf_apex_coverage` alone, which may read cached numbers.
+1. **Stale coverage data.** The org caches coverage results. Force a fresh run with `mcp__salesforce__sf_apex_test` — do not rely on `mcp__salesforce__sf_apex_coverage` alone, which may read cached numbers.
 2. **Test classes not being counted.** Some deploy modes only count tests that actually ran during the deploy transaction. A production deploy that runs `RunLocalTests` measures coverage from THAT run, not from your last scratch org run.
 3. **Classes deployed without tests.** You added a new class but didn't add (or forgot to include) a test for it. The overall org percentage drops even if your touched classes are well-covered.
 

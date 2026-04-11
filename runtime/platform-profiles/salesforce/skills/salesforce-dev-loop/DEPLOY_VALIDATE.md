@@ -1,6 +1,8 @@
 # Deploy Validate — The Compile Check
 
-Salesforce has no local compiler. A **dry-run deploy** (exposed as `sf_deploy` with `checkOnly: true`) is the closest equivalent to `tsc --noEmit`. It sends the metadata to the target org, runs all the same validation the real deploy would run, but does NOT commit anything to the org.
+Salesforce has no local compiler. A **dry-run deploy** (exposed as the `mcp__salesforce__sf_deploy` MCP tool with `checkOnly=true`) is the closest equivalent to `tsc --noEmit`. It sends the metadata to the target org, runs all the same validation the real deploy would run, but does NOT commit anything to the org.
+
+**Do not shell out to `sf project deploy ...` via Bash.** If `mcp__salesforce__sf_deploy` is in your tool list, use it. The CLI fallback at the bottom of this file is only for the rare case where the MCP is literally unavailable.
 
 Under the hood this maps to `sf project deploy start --dry-run` — not `sf project deploy validate`. The two are different commands with different flag support: `deploy start --dry-run` accepts `NoTestRun` as a test level (what we want for compile-only checks), while `deploy validate` does NOT — its minimum is `RunLocalTests`. **Always use `deploy start --dry-run` for fast compile feedback.** Reserve `deploy validate` for quarantined production pre-flight checks where running tests is required.
 
@@ -15,29 +17,31 @@ Under the hood this maps to `sf project deploy start --dry-run` — not `sf proj
 
 ## How to Call It
 
-### Via MCP (preferred)
+### Via MCP (the only acceptable path when the MCP is available)
 
 ```
-sf_deploy(
-  sourcePath: "force-app/",
-  testLevel: "NoTestRun",
-  checkOnly: true
+mcp__salesforce__sf_deploy(
+  sourcePath="force-app/",
+  testLevel="NoTestRun",
+  checkOnly=true
 )
 ```
 
 Narrow the scope if you can:
 
 ```
-sf_deploy(
-  sourcePath: "force-app/main/default/classes/AccountService.cls",
-  testLevel: "NoTestRun",
-  checkOnly: true
+mcp__salesforce__sf_deploy(
+  sourcePath="force-app/main/default/classes/AccountService.cls",
+  testLevel="NoTestRun",
+  checkOnly=true
 )
 ```
 
-A narrower path means a faster validate cycle and a clearer failure signal.
+A narrower path means a faster dry-run cycle and a clearer failure signal.
 
-### Via CLI fallback
+### CLI fallback — last resort only
+
+**Do not use this unless `mcp__salesforce__sf_deploy` is not in your tool list.**
 
 ```bash
 sf project deploy start \
@@ -57,7 +61,7 @@ Pipe the result into a file and parse — never rely on the human-formatted outp
 |---|---|
 | `NoTestRun` | Default for the dry-run compile check. Fast feedback on compile errors without burning time on tests. Works with `deploy start --dry-run`, NOT with `deploy validate`. |
 | `RunSpecifiedTests` | When you need to verify a specific test class passes after a change, without running the whole suite. |
-| `RunLocalTests` | Only in Phase 4 (Test). Don't combine with the dry-run compile check — run the tests explicitly via `sf_apex_test`. |
+| `RunLocalTests` | Only in Phase 4 (Test). Don't combine with the dry-run compile check — run the tests explicitly via `mcp__salesforce__sf_apex_test`. |
 | `RunAllTestsInOrg` | Never during dev loop. This includes managed package tests and is slow and irrelevant. |
 
 **The recommended pattern:** `NoTestRun` during the dry-run compile check, then a separate `sf_apex_test(testLevel: "RunLocalTests")` call in Phase 4. This gives you cleaner failure signals — you know a dry-run failure is a compile problem, and a test failure is a behavior problem.

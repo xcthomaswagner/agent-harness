@@ -21,43 +21,61 @@ This means any developer on the team can reconstruct the alias from the ticket I
 
 ## Bootstrap Procedure
 
+All commands below use the `mcp__salesforce__*` MCP tools, not the `sf` CLI. If the MCP is unavailable, see the CLI fallback section in `SKILL.md` — but that is a last-resort path, not a normal one.
+
 ### Step 1: Check for an existing org
 
-```bash
-if [ -f .harness/sf-org.json ]; then
-  ALIAS=$(cat .harness/sf-org.json | jq -r .alias)
-  # Verify it's still alive
-  # Use MCP: sf_org_status(alias: ALIAS)
-  # If status returns success, reuse. If not, recreate.
-fi
-```
-
-### Step 2: Create the scratch org (if needed)
-
-Use the `sf_scratch_create` MCP tool:
+Read the cache file (use the Read tool, not Bash):
 
 ```
-sf_scratch_create(
-  alias: "ai-<ticket-id>",
-  definitionFile: "config/project-scratch-def.json",
-  durationDays: 7,
-  devHub: "<client's dev hub alias>"
+Read(file_path=".harness/sf-org.json")
+```
+
+If the file exists and contains an alias, verify the org is still alive:
+
+```
+mcp__salesforce__sf_org_status(alias="ai-<ticket-id>")
+```
+
+If status returns `Connected`, call `mcp__salesforce__sf_org_use(alias="ai-<ticket-id>")` and skip to Step 4. If status fails (auth error, deleted, expired), fall through to Step 2.
+
+### Step 2: Identify the Dev Hub
+
+Before you can create a scratch org, you need to know which Dev Hub to create it against. Priority:
+
+1. **Client profile hint.** Check the client profile YAML for a `dev_hub` field under `source_control` or `client_repo`. If set, use that alias.
+2. **Default Dev Hub from `sf_org_list`.** Otherwise, list authenticated orgs and find the Dev Hub:
+
+```
+mcp__salesforce__sf_org_list()
+```
+
+Look for entries with `isDevHub: true`. If there is exactly one, use it. If there are multiple, prefer the one marked `isDefault: true` or (failing that) the alphabetically first. Record which one you chose in the unit status so it's visible for debugging.
+
+**If no Dev Hub is authenticated** (no entries with `isDevHub: true`), STOP. Report "No authenticated Dev Hub available for scratch org creation" to the orchestrator. A human must run `sf org login web --set-default-dev-hub` before the pipeline can continue — this is not something you can fix inside the skill.
+
+### Step 3: Create the scratch org
+
+```
+mcp__salesforce__sf_scratch_create(
+  alias="ai-<ticket-id-lowercased>",
+  definitionFile="config/project-scratch-def.json",
+  durationDays=7,
+  devHub="<dev hub alias from Step 2>"
 )
 ```
 
-**Duration:** 7 days is the default. If the ticket is expected to take longer than that, bump to the maximum (30 for most editions). Don't use 1-day orgs — they expire mid-ticket.
+**Duration:** 7 days is the default. If the ticket is expected to take longer, bump to 30 (most editions' max). Don't use 1-day orgs — they expire mid-ticket.
 
-**Dev Hub:** Read from the client profile. If not set, fall back to the default Dev Hub (`sf config get target-dev-hub`).
+**On failure:** Common causes are (a) Dev Hub scratch org daily limit reached (typically 40/day), (b) `project-scratch-def.json` references a feature the Dev Hub isn't licensed for, (c) Dev Hub auth expired. Report the specific error — do not retry blindly.
 
-**On failure:** Common causes are (a) Dev Hub scratch org daily limit reached (typically 40/day), (b) `project-scratch-def.json` references a feature the Dev Hub isn't licensed for, or (c) no authenticated Dev Hub. Report the specific error, don't retry blindly.
-
-### Step 3: Set it as active and cache
+### Step 4: Set it as active and cache
 
 ```
-sf_org_use(alias: "ai-<ticket-id>")
+mcp__salesforce__sf_org_use(alias="ai-<ticket-id>")
 ```
 
-Then write the alias to `.harness/sf-org.json`:
+Then write the alias to `.harness/sf-org.json` using the Write tool:
 
 ```json
 {
@@ -68,17 +86,17 @@ Then write the alias to `.harness/sf-org.json`:
 }
 ```
 
-This file is **machine-local** — do not commit it.
+This file is **machine-local** — it is already in `.forceignore` and `.gitignore`, do not commit it.
 
-### Step 4: Push the base metadata
+### Step 5: Push the base metadata
 
 Before you start making ticket-specific changes, push the current repo state to the scratch org so you're building on top of the client's existing codebase:
 
 ```
-sf_deploy(
-  sourcePath: "force-app/",
-  testLevel: "NoTestRun",
-  checkOnly: false
+mcp__salesforce__sf_deploy(
+  sourcePath="force-app/",
+  testLevel="NoTestRun",
+  checkOnly=false
 )
 ```
 
@@ -107,9 +125,9 @@ When a second developer picks up a unit on the same ticket:
 
 1. They run Phase 1 (Bootstrap).
 2. `.harness/sf-org.json` already exists.
-3. They call `sf_org_status(alias: ...)` to verify it's still alive.
-4. If alive, `sf_org_use` to set it active and continue.
-5. If dead (expired, deleted, or unreachable), they recreate it using the same alias. `sf_scratch_create` with an existing alias will either reuse or replace depending on the MCP implementation — check the response.
+3. They call `mcp__salesforce__sf_org_status(alias="<cached alias>")` to verify it's still alive.
+4. If alive, `mcp__salesforce__sf_org_use(alias="<cached alias>")` to set it active and continue.
+5. If dead (expired, deleted, or unreachable), they recreate it using the same alias. `mcp__salesforce__sf_scratch_create` with an existing alias will either reuse or replace depending on the MCP implementation — check the response.
 
 ## Teardown
 
@@ -118,9 +136,9 @@ When a second developer picks up a unit on the same ticket:
 **Merge coordinator: tear down after merge.** When the PR is merged (or permanently abandoned), call:
 
 ```
-sf_scratch_delete(
-  alias: "ai-<ticket-id>",
-  confirm: true
+mcp__salesforce__sf_scratch_delete(
+  alias="ai-<ticket-id>",
+  confirm=true
 )
 ```
 
