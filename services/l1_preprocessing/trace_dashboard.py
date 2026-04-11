@@ -74,20 +74,6 @@ _STATUS_BADGE: dict[str, str] = {
     "Received": "badge-secondary",
 }
 
-# Statuses where the pipeline has finished running. When a trace is NOT in one
-# of these, the detail page auto-refreshes so users watching a live run see new
-# events without needing to reload the tab.
-_TERMINAL_STATUSES: frozenset[str] = frozenset({
-    "Complete",
-    "PR Created",
-    "Merged",
-    "Escalated",
-    "Failed",
-    "Timed Out",
-    "Agent Done (no PR)",
-    "Cleaned Up",
-})
-
 # Phase colors for duration bar and span icons
 _PHASE_COLORS: dict[str, str] = {
     "ticket_read": "#64748B", "planning": "#9333EA", "plan_review": "#9333EA",
@@ -110,6 +96,14 @@ _STUCK_THRESHOLDS: dict[str, float] = {
 }
 _FAILED_STATUSES = {"Escalated", "Agent Done (no PR)", "Failed", "Timed Out"}
 _COMPLETED_STATUSES = {"Complete"}
+
+# Statuses where the pipeline has finished running (no live updates expected).
+# Derived from the two existing sets plus a few post-pipeline states so any
+# future addition to _FAILED_STATUSES or _COMPLETED_STATUSES propagates
+# automatically to the detail-page auto-refresh gate.
+_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    _FAILED_STATUSES | _COMPLETED_STATUSES | {"PR Created", "Merged", "Cleaned Up"}
+)
 
 
 def _e(text: str) -> str:

@@ -17,6 +17,7 @@ import re
 import shutil
 import sys
 from pathlib import Path
+from typing import Any
 
 HARNESS_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = HARNESS_ROOT / "runtime"
@@ -32,7 +33,36 @@ SUPPLEMENT_MAP = {
 _ENV_VAR_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
 
 
-def expand_env_vars(value):
+def _inject_skill_dir(src_skill: Path, skills_dest: Path, label: str) -> None:
+    """Copy a single skill directory into the client's .claude/skills/.
+
+    Handles collision with existing client skills via a `.harness-injected`
+    marker: harness-owned skills are cleaned and re-copied; client-owned
+    skills trigger a fallback to a `harness-<name>` prefixed target.
+
+    `label` is the log prefix used when announcing the copy (e.g. "Skill"
+    or "Profile skill") so base and profile-level injections stay
+    distinguishable in output.
+    """
+    skill_name = src_skill.name
+    target_skill = skills_dest / skill_name
+
+    if target_skill.exists():
+        marker = target_skill / ".harness-injected"
+        if marker.exists():
+            shutil.rmtree(target_skill)
+        else:
+            print(f"[inject] WARNING: Client skill '{skill_name}' exists — prefixing with 'harness-'")
+            target_skill = skills_dest / f"harness-{skill_name}"
+            if target_skill.exists():
+                shutil.rmtree(target_skill)
+
+    shutil.copytree(src_skill, target_skill, dirs_exist_ok=True)
+    (target_skill / ".harness-injected").touch()
+    print(f"[inject] {label}: {skill_name}")
+
+
+def expand_env_vars(value: Any) -> Any:
     """Recursively expand ${VAR} and ${VAR:-default} in strings within a JSON-like structure."""
     if isinstance(value, str):
         def _sub(match: re.Match[str]) -> str:
@@ -60,28 +90,8 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
     skills_dest.mkdir(parents=True, exist_ok=True)
 
     for skill_dir in sorted((RUNTIME_DIR / "skills").iterdir()):
-        if not skill_dir.is_dir():
-            continue
-        skill_name = skill_dir.name
-        target_skill = skills_dest / skill_name
-
-        # Check for naming collision with existing client skills
-        if target_skill.exists():
-            # If this is a harness skill (re-injection), clean it first
-            marker = target_skill / ".harness-injected"
-            if marker.exists():
-                shutil.rmtree(target_skill)
-            else:
-                print(f"[inject] WARNING: Client skill '{skill_name}' exists — prefixing with 'harness-'")
-                target_skill = skills_dest / f"harness-{skill_name}"
-                # Clean stale prefixed dir from previous injection
-                if target_skill.exists():
-                    shutil.rmtree(target_skill)
-
-        shutil.copytree(skill_dir, target_skill, dirs_exist_ok=True)
-        # Mark as harness-injected for clean re-injection
-        (target_skill / ".harness-injected").touch()
-        print(f"[inject] Skill: {skill_name}")
+        if skill_dir.is_dir():
+            _inject_skill_dir(skill_dir, skills_dest, label="Skill")
 
     # --- Step 2: Inject agent definitions ---
     agents_dest = target_dir / ".claude" / "agents"
@@ -102,29 +112,12 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
             print(f"Available profiles: {', '.join(available)}")
             sys.exit(1)
 
-        # Copy profile-local skills into .claude/skills/
+        # Copy profile-local skills into .claude/skills/ (same semantics as Step 1)
         profile_skills_dir = profile_dir / "skills"
         if profile_skills_dir.is_dir():
             for profile_skill in sorted(profile_skills_dir.iterdir()):
-                if not profile_skill.is_dir():
-                    continue
-                skill_name = profile_skill.name
-                target_skill = skills_dest / skill_name
-
-                # Same collision handling as base skills
-                if target_skill.exists():
-                    marker = target_skill / ".harness-injected"
-                    if marker.exists():
-                        shutil.rmtree(target_skill)
-                    else:
-                        print(f"[inject] WARNING: Client skill '{skill_name}' exists — prefixing with 'harness-'")
-                        target_skill = skills_dest / f"harness-{skill_name}"
-                        if target_skill.exists():
-                            shutil.rmtree(target_skill)
-
-                shutil.copytree(profile_skill, target_skill, dirs_exist_ok=True)
-                (target_skill / ".harness-injected").touch()
-                print(f"[inject] Profile skill: {skill_name}")
+                if profile_skill.is_dir():
+                    _inject_skill_dir(profile_skill, skills_dest, label="Profile skill")
 
         # Append supplements to relevant skills
         for supplement in profile_dir.glob("*_SUPPLEMENT.md"):

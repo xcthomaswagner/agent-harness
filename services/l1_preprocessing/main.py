@@ -118,18 +118,10 @@ _active_tickets: set[str] = set()
 _active_tickets_lock = __import__("threading").Lock()
 _BACKGROUND_TASKS: set[asyncio.Task[None]] = set()  # prevent GC of fire-and-forget tasks
 
-# Per-ticket memory of whether the ai-implement (or quick) tag was present on
-# the last webhook we processed for this ticket. Used for edge detection on
-# the trigger tag — we only dispatch a new pipeline run when the tag
-# transitions from absent → present. This prevents cascading webhook re-fires
-# from unrelated ticket updates (PR merge commits linked to the work item,
-# comments posted by other users, field edits, etc.) from re-starting the
-# whole pipeline. See session_2026_04_10_p0_p2_sf_live.md Finding 4 for the
-# incident that motivated this.
-#
-# Shape: ticket_id → True if the trigger tag was present at last observation.
-# Missing key means "never seen this ticket" which is treated as tag-absent,
-# so the first webhook-with-tag for a ticket always triggers.
+# Per-ticket edge-detection memory for the trigger tag. See
+# _check_trigger_edge below for semantics, and
+# session_2026_04_10_p0_p2_sf_live.md Finding 4 for the cascade incident
+# that motivated this.
 _last_trigger_state: dict[str, bool] = {}
 _last_trigger_state_lock = __import__("threading").Lock()
 
@@ -185,6 +177,23 @@ def _clear_trigger_state(ticket_id: str) -> None:
     """
     with _last_trigger_state_lock:
         _last_trigger_state.pop(ticket_id, None)
+
+
+def _reset_state() -> None:
+    """Reset all module-level singletons and per-ticket memory.
+
+    For use by test fixtures that need a clean slate between tests. Avoids
+    having test code reach into module internals individually — when a new
+    singleton is added here, only this one function needs to learn about it.
+    """
+    global _jira_adapter, _ado_adapter, _pipeline
+    _jira_adapter = None
+    _ado_adapter = None
+    _pipeline = None
+    with _active_tickets_lock:
+        _active_tickets.clear()
+    with _last_trigger_state_lock:
+        _last_trigger_state.clear()
 
 
 # --- Pipeline processing (background) ---
@@ -448,15 +457,8 @@ async def ado_webhook(
         reason = f"Neither '{ai_label}' nor '{quick_label}' tag found"
         return {"status": "skipped", "ticket_id": ticket.id, "reason": reason}
 
-    # --- Trigger edge detection ---
-    # The tag is a one-shot trigger: present once → fire once. ADO fires
-    # workitem.updated on every field, relation, and comment change, so a
-    # tagged ticket can generate many webhooks after it has already been
-    # dispatched. Only dispatch when the tag transitions absent → present.
-    # Concretely this blocks the cascade where merging the agent's PR creates
-    # an ArtifactLink relation which fires a workitem.updated webhook where
-    # the tag is still present from the original dispatch. See Finding 4 in
-    # session_2026_04_10_p0_p2_sf_live.md.
+    # Edge-detect the trigger tag to skip non-dispatching cascade webhooks
+    # (PR merge ArtifactLinks, comments, field edits). See _check_trigger_edge.
     if not _check_trigger_edge(ticket.id, tag_present):
         logger.info(
             "ado_webhook_not_edge",
@@ -735,10 +737,13 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
 
     # Delay releasing the ticket — ADO fires webhooks when we post comments
     # and transition status below. Keep the ticket claimed for 60s to absorb
-    # those self-triggered webhooks before allowing reprocessing.
+    # those self-triggered webhooks before allowing reprocessing. Edge-detection
+    # memory is cleared on the same schedule so the lifecycles align and a
+    # future re-add of the trigger tag produces a fresh edge as expected.
     async def _delayed_release(ticket_id: str, delay: int = 60) -> None:
         await asyncio.sleep(delay)
         _release_ticket(ticket_id)
+        _clear_trigger_state(ticket_id)
 
     _BACKGROUND_TASKS.add(asyncio.ensure_future(_delayed_release(payload.ticket_id)))
 

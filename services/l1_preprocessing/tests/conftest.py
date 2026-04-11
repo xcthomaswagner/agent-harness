@@ -11,15 +11,12 @@ from main import app
 
 @pytest.fixture(autouse=True)
 def _reset_singletons() -> None:
-    """Reset lazily-initialized singletons and per-ticket state between tests."""
-    main._jira_adapter = None
-    main._ado_adapter = None
-    main._pipeline = None
-    # Reset ADO webhook edge-detection memory so each test sees a clean slate.
-    # Without this, subsequent tests hitting the same ticket ID with the same
-    # trigger tag get treated as non-edge and silently skipped.
-    main._last_trigger_state.clear()
-    main._active_tickets.clear()
+    """Reset lazily-initialized singletons and per-ticket state between tests.
+
+    Without this, subsequent tests hitting the same ticket ID with the same
+    trigger tag get treated as non-edge and silently skipped.
+    """
+    main._reset_state()
 
 
 @pytest.fixture
