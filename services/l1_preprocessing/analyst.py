@@ -63,6 +63,29 @@ def _safe_enum[E](enum_cls: type[E], value: str | None, default: E) -> E:
         return default
 
 
+def _is_retryable_anthropic_error(exc: anthropic.APIError) -> bool:
+    """Return True for Anthropic errors worth retrying with backoff.
+
+    Retryable: rate limits, network/connection failures, and 5xx
+    server errors. 4xx status errors (bad request, auth) are NOT
+    retried — sleeping and trying again won't make a malformed
+    request valid. Centralising this here prevents the three retry
+    branches ``analyze()`` used to have from drifting.
+    """
+    if isinstance(exc, anthropic.RateLimitError | anthropic.APIConnectionError):
+        return True
+    if isinstance(exc, anthropic.APIStatusError):
+        return exc.status_code >= 500
+    return False
+
+
+def _describe_anthropic_error(exc: anthropic.APIError) -> str:
+    """Short human-readable label for log lines and RuntimeError messages."""
+    if isinstance(exc, anthropic.APIStatusError):
+        return f"{type(exc).__name__}({exc.status_code})"
+    return type(exc).__name__
+
+
 class TicketAnalyst:
     """Analyzes and enriches tickets using Claude Opus."""
 
@@ -209,7 +232,15 @@ class TicketAnalyst:
         system_prompt = self._build_system_prompt(ticket.ticket_type)
         user_content = self._build_user_prompt(ticket)
 
+        # Single retry loop for every retryable Anthropic error type.
+        # Previously there were three near-identical ``except`` blocks
+        # (RateLimitError, APIConnectionError, APIStatusError) with the
+        # same backoff/log/raise scaffolding — any new retryable error
+        # type meant copy-pasting another 15-line block. The helpers
+        # below classify the exception once and all branches share the
+        # same retry/backoff policy.
         max_retries = 3
+        response = None
         last_exc: Exception | None = None
         for attempt in range(1, max_retries + 1):
             try:
@@ -219,62 +250,36 @@ class TicketAnalyst:
                     system=system_prompt,
                     messages=[{"role": "user", "content": user_content}],  # type: ignore[typeddict-item]
                 )
-                break  # Success
-            except anthropic.RateLimitError as exc:
+                break
+            except anthropic.APIError as exc:
+                # Short-circuit non-retryable errors (4xx status, etc.)
+                # immediately — no point sleeping 8s before failing.
+                if not _is_retryable_anthropic_error(exc):
+                    raise RuntimeError(
+                        f"Analyst API error for {ticket.id}: "
+                        f"{_describe_anthropic_error(exc)}"
+                    ) from exc
                 last_exc = exc
                 wait = 2 ** attempt  # 2s, 4s, 8s
                 log.warning(
-                    "analyst_rate_limited_retrying",
+                    "analyst_retrying",
                     attempt=attempt,
                     wait=wait,
-                    error=str(exc),
+                    error_kind=type(exc).__name__,
+                    error=_describe_anthropic_error(exc),
                 )
                 if attempt < max_retries:
                     await asyncio.sleep(wait)
                     continue
                 raise RuntimeError(
-                    f"Analyst API rate limited after {max_retries} retries for {ticket.id}"
-                ) from exc
-            except anthropic.APIConnectionError as exc:
-                last_exc = exc
-                wait = 2 ** attempt
-                log.warning(
-                    "analyst_connection_error_retrying",
-                    attempt=attempt,
-                    wait=wait,
-                    error=str(exc),
-                )
-                if attempt < max_retries:
-                    await asyncio.sleep(wait)
-                    continue
-                raise RuntimeError(
-                    f"Analyst API connection failed after {max_retries} retries for {ticket.id}"
-                ) from exc
-            except anthropic.APIStatusError as exc:
-                # Don't retry 4xx errors (bad request, auth) — only 5xx
-                if exc.status_code < 500:
-                    raise RuntimeError(
-                        f"Analyst API error ({exc.status_code}) for {ticket.id}"
-                    ) from exc
-                last_exc = exc
-                wait = 2 ** attempt
-                log.warning(
-                    "analyst_server_error_retrying",
-                    attempt=attempt,
-                    wait=wait,
-                    status_code=exc.status_code,
-                )
-                if attempt < max_retries:
-                    await asyncio.sleep(wait)
-                    continue
-                raise RuntimeError(
-                    f"Analyst API error ({exc.status_code}) "
-                    f"after {max_retries} retries for {ticket.id}"
+                    f"Analyst API failed after {max_retries} retries for "
+                    f"{ticket.id}: {_describe_anthropic_error(exc)}"
                 ) from exc
         else:
             raise RuntimeError(
                 f"Analyst failed after {max_retries} retries for {ticket.id}"
             ) from last_exc
+        assert response is not None  # loop either returned, broke, or raised
 
         # Extract text content from response
         raw_text = ""
@@ -332,8 +337,21 @@ class TicketAnalyst:
         """Route parsed analyst output to the correct model.
 
         Handles invalid enum values from the LLM by falling back to defaults
-        rather than crashing.
+        rather than crashing. Also tolerates ``null`` values for nested
+        fields — Claude sometimes emits ``"size_assessment": null`` or
+        ``"test_scenarios": null`` when it's low-confidence. ``dict.get(k,
+        {})`` only returns ``{}`` when the key is *missing*, not when the
+        key is present but ``None``, so the nested ``.get()`` calls below
+        would previously raise ``AttributeError`` / ``TypeError`` and
+        abort the entire ticket. ``_safe_dict`` and ``_safe_list``
+        normalize to safe empty containers.
         """
+        def _safe_dict(value: Any) -> dict[str, Any]:
+            return value if isinstance(value, dict) else {}
+
+        def _safe_list(value: Any) -> list[Any]:
+            return value if isinstance(value, list) else []
+
         output_type = parsed.get("output_type", "enriched")
 
         if output_type == "info_request":
@@ -341,8 +359,8 @@ class TicketAnalyst:
             return InfoRequest(
                 ticket_id=ticket.id,
                 source=ticket.source,
-                questions=parsed.get("questions", []),
-                context=parsed.get("context", ""),
+                questions=_safe_list(parsed.get("questions")),
+                context=parsed.get("context") or "",
                 callback=ticket.callback,
             )
 
@@ -353,28 +371,29 @@ class TicketAnalyst:
                     title=st.get("title", ""),
                     description=st.get("description", ""),
                     ticket_type=_safe_enum(TicketType, st.get("ticket_type"), TicketType.TASK),
-                    acceptance_criteria=st.get("acceptance_criteria", []),
+                    acceptance_criteria=_safe_list(st.get("acceptance_criteria")),
                     estimated_size=_safe_enum(
                         SizeClassification,
                         st.get("estimated_size"),
                         SizeClassification.SMALL,
                     ),
-                    depends_on=st.get("depends_on", []),
+                    depends_on=_safe_list(st.get("depends_on")),
                 )
-                for st in parsed.get("sub_tickets", [])
+                for st in _safe_list(parsed.get("sub_tickets"))
+                if isinstance(st, dict)
             ]
             return DecompositionPlan(
                 ticket_id=ticket.id,
                 source=ticket.source,
-                reason=parsed.get("reason", ""),
+                reason=parsed.get("reason") or "",
                 sub_tickets=sub_tickets,
-                dependency_order=parsed.get("dependency_order", []),
+                dependency_order=_safe_list(parsed.get("dependency_order")),
                 callback=ticket.callback,
             )
 
         # Default: enriched ticket
         log.info("analyst_output_enriched")
-        size_data = parsed.get("size_assessment", {})
+        size_data = _safe_dict(parsed.get("size_assessment"))
         size_assessment = SizeAssessment(
             classification=_safe_enum(
                 SizeClassification,
@@ -394,17 +413,20 @@ class TicketAnalyst:
                 description=ts.get("description", ""),
                 criteria_ref=ts.get("criteria_ref", ""),
             )
-            for ts in parsed.get("test_scenarios", [])
+            for ts in _safe_list(parsed.get("test_scenarios"))
+            if isinstance(ts, dict)
         ]
 
         # Build enriched ticket from original + analyst additions
         enriched_data = ticket.model_dump()
         enriched_data.update(
-            generated_acceptance_criteria=parsed.get("generated_acceptance_criteria", []),
+            generated_acceptance_criteria=_safe_list(
+                parsed.get("generated_acceptance_criteria")
+            ),
             test_scenarios=test_scenarios,
-            edge_cases=parsed.get("edge_cases", []),
+            edge_cases=_safe_list(parsed.get("edge_cases")),
             size_assessment=size_assessment,
-            analyst_notes=parsed.get("analyst_notes", ""),
+            analyst_notes=parsed.get("analyst_notes") or "",
             enriched_at=datetime.now(UTC),
         )
         return EnrichedTicket(**enriched_data)

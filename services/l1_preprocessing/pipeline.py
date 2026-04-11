@@ -12,6 +12,7 @@ import contextlib
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,24 @@ SPAWN_SCRIPT = HARNESS_ROOT / "scripts" / "spawn_team.py"
 # coroutine and GC could collect it mid-flight — the docs are explicit
 # about this. Tasks remove themselves from the set when they finish.
 _SPAWN_REAPER_TASKS: set[Any] = set()
+
+
+def _has_sitecore_jss_dep(repo_path: Path) -> bool:
+    """Return True if ``package.json`` declares any ``@sitecore-jss/*``
+    dependency. Used by ``Pipeline._detect_platform_from_repo`` as a
+    fallback when the explicit ``sitecore.json`` marker is absent.
+    """
+    pkg_json = repo_path / "package.json"
+    if not pkg_json.exists():
+        return False
+    import json
+
+    pkg = json.loads(pkg_json.read_text())
+    deps = {
+        **pkg.get("dependencies", {}),
+        **pkg.get("devDependencies", {}),
+    }
+    return any(k.startswith("@sitecore-jss") for k in deps)
 
 
 class Pipeline:
@@ -421,31 +440,36 @@ class Pipeline:
         }
 
     def _detect_platform_from_repo(self) -> str:
-        """Auto-detect platform from repo files."""
+        """Auto-detect platform from repo files.
+
+        Checks are run in order and the first match wins. Each check
+        is a ``(platform, predicate)`` tuple; predicates are tiny
+        callables on the repo root Path so adding a new platform is
+        a one-line addition instead of another ``if`` branch with its
+        own exception-handling shape.
+        """
         repo_path = Path(self._settings.default_client_repo)
         if not repo_path.exists():
             return ""
 
-        # Sitecore
-        if (repo_path / "sitecore.json").exists():
-            return "sitecore"
-        pkg_json = repo_path / "package.json"
-        if pkg_json.exists():
+        checks: list[tuple[str, Callable[[Path], bool]]] = [
+            # Sitecore — marker file + JSS dependency scan as a fallback.
+            ("sitecore", lambda p: (p / "sitecore.json").exists()),
+            ("sitecore", _has_sitecore_jss_dep),
+            # Salesforce — DX project file OR the canonical force-app dir.
+            ("salesforce", lambda p: (p / "sfdx-project.json").exists()),
+            ("salesforce", lambda p: (p / "force-app").is_dir()),
+        ]
+        for platform, predicate in checks:
             try:
-                import json
-
-                pkg = json.loads(pkg_json.read_text())
-                deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
-                if any(k.startswith("@sitecore-jss") for k in deps):
-                    return "sitecore"
+                if predicate(repo_path):
+                    return platform
             except Exception:
-                pass
-
-        # Salesforce
-        if (repo_path / "sfdx-project.json").exists():
-            return "salesforce"
-        if (repo_path / "force-app").is_dir():
-            return "salesforce"
+                # Any predicate that blows up (malformed package.json,
+                # permission error) is treated as "no match" — same
+                # behavior as the previous ``try/except Exception:
+                # pass`` around the package.json branch.
+                continue
 
         return ""
 

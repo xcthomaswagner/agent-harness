@@ -358,7 +358,7 @@ class TestAnalyze:
         mock_anthropic_client.messages.create.side_effect = anthropic.APIConnectionError(
             request=MagicMock()
         )
-        with pytest.raises(RuntimeError, match="connection failed"):
+        with pytest.raises(RuntimeError, match="APIConnectionError"):
             await analyst.analyze(sample_ticket)
 
     async def test_raises_on_rate_limit_error(
@@ -375,7 +375,7 @@ class TestAnalyze:
             response=mock_response,
             body=None,
         )
-        with pytest.raises(RuntimeError, match="rate limited"):
+        with pytest.raises(RuntimeError, match="RateLimitError"):
             await analyst.analyze(sample_ticket)
 
     async def test_raises_on_api_status_error(
@@ -392,8 +392,31 @@ class TestAnalyze:
             response=mock_response,
             body=None,
         )
-        with pytest.raises(RuntimeError, match=r"API error.*500"):
+        with pytest.raises(RuntimeError, match=r"APIStatusError.*500"):
             await analyst.analyze(sample_ticket)
+
+    async def test_4xx_status_error_fails_fast_without_retry(
+        self,
+        analyst: TicketAnalyst,
+        mock_anthropic_client: AsyncMock,
+        sample_ticket: TicketPayload,
+    ) -> None:
+        """Improvement regression: 4xx status errors (bad request, auth)
+        are NOT retried — sleeping 2/4/8s before failing a malformed
+        request is wasteful. The classifier must short-circuit and
+        raise on the first attempt."""
+        mock_response = MagicMock()
+        mock_response.status_code = 400
+        mock_response.headers = {}
+        mock_anthropic_client.messages.create.side_effect = anthropic.APIStatusError(
+            message="bad request",
+            response=mock_response,
+            body=None,
+        )
+        with pytest.raises(RuntimeError, match=r"APIStatusError.*400"):
+            await analyst.analyze(sample_ticket)
+        # Exactly ONE call — no retries.
+        assert mock_anthropic_client.messages.create.await_count == 1
 
     async def test_raises_on_empty_response(
         self,
@@ -540,6 +563,107 @@ class TestRouteOutputInvalidEnums:
         result = analyst._route_output(sample_ticket, parsed, MagicMock())
         assert isinstance(result, DecompositionPlan)
         assert result.sub_tickets[0].ticket_type == TicketType.TASK
+
+
+class TestRouteOutputNullFields:
+    """Bug regression: ``dict.get(k, {})`` only returns the default when
+    the key is *missing*, not when the key is present but ``None``.
+    Claude occasionally emits ``"size_assessment": null`` when it's
+    low-confidence. Before the fix, the nested ``.get("classification")``
+    call raised AttributeError and aborted the whole ticket; the
+    handler now coerces None/non-dict values to safe empty defaults."""
+
+    def test_null_size_assessment(
+        self, analyst: TicketAnalyst, sample_ticket: TicketPayload
+    ) -> None:
+        parsed = {
+            "output_type": "enriched",
+            "generated_acceptance_criteria": [],
+            "test_scenarios": [],
+            "edge_cases": [],
+            "size_assessment": None,
+            "analyst_notes": "",
+        }
+        result = analyst._route_output(sample_ticket, parsed, MagicMock())
+        assert isinstance(result, EnrichedTicket)
+        # Safe fallback: SizeClassification.SMALL + unit defaults.
+        assert result.size_assessment.classification == SizeClassification.SMALL
+        assert result.size_assessment.estimated_units == 1
+
+    def test_null_test_scenarios_and_lists(
+        self, analyst: TicketAnalyst, sample_ticket: TicketPayload
+    ) -> None:
+        parsed = {
+            "output_type": "enriched",
+            "generated_acceptance_criteria": None,
+            "test_scenarios": None,
+            "edge_cases": None,
+            "size_assessment": {"classification": "small"},
+            "analyst_notes": None,
+        }
+        result = analyst._route_output(sample_ticket, parsed, MagicMock())
+        assert isinstance(result, EnrichedTicket)
+        assert result.test_scenarios == []
+        assert result.generated_acceptance_criteria == []
+        assert result.edge_cases == []
+        assert result.analyst_notes == ""
+
+    def test_null_decomposition_sub_tickets(
+        self, analyst: TicketAnalyst, sample_ticket: TicketPayload
+    ) -> None:
+        parsed = {
+            "output_type": "decomposition",
+            "reason": None,
+            "sub_tickets": None,
+            "dependency_order": None,
+        }
+        result = analyst._route_output(sample_ticket, parsed, MagicMock())
+        assert isinstance(result, DecompositionPlan)
+        assert result.sub_tickets == []
+        assert result.reason == ""
+        assert result.dependency_order == []
+
+    def test_null_info_request_context(
+        self, analyst: TicketAnalyst, sample_ticket: TicketPayload
+    ) -> None:
+        """Null ``context`` must coerce to empty string (the Pydantic
+        model still requires at least one question, which is a
+        separate contract)."""
+        parsed = {
+            "output_type": "info_request",
+            "questions": ["What's the deadline?"],
+            "context": None,
+        }
+        result = analyst._route_output(sample_ticket, parsed, MagicMock())
+        assert isinstance(result, InfoRequest)
+        assert result.questions == ["What's the deadline?"]
+        assert result.context == ""
+
+    def test_non_dict_sub_ticket_skipped(
+        self, analyst: TicketAnalyst, sample_ticket: TicketPayload
+    ) -> None:
+        """A string or None inside sub_tickets list must be skipped,
+        not crash the loop."""
+        parsed = {
+            "output_type": "decomposition",
+            "reason": "Too large",
+            "sub_tickets": [
+                "not a dict",  # malformed — should be skipped
+                None,
+                {
+                    "title": "Real sub",
+                    "description": "",
+                    "ticket_type": "task",
+                    "acceptance_criteria": [],
+                    "estimated_size": "small",
+                },
+            ],
+        }
+        result = analyst._route_output(sample_ticket, parsed, MagicMock())
+        assert isinstance(result, DecompositionPlan)
+        # Only the real dict entry survives.
+        assert len(result.sub_tickets) == 1
+        assert result.sub_tickets[0].title == "Real sub"
 
 
 # --- Image attachment handling ---

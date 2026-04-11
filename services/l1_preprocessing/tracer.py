@@ -1076,7 +1076,13 @@ def consolidate_worktree_logs(
     if stream_path.exists():
         try:
             size_bytes = stream_path.stat().st_size
-            line_count = sum(1 for _ in stream_path.open())
+            # Use an explicit ``with`` block — the previous
+            # ``sum(1 for _ in stream_path.open())`` dropped its only
+            # reference to the file object immediately, leaving the
+            # descriptor to be closed on GC (non-deterministic,
+            # produces ResourceWarning, leaks FDs under load).
+            with stream_path.open() as f:
+                line_count = sum(1 for _ in f)
         except OSError:
             size_bytes = 0
             line_count = 0
