@@ -3,10 +3,15 @@
 Covers ``POST /admin/re-redact`` — re-runs the secret redactor over every
 trace entry in the store. Needed when pattern updates land so existing
 traces benefit from the new coverage without a full re-consolidation.
+
+Also covers ``POST /traces/<id>/discuss`` — mints a short-lived
+investigation handoff (session token + bundle URL + copy-paste shell
+snippet) and writes a line to ``discuss-audit.jsonl``.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from unittest.mock import patch
@@ -202,3 +207,149 @@ async def test_post_admin_re_redact_scrubs_corrupt_line(
         "corrupt line must be redacted, not passed through verbatim"
     )
     assert "[REDACTED]" in text
+
+
+# --- POST /traces/<id>/discuss -------------------------------------------
+#
+# Tier 1 post-mortem investigation handoff. Mints an opaque session token,
+# returns the bundle URL and copy-paste shell snippet, and writes one line
+# to discuss-audit.jsonl. Token is write-only by design — see endpoint
+# docstring for the security model.
+
+
+def _seed_minimal_trace(ticket_id: str) -> None:
+    """Seed the smallest trace that makes ``read_trace`` return non-empty."""
+    append_trace(ticket_id, "t0", "webhook", "jira_webhook_received",
+                 ticket_type="story", source="jira", title=f"{ticket_id} title")
+
+
+async def test_discuss_requires_api_key(
+    trace_dir: Path, client: AsyncClient,
+) -> None:
+    """With ``settings.api_key`` configured, discuss must 401 without the
+    header. Mirrors the re-redact auth test — same dependency, same gate."""
+    from main import settings as _settings
+    with patch.object(_settings, "api_key", "secret-key-123"), \
+         patch("tracer.LOGS_DIR", trace_dir):
+        _seed_minimal_trace("DISC-AUTH")
+        resp = await client.post("/traces/DISC-AUTH/discuss")
+    assert resp.status_code == 401
+
+
+async def test_discuss_returns_bundle_url_and_token(
+    trace_dir: Path, client: AsyncClient,
+) -> None:
+    """Happy path: valid ticket returns all five fields with sensible shape."""
+    with patch("tracer.LOGS_DIR", trace_dir):
+        _seed_minimal_trace("DISC-1")
+        resp = await client.post("/traces/DISC-1/discuss")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == {
+        "ticket_id", "session_token", "bundle_url",
+        "investigate_command", "expires_at",
+    }
+    assert body["ticket_id"] == "DISC-1"
+    assert body["session_token"]  # non-empty opaque string
+    assert len(body["session_token"]) >= 24
+    assert body["bundle_url"].endswith("/traces/DISC-1/bundle")
+    # investigate_command should mention both the download and the claude launch
+    assert "curl" in body["investigate_command"]
+    assert "DISC-1" in body["investigate_command"]
+    assert "claude -p" in body["investigate_command"]
+    # ISO-8601 timestamp, parseable
+    from datetime import datetime
+    datetime.fromisoformat(body["expires_at"])  # raises if malformed
+
+
+async def test_discuss_token_is_random(
+    trace_dir: Path, client: AsyncClient,
+) -> None:
+    """Two calls against the same ticket must mint distinct tokens —
+    otherwise the audit log can't distinguish separate investigations."""
+    with patch("tracer.LOGS_DIR", trace_dir):
+        _seed_minimal_trace("DISC-2")
+        r1 = await client.post("/traces/DISC-2/discuss")
+        r2 = await client.post("/traces/DISC-2/discuss")
+
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert r1.json()["session_token"] != r2.json()["session_token"]
+
+
+async def test_discuss_writes_audit_log_line(
+    trace_dir: Path, client: AsyncClient,
+) -> None:
+    """A successful call appends exactly one line to discuss-audit.jsonl
+    containing every required field."""
+    with patch("tracer.LOGS_DIR", trace_dir):
+        _seed_minimal_trace("DISC-3")
+        resp = await client.post("/traces/DISC-3/discuss")
+
+    assert resp.status_code == 200
+    audit_file = trace_dir / "discuss-audit.jsonl"
+    assert audit_file.exists()
+    lines = audit_file.read_text().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["ticket_id"] == "DISC-3"
+    assert entry["session_token"] == resp.json()["session_token"]
+    assert "timestamp" in entry
+    assert "source_ip" in entry
+    assert "user_agent" in entry
+
+
+async def test_discuss_audit_log_appends_not_overwrites(
+    trace_dir: Path, client: AsyncClient,
+) -> None:
+    """Two calls must produce two distinct lines in the audit file — the
+    audit log is append-only by contract."""
+    with patch("tracer.LOGS_DIR", trace_dir):
+        _seed_minimal_trace("DISC-4")
+        await client.post("/traces/DISC-4/discuss")
+        await client.post("/traces/DISC-4/discuss")
+
+    audit_file = trace_dir / "discuss-audit.jsonl"
+    lines = audit_file.read_text().splitlines()
+    assert len(lines) == 2
+    # Distinct tokens across the two lines — another sanity check that
+    # each call mints a fresh token.
+    t1 = json.loads(lines[0])["session_token"]
+    t2 = json.loads(lines[1])["session_token"]
+    assert t1 != t2
+
+
+async def test_discuss_returns_404_for_unknown_trace(
+    trace_dir: Path, client: AsyncClient,
+) -> None:
+    """No trace for this ticket_id → 404, matching the bundle endpoint."""
+    with patch("tracer.LOGS_DIR", trace_dir):
+        resp = await client.post("/traces/NOPE-999/discuss")
+    assert resp.status_code == 404
+    # And the audit log must not be created for rejected requests — the
+    # audit line represents an actual minted session, not an attempted one.
+    assert not (trace_dir / "discuss-audit.jsonl").exists()
+
+
+async def test_discuss_audit_captures_source_ip_and_user_agent(
+    trace_dir: Path, client: AsyncClient,
+) -> None:
+    """Spoofed ``user-agent`` header must land verbatim in the audit line.
+    ``source_ip`` comes from ``request.client.host`` — ASGITransport fills
+    this with the test client's host string (non-empty, non-None)."""
+    with patch("tracer.LOGS_DIR", trace_dir):
+        _seed_minimal_trace("DISC-5")
+        resp = await client.post(
+            "/traces/DISC-5/discuss",
+            headers={"User-Agent": "post-mortem-cli/1.2.3"},
+        )
+
+    assert resp.status_code == 200
+    entry = json.loads(
+        (trace_dir / "discuss-audit.jsonl").read_text().splitlines()[0]
+    )
+    assert entry["user_agent"] == "post-mortem-cli/1.2.3"
+    # ASGITransport reports a client host — just assert it's a string and
+    # was captured (any non-None value from request.client.host is fine).
+    assert isinstance(entry["source_ip"], str)
