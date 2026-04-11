@@ -1510,6 +1510,122 @@ class TestAutoMergeDecisions:
         finally:
             conn.close()
 
+    def test_list_recent_client_profile_filter_escapes_like_wildcards(
+        self, db_path: Path
+    ) -> None:
+        """Bug regression: ``client_profile`` was spliced into a LIKE
+        pattern with no escaping. SQLite LIKE treats ``_`` as "any
+        single character" and ``%`` as "any sequence", so a caller
+        passing ``_`` or ``foo_bar`` would match across profiles —
+        turning a per-profile filter into a data leak. Fixed by
+        escaping ``%`` / ``_`` / ``\\`` and using
+        ``LIKE ? ESCAPE '\\'``."""
+        from autonomy_store import (
+            list_recent_auto_merge_decisions,
+            record_auto_merge_decision,
+        )
+
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            # Two profiles with names that differ only by the character
+            # a single ``_`` would match.
+            record_auto_merge_decision(
+                conn,
+                repo_full_name="a/b",
+                pr_number=1,
+                decision="merged",
+                reason="ok",
+                payload={"client_profile": "acme"},
+            )
+            record_auto_merge_decision(
+                conn,
+                repo_full_name="c/d",
+                pr_number=2,
+                decision="merged",
+                reason="ok",
+                payload={"client_profile": "xcme"},
+            )
+
+            # Before the fix, ``_cme`` would match both profiles via
+            # the LIKE wildcard. After the fix, it matches neither
+            # (the underscore is escaped to a literal underscore).
+            rows = list_recent_auto_merge_decisions(
+                conn, client_profile="_cme"
+            )
+            assert rows == []
+
+            # A single ``%`` used to match every row. After the fix,
+            # it matches none.
+            rows = list_recent_auto_merge_decisions(
+                conn, client_profile="%"
+            )
+            assert rows == []
+
+            # Legitimate literal names with underscores still match
+            # correctly — seed one and fetch by its exact name.
+            record_auto_merge_decision(
+                conn,
+                repo_full_name="e/f",
+                pr_number=3,
+                decision="merged",
+                reason="ok",
+                payload={"client_profile": "first_pass_acceptance"},
+            )
+            rows = list_recent_auto_merge_decisions(
+                conn, client_profile="first_pass_acceptance"
+            )
+            assert len(rows) == 1
+            assert rows[0]["target_id"] == "e/f#3"
+        finally:
+            conn.close()
+
+    def test_list_recent_repo_full_name_filter_escapes_like_wildcards(
+        self, db_path: Path
+    ) -> None:
+        """Bug regression: ``repo_full_name`` had the same LIKE-wildcard
+        leak as ``client_profile`` — a caller passing ``o/r_po`` would
+        match any repo whose 5th char was anything."""
+        from autonomy_store import (
+            list_recent_auto_merge_decisions,
+            record_auto_merge_decision,
+        )
+
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            record_auto_merge_decision(
+                conn,
+                repo_full_name="o/repo",
+                pr_number=1,
+                decision="merged",
+                reason="ok",
+                payload={"client_profile": "a"},
+            )
+            record_auto_merge_decision(
+                conn,
+                repo_full_name="o/rxpo",
+                pr_number=2,
+                decision="merged",
+                reason="ok",
+                payload={"client_profile": "a"},
+            )
+
+            # Before the fix, ``o/r_po`` would match both. After, it
+            # matches neither.
+            rows = list_recent_auto_merge_decisions(
+                conn, repo_full_name="o/r_po"
+            )
+            assert rows == []
+
+            # Exact literal still works.
+            rows = list_recent_auto_merge_decisions(
+                conn, repo_full_name="o/repo"
+            )
+            assert len(rows) == 1
+        finally:
+            conn.close()
+
 
 # ---------------------------------------------------------------------------
 # v4: pr_commits + helpers

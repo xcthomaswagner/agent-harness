@@ -861,3 +861,92 @@ class TestJiraBugWebhook:
         body = r.json()
         assert body["status"] == "ignored"
         assert body["reason"] == "not_a_defect_type"
+
+
+# --- /api/retest path-traversal guard ---
+#
+# Bug regression: ``_BRANCH_PATTERN`` used to permit ``..`` because the
+# regex charset included ``.``, and the worktree-containment check used
+# ``str.startswith`` on resolved paths. A sibling-prefix directory like
+# ``worktrees-evil`` satisfied both checks — "../worktrees-evil/x"
+# resolved to ``/repo/worktrees-evil/x`` which literally starts with
+# ``/repo/worktrees``. Fixed by rejecting ``..`` in the branch regex
+# and switching the containment check to ``Path.relative_to``.
+
+
+async def test_retest_rejects_branch_with_dotdot(tmp_path: Path) -> None:
+    """Bug regression: ``..`` in the branch must be rejected at the
+    regex layer, before the containment check even runs."""
+    import re as _re
+
+    fake_client = tmp_path / "client-repo"
+    fake_client.mkdir()
+    (fake_client / ".git").mkdir()
+    # Create a sibling-prefix directory that would have fooled the old
+    # startswith check. It must never be used as cwd.
+    sibling = tmp_path / "worktrees-evil"
+    sibling.mkdir()
+    (sibling / "x").mkdir()
+
+    with patch("main.settings") as mock_settings:
+        mock_settings.api_key = ""  # Open local dev auth
+        mock_settings.default_client_repo = str(fake_client)
+        async with await _make_client() as client:
+            # Attempt 1: explicit traversal via ``..``
+            r = await client.post(
+                "/api/retest",
+                json={
+                    "ticket_id": "PROJ-1",
+                    "phase": "qa",
+                    "branch": "../worktrees-evil/x",
+                },
+            )
+    # Rejected at regex layer — 400 with the branch-name detail.
+    assert r.status_code == 400
+    assert "branch" in r.json()["detail"].lower()
+
+    # The bug-1 regex must also reject the subtler forms.
+    for evil in ("../../outside", "..", "..foo"):
+        assert not _re.match(main._BRANCH_PATTERN, evil), (
+            f"{evil!r} must not match _BRANCH_PATTERN"
+        )
+
+
+async def test_retest_rejects_sibling_prefix_via_relative_to(tmp_path: Path) -> None:
+    """Bug regression: before the fix, the containment check was
+    ``str(resolved).startswith(str(worktrees_parent))`` — so a branch
+    that resolved to ``/tmp/x/worktrees-evil/foo`` passed because the
+    string happened to start with ``/tmp/x/worktrees``. This test
+    verifies that even a crafted branch name that survives the regex
+    (no ``..``) still fails the relative_to containment check.
+
+    The only way to produce such a path without ``..`` is to plant a
+    sibling symlink inside worktrees that resolves out. Simulate that
+    here."""
+    fake_client = tmp_path / "client-repo"
+    fake_client.mkdir()
+    (fake_client / ".git").mkdir()
+    worktrees = tmp_path / "worktrees"
+    worktrees.mkdir()
+    # Plant a sibling-prefix directory the symlink will escape to.
+    sibling = tmp_path / "worktrees-evil" / "target"
+    sibling.mkdir(parents=True)
+    (sibling / "trap").write_text("planted")
+    # Symlink inside worktrees that escapes to the sibling.
+    (worktrees / "evil-link").symlink_to(sibling, target_is_directory=True)
+
+    with patch("main.settings") as mock_settings:
+        mock_settings.api_key = ""
+        mock_settings.default_client_repo = str(fake_client)
+        async with await _make_client() as client:
+            r = await client.post(
+                "/api/retest",
+                json={
+                    "ticket_id": "PROJ-1",
+                    "phase": "qa",
+                    "branch": "evil-link",
+                },
+            )
+    # Must be rejected — the symlink resolves outside worktrees/.
+    assert r.status_code == 400
+    assert "outside" in r.json()["detail"].lower()

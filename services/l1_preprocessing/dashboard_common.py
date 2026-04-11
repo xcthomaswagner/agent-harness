@@ -94,3 +94,19 @@ def fmt_ts(ts: str) -> str:
 def badge(text: str, cls: str) -> str:
     """Render a badge span with escaped text."""
     return f'<span class="badge {cls}">{escape_html(text)}</span>'
+
+
+def fmt_pct(value: float | None) -> str:
+    """Format a 0..1 fraction as a rounded percent string, or em-dash.
+
+    ``None`` renders as a single em-dash (``\u2014``) so dashboards
+    have a consistent placeholder for "no data". Previously this
+    helper was duplicated in ``unified_dashboard`` and
+    ``autonomy_dashboard`` with a subtle drift — one copy used the
+    literal ``\u2014`` escape and the other used the raw ``—``
+    character, which is visually identical but exactly the drift
+    hazard this module was created to prevent.
+    """
+    if value is None:
+        return "\u2014"
+    return f"{value * 100:.0f}%"

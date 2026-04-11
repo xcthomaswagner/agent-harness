@@ -28,6 +28,9 @@ from dashboard_common import (
     escape_html as _e,
 )
 from dashboard_common import (
+    fmt_pct as _fmt_pct,
+)
+from dashboard_common import (
     fmt_ts as _fmt_ts,
 )
 from dashboard_common import (
@@ -120,13 +123,7 @@ _AUTO_MERGE_DECISION_BADGE: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 
-def _fmt_pct(value: float | None) -> str:
-    if value is None:
-        return "\u2014"
-    return f"{value * 100:.0f}%"
-
-
-# _e, _safe_url, _fmt_ts, _fmt_dur, _badge are imported from
+# _e, _safe_url, _fmt_ts, _fmt_dur, _badge, _fmt_pct are imported from
 # dashboard_common at the top of this file. Historically they were
 # duplicated across four dashboard modules.
 

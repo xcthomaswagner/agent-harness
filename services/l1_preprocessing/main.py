@@ -1104,6 +1104,92 @@ async def _validate_and_parse_webhook(
     return payload
 
 
+async def _validate_and_parse_webhook_dual_auth(
+    request: Request,
+    signature: str | None,
+    *,
+    bearer_token: str | None,
+    bearer_token_secret: str,
+    no_secret_behavior: str,
+    auth_label: str,
+) -> dict[str, Any]:
+    """Dual-mode webhook auth: HMAC signature OR shared bearer token.
+
+    Shared by ``jira_bug_webhook`` and ``ado_webhook`` — both need to
+    accept either a signed body (for CI/CD pipelines that can compute
+    HMAC) or a shared header token (for Jira Automation / ADO Service
+    Hooks that cannot). Previously each handler had its own ~28 line
+    implementation, and one used raw ``==`` to compare the bearer
+    token (timing-attack hazard) while the other used
+    ``hmac.compare_digest``. Consolidating here guarantees both paths
+    use constant-time comparison.
+
+    ``no_secret_behavior``:
+      * ``"fail_closed_503"`` — when neither the HMAC secret nor the
+        bearer token is configured, raise 503. Use this for endpoints
+        that must never accept unauthenticated requests.
+      * ``"open_local_dev"`` — same scenario, accept the request. Use
+        this for endpoints whose local-dev workflow relies on running
+        the service without any secrets at all.
+
+    ``auth_label`` goes into the 401 detail so the rejected side can
+    distinguish which webhook's auth failed.
+    """
+    body = await request.body()
+
+    auth_ok = False
+    # HMAC path — only when both the secret is configured AND a
+    # signature header was sent. Missing header isn't an error here;
+    # we fall through to the bearer path.
+    if settings.webhook_secret and signature:
+        expected = hmac.new(
+            settings.webhook_secret.encode(), body, hashlib.sha256
+        ).hexdigest()
+        sig_value = signature.removeprefix("sha256=")
+        if hmac.compare_digest(expected, sig_value):
+            auth_ok = True
+    # Bearer token path — constant-time comparison so we don't leak
+    # the token prefix via response timing.
+    if (
+        not auth_ok
+        and bearer_token_secret
+        and bearer_token
+        and hmac.compare_digest(bearer_token, bearer_token_secret)
+    ):
+        auth_ok = True
+    if not auth_ok:
+        if not settings.webhook_secret and not bearer_token_secret:
+            # Neither secret configured — behavior depends on endpoint.
+            if no_secret_behavior == "fail_closed_503":
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"{auth_label} not configured",
+                )
+            if no_secret_behavior == "open_local_dev":
+                auth_ok = True
+            else:
+                raise ValueError(
+                    f"Invalid no_secret_behavior: {no_secret_behavior!r}"
+                )
+        else:
+            raise HTTPException(
+                status_code=401,
+                detail=f"Invalid {auth_label} auth",
+            )
+
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(
+            status_code=422, detail=f"Invalid JSON body: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=422, detail="Webhook payload must be a JSON object"
+        )
+    return payload
+
+
 @app.post("/webhooks/jira", status_code=202)
 async def jira_webhook(
     request: Request,
@@ -1136,38 +1222,17 @@ async def jira_bug_webhook(
 
     Accepts EITHER HMAC signature (webhook_secret) OR bearer token
     (jira_bug_webhook_token), since Jira Automation cannot compute HMAC.
+    Fails closed (503) when neither secret is configured — bug ingest
+    must never accept unauthenticated requests.
     """
-    body = await request.body()
-
-    # Auth: try HMAC first, fallback to bearer token
-    auth_ok = False
-    if settings.webhook_secret and x_hub_signature:
-        expected = hmac.new(
-            settings.webhook_secret.encode(), body, hashlib.sha256
-        ).hexdigest()
-        sig = x_hub_signature.removeprefix("sha256=")
-        if hmac.compare_digest(expected, sig):
-            auth_ok = True
-    if (
-        not auth_ok
-        and settings.jira_bug_webhook_token
-        and x_jira_bug_token
-        and x_jira_bug_token == settings.jira_bug_webhook_token
-    ):
-        auth_ok = True
-    if not auth_ok:
-        # If neither secret configured, fail closed
-        if not settings.webhook_secret and not settings.jira_bug_webhook_token:
-            raise HTTPException(status_code=503, detail="Bug webhook not configured")
-        raise HTTPException(status_code=401, detail="Invalid webhook auth")
-
-    try:
-        payload = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid JSON body: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=422, detail="Webhook payload must be a JSON object")
-
+    payload = await _validate_and_parse_webhook_dual_auth(
+        request,
+        x_hub_signature,
+        bearer_token=x_jira_bug_token,
+        bearer_token_secret=settings.jira_bug_webhook_token or "",
+        no_secret_behavior="fail_closed_503",
+        auth_label="Bug webhook",
+    )
     bug = normalize_jira_bug(payload, settings)
 
     conn = open_connection(resolve_db_path(settings.autonomy_db_path))
@@ -1191,40 +1256,18 @@ async def ado_webhook(
     """Receive an Azure DevOps Service Hook webhook and enqueue for processing.
 
     Auth: accepts HMAC signature (x-hub-signature) OR a shared token
-    (X-ADO-Webhook-Token). Rejects if neither succeeds and at least one
-    secret is configured.
+    (X-ADO-Webhook-Token). Opens access when neither secret is
+    configured so local development can send webhooks without any
+    secret management. Rejects otherwise.
     """
-    body = await request.body()
-
-    # --- Auth: dual-mode (HMAC or token) ---
-    auth_ok = False
-    if settings.webhook_secret and x_hub_signature:
-        expected = hmac.new(
-            settings.webhook_secret.encode(), body, hashlib.sha256
-        ).hexdigest()
-        sig_value = x_hub_signature.removeprefix("sha256=")
-        if hmac.compare_digest(expected, sig_value):
-            auth_ok = True
-    if (
-        not auth_ok
-        and settings.ado_webhook_token
-        and x_ado_webhook_token
-        and hmac.compare_digest(x_ado_webhook_token, settings.ado_webhook_token)
-    ):
-        auth_ok = True
-    if not auth_ok:
-        if not settings.webhook_secret and not settings.ado_webhook_token:
-            # Neither secret configured — open access (local dev)
-            auth_ok = True
-        else:
-            raise HTTPException(status_code=401, detail="Invalid ADO webhook auth")
-
-    try:
-        payload = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid JSON body: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=422, detail="Webhook payload must be a JSON object")
+    payload = await _validate_and_parse_webhook_dual_auth(
+        request,
+        x_hub_signature,
+        bearer_token=x_ado_webhook_token,
+        bearer_token_secret=settings.ado_webhook_token or "",
+        no_secret_behavior="open_local_dev",
+        auth_label="ADO webhook",
+    )
 
     # --- Normalize the ADO payload ---
     ticket = _get_ado_adapter().normalize(payload)
@@ -1324,7 +1367,12 @@ async def manual_process_ticket(
 
 
 _TICKET_ID_PATTERN = re.compile(r"^[A-Za-z0-9]+-[0-9]+$")
-_BRANCH_PATTERN = re.compile(r"^[A-Za-z0-9/_.-]+$")  # No shell metacharacters
+# Branch names: alphanumeric + slashes/underscores/dots/hyphens, but the
+# ``..`` sequence is forbidden to prevent path traversal into sibling
+# directories of the worktrees parent. The containment check below uses
+# Path.is_relative_to as the real guardrail; this regex is belt-and-
+# braces so a bad branch fails fast at input validation.
+_BRANCH_PATTERN = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9/_.-]*$")
 _VALID_PHASES = {"qa", "e2e", "review"}
 
 
@@ -1371,17 +1419,26 @@ async def retest(payload: RetestPayload, background_tasks: BackgroundTasks) -> d
     if not client_repo:
         return {"status": "error", "detail": "No default_client_repo configured"}
 
-    worktree_dir = str(Path(client_repo).parent / "worktrees" / branch)
-    # Ensure resolved path is under the expected worktrees parent (path traversal guard)
-    worktree_resolved = Path(worktree_dir).resolve()
     worktrees_parent = (Path(client_repo).parent / "worktrees").resolve()
-    if not str(worktree_resolved).startswith(str(worktrees_parent)):
-        raise HTTPException(status_code=400, detail="Branch resolves outside worktree directory")
-    if not Path(worktree_dir).exists():
+    worktree_resolved = (worktrees_parent / branch).resolve()
+    # Path containment guard — use Path.is_relative_to instead of string
+    # startswith, which previously let a sibling-prefix directory like
+    # ``worktrees-evil`` pass because its resolved path literally starts
+    # with the string ``/.../worktrees``. is_relative_to checks path
+    # components, not character prefixes.
+    try:
+        worktree_resolved.relative_to(worktrees_parent)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Branch resolves outside worktree directory",
+        ) from None
+    if not worktree_resolved.exists():
         return {
             "status": "error",
             "detail": f"Worktree not found for branch '{branch}'. Run the ticket first.",
         }
+    worktree_dir = str(worktree_resolved)
 
     log = logger.bind(ticket_id=payload.ticket_id, phase=payload.phase)
     log.info("retest_requested", branch=branch)

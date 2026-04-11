@@ -1298,6 +1298,19 @@ def set_auto_merge_toggle(
     )
 
 
+def _escape_like(value: str) -> str:
+    """Escape SQLite ``LIKE`` wildcards in user-supplied values.
+
+    Callers must pair the returned value with ``LIKE ? ESCAPE '\\'``
+    (see ``list_recent_auto_merge_decisions``). Without escaping,
+    ``_`` matches any single character and ``%`` matches any sequence,
+    so user input like ``foo_bar`` would match ``fooXbar`` and a
+    single ``_`` would match every row — turning a per-profile filter
+    into a data leak across profiles.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def list_recent_auto_merge_decisions(
     conn: sqlite3.Connection,
     *,
@@ -1313,6 +1326,13 @@ def list_recent_auto_merge_decisions(
       * repo_full_name — target_id starts with "{repo}#"
       * client_profile — payload JSON contains this profile name
 
+    User-supplied values in ``repo_full_name`` and ``client_profile``
+    are LIKE-escaped before being spliced into the pattern so
+    underscores and percent signs in legitimate profile/repo names
+    (``first_pass_acceptance``, ``my_repo``) match literally instead
+    of acting as wildcards. Uses ``LIKE ? ESCAPE '\\'`` to tell SQLite
+    how to interpret the backslash escape.
+
     Ordered by id DESC, capped at `limit`.
     """
     clauses = ["override_type = 'auto_merge_decision'"]
@@ -1321,12 +1341,14 @@ def list_recent_auto_merge_decisions(
         clauses.append("created_at >= ?")
         params.append(since_iso)
     if repo_full_name:
-        clauses.append("target_id LIKE ?")
-        params.append(f"{repo_full_name}#%")
+        clauses.append("target_id LIKE ? ESCAPE '\\'")
+        params.append(f"{_escape_like(repo_full_name)}#%")
     if client_profile:
         # Crude substring match on serialized JSON — sufficient for dashboard.
-        clauses.append("payload_json LIKE ?")
-        params.append(f'%"client_profile": "{client_profile}"%')
+        clauses.append("payload_json LIKE ? ESCAPE '\\'")
+        params.append(
+            f'%"client_profile": "{_escape_like(client_profile)}"%'
+        )
     sql = (
         "SELECT * FROM manual_overrides WHERE "
         + " AND ".join(clauses)
