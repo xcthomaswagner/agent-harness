@@ -72,11 +72,15 @@ logger = structlog.get_logger()
 def _require_api_key(x_api_key: str | None = Header(default=None)) -> None:
     """Dependency that enforces API key auth on internal control-plane endpoints.
 
-    Skipped when API_KEY is not configured (local dev mode).
+    Skipped when API_KEY is not configured (local dev mode). Uses
+    ``hmac.compare_digest`` for the comparison so the check is
+    constant-time — a plain ``!=`` leaks byte-by-byte timing info
+    about the configured secret because CPython short-circuits
+    string equality on the common-prefix length.
     """
     if not settings.api_key:
         return  # No key configured — open access (local dev)
-    if not x_api_key or x_api_key != settings.api_key:
+    if not x_api_key or not hmac.compare_digest(x_api_key, settings.api_key):
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
 
 

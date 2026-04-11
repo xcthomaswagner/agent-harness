@@ -78,23 +78,49 @@ class CrossTicketCoordinator:
     def register_sub_tickets(
         self, parent_id: str, sub_ticket_ids: list[str]
     ) -> None:
-        """Register sub-tickets for a decomposed parent."""
+        """Register sub-tickets for a decomposed parent.
+
+        Idempotent: if ``(parent_id, sub_id)`` is already tracked, the
+        entry is left alone. Without this guard, a re-triggered parent
+        (webhook replay, decomposition retry) would accumulate ghost
+        ``pending`` rows — ``update_sub_ticket`` only flipped the first
+        match, so duplicates would never transition and ``all_done``
+        would stay False forever, silently stalling the integration
+        merge.
+        """
         items = self._load()
+        existing_keys = {
+            (i.parent_ticket_id, i.sub_ticket_id) for i in items
+        }
+        new_count = 0
         for sub_id in sub_ticket_ids:
+            if (parent_id, sub_id) in existing_keys:
+                continue
             items.append(SubTicketStatus(
                 sub_ticket_id=sub_id, parent_ticket_id=parent_id
             ))
+            existing_keys.add((parent_id, sub_id))
+            new_count += 1
         self._save(items)
         logger.info(
             "sub_tickets_registered",
             parent=parent_id,
             count=len(sub_ticket_ids),
+            new=new_count,
+            skipped_duplicates=len(sub_ticket_ids) - new_count,
         )
 
     def update_sub_ticket(
         self, sub_ticket_id: str, status: str, pr_url: str = "", branch: str = ""
     ) -> str | None:
-        """Update a sub-ticket's status. Returns parent_id if all sub-tickets are done."""
+        """Update a sub-ticket's status. Returns parent_id if all sub-tickets are done.
+
+        Updates every row matching ``sub_ticket_id`` — older code used
+        ``break`` on the first match, so any stray duplicates from pre-
+        dedup-fix state would stay pending forever. Walking the full
+        list is cheap (tracking file is small) and makes the coordinator
+        robust against historical duplicate rows.
+        """
         items = self._load()
         parent_id = None
 
@@ -104,7 +130,6 @@ class CrossTicketCoordinator:
                 item.pr_url = pr_url or item.pr_url
                 item.branch = branch or item.branch
                 parent_id = item.parent_ticket_id
-                break
 
         self._save(items)
 

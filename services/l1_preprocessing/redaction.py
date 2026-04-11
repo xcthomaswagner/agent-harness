@@ -146,42 +146,47 @@ _LINE_PATTERNS: list[_LinePattern] = [
         re.compile(r"https://[^@\s/:]+:[^@\s/]+@"),
         "https://[REDACTED]@",
     ),
-    # JSON ``"access_token"`` / ``"accessToken"`` / ``"AccessToken"`` fields.
-    # Case-insensitive so PascalCase (.NET / Azure) payloads are covered.
-    # The negative lookahead matches any value whose contents already include
-    # ``REDACTED`` anywhere. This keeps the pattern idempotent across ALL
-    # placeholder shapes the redactor ever emits — the literal ``[REDACTED]``,
-    # the block placeholders like ``[JWT_REDACTED]``, and entropy-pass
-    # placeholders like ``[FLAGGED_ENTROPY_40_REDACTED]``. A narrower
-    # lookahead would silently violate idempotency when a field was first
-    # redacted by the entropy pass and later re-scanned by the line pass.
-    _LinePattern(
-        re.compile(
-            r'"access_?token"\s*:\s*"(?![^"]*REDACTED[^"]*")[^"]+"',
-            re.IGNORECASE,
-        ),
-        '"access_token":"[REDACTED]"',
-    ),
-    # JSON ``"password"`` fields, case-insensitive.
-    _LinePattern(
-        re.compile(
-            r'"password"\s*:\s*"(?![^"]*REDACTED[^"]*")[^"]+"',
-            re.IGNORECASE,
-        ),
-        '"password":"[REDACTED]"',
-    ),
-    # Generic ``"api_key"`` / ``"apiKey"`` / ``"ApiKey"`` JSON fields,
-    # case-insensitive.
-    _LinePattern(
-        re.compile(
-            r'"api_?key"\s*:\s*"(?![^"]*REDACTED[^"]*")[^"]+"',
-            re.IGNORECASE,
-        ),
-        '"api_key":"[REDACTED]"',
-    ),
     # Google API keys (AIza...).
     _LinePattern(re.compile(r"AIza[0-9A-Za-z_-]{35}"), "[GOOGLE_API_KEY_REDACTED]"),
 ]
+
+
+# JSON-field line patterns are generated from a small data table so
+# adding a new field (``"secret"``, ``"client_secret"``, ``"refresh_
+# token"``, etc.) is a one-liner and the idempotency lookahead is
+# literally identical across every field. Every entry produces a
+# case-insensitive regex with the same negative-lookahead shape:
+# match any JSON-string value whose contents don't already contain
+# ``REDACTED`` (which covers the literal ``[REDACTED]``, block
+# placeholders like ``[JWT_REDACTED]``, and entropy-pass placeholders
+# like ``[FLAGGED_ENTROPY_40_REDACTED]``). A narrower lookahead would
+# silently violate idempotency when a field was first flagged by the
+# entropy pass and later re-scanned by the line pass.
+#
+# Each tuple is ``(field_name_regex, canonical_replacement_key)`` — the
+# first is what matches in the input, the second is the key used in
+# the placeholder output so every redacted field has a consistent
+# canonical form regardless of the original casing/spacing.
+_JSON_FIELD_SECRETS: list[tuple[str, str]] = [
+    # access_token / accessToken / AccessToken — covers PascalCase
+    # (.NET / Azure) payloads.
+    (r"access_?token", "access_token"),
+    (r"password", "password"),
+    # api_key / apiKey / ApiKey.
+    (r"api_?key", "api_key"),
+]
+
+for _field_re, _canonical in _JSON_FIELD_SECRETS:
+    _LINE_PATTERNS.append(
+        _LinePattern(
+            re.compile(
+                rf'"{_field_re}"\s*:\s*"(?![^"]*REDACTED[^"]*")[^"]+"',
+                re.IGNORECASE,
+            ),
+            f'"{_canonical}":"[REDACTED]"',
+        )
+    )
+del _field_re, _canonical
 
 
 # ---------------------------------------------------------------------------

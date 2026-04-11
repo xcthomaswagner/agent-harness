@@ -7,6 +7,7 @@ connection-per-request pattern and hand-rolled, versioned migrations.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 from collections.abc import Iterator
@@ -325,8 +326,23 @@ def _now_iso() -> str:
 # FastAPI dependency
 # ---------------------------------------------------------------------------
 
-def get_autonomy_conn() -> Iterator[sqlite3.Connection]:
-    """Yield a per-request sqlite3 connection; close in finally."""
+@contextlib.contextmanager
+def autonomy_conn() -> Iterator[sqlite3.Connection]:
+    """Open an autonomy.db connection, run ``ensure_schema``, close it.
+
+    Single helper replacing the ``_open_conn() / try: ... / finally:
+    conn.close()`` boilerplate that was copy-pasted into every
+    autonomy_ingest endpoint (and a couple of sites in main.py /
+    unified_dashboard.py). Call sites become::
+
+        with autonomy_conn() as conn:
+            do_thing(conn)
+
+    Centralising the lifecycle here guarantees ``ensure_schema`` runs
+    on every code path — previously a handful of sites opened the
+    connection without calling it, risking a crash on the first
+    write against a fresh DB.
+    """
     db_path = resolve_db_path(settings.autonomy_db_path)
     conn = open_connection(db_path)
     try:
@@ -334,6 +350,16 @@ def get_autonomy_conn() -> Iterator[sqlite3.Connection]:
         yield conn
     finally:
         conn.close()
+
+
+# Back-compat alias — FastAPI dependency form. The generator shape
+# still works with ``Depends`` because FastAPI unwraps generators
+# into per-request dependencies; ``autonomy_conn`` is the preferred
+# form for direct ``with`` usage in handler bodies.
+def get_autonomy_conn() -> Iterator[sqlite3.Connection]:
+    """Yield a per-request sqlite3 connection; close in finally."""
+    with autonomy_conn() as conn:
+        yield conn
 
 
 # ---------------------------------------------------------------------------

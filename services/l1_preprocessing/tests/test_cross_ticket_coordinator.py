@@ -62,6 +62,75 @@ class TestCrossTicketCoordinator:
         assert all(s.parent_ticket_id == "P-1" for s in subs)
         assert all(s.status == "pending" for s in subs)
 
+    def test_register_is_idempotent_for_same_parent_and_sub(
+        self, coordinator: CrossTicketCoordinator
+    ) -> None:
+        """Bug regression: before the fix, calling register_sub_tickets
+        twice for the same parent (webhook replay, decomposition retry)
+        appended duplicate rows. update_sub_ticket only flipped the
+        first match on each call, so the ghost pending rows kept the
+        coordinator in a state where ``all_done`` was permanently False
+        and the integration merge never fired. After the fix, a second
+        call is a no-op."""
+        coordinator.register_sub_tickets("P-DUP", ["S-1", "S-2"])
+        coordinator.register_sub_tickets("P-DUP", ["S-1", "S-2"])
+
+        subs = coordinator.get_sub_tickets("P-DUP")
+        assert len(subs) == 2  # Not 4 — dedup worked.
+        assert sorted(s.sub_ticket_id for s in subs) == ["S-1", "S-2"]
+
+    def test_register_merges_new_sub_tickets_with_existing(
+        self, coordinator: CrossTicketCoordinator
+    ) -> None:
+        """A retry that adds a new sub-ticket on top of existing ones
+        must keep the existing entries untouched AND add the new one."""
+        coordinator.register_sub_tickets("P-PART", ["S-1", "S-2"])
+        coordinator.update_sub_ticket(
+            "S-1", "pr_created", pr_url="https://pr/1"
+        )
+        # Second registration repeats S-1 and adds S-3.
+        coordinator.register_sub_tickets("P-PART", ["S-1", "S-3"])
+
+        subs = {
+            s.sub_ticket_id: s for s in coordinator.get_sub_tickets("P-PART")
+        }
+        assert set(subs) == {"S-1", "S-2", "S-3"}
+        # S-1's prior update must survive.
+        assert subs["S-1"].status == "pr_created"
+        assert subs["S-1"].pr_url == "https://pr/1"
+        # The untouched sibling is still pending.
+        assert subs["S-2"].status == "pending"
+
+    def test_update_sub_ticket_flips_all_duplicates(
+        self, coordinator: CrossTicketCoordinator
+    ) -> None:
+        """Belt-and-braces regression: if a pre-fix tracking file still
+        has stray duplicate rows for the same (parent, sub) pair, the
+        updater must transition all of them so all_done can eventually
+        return true. Simulates the bad state by writing duplicates
+        directly to the tracking file."""
+        import json
+
+        coordinator.register_sub_tickets("P-GHOST", ["S-1", "S-2"])
+        # Inject a ghost duplicate of S-1 as if from a pre-fix run.
+        raw = json.loads(coordinator._path.read_text())
+        raw.append({
+            "sub_ticket_id": "S-1",
+            "parent_ticket_id": "P-GHOST",
+            "pr_url": "",
+            "branch": "",
+            "status": "pending",
+        })
+        coordinator._path.write_text(json.dumps(raw))
+
+        # Mark S-1 merged — both the original and the ghost row must
+        # transition, otherwise all_done can never be True.
+        coordinator.update_sub_ticket("S-1", "merged", branch="ai/S-1")
+        result = coordinator.update_sub_ticket(
+            "S-2", "pr_created", pr_url="https://pr/2"
+        )
+        assert result == "P-GHOST"
+
     def test_update_sub_ticket_returns_none_when_not_all_done(
         self, coordinator: CrossTicketCoordinator
     ) -> None:
