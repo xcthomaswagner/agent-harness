@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import html
 import json
 import sqlite3
 from typing import Any
@@ -22,6 +21,18 @@ from autonomy_store import (
 )
 from client_profile import load_profile
 from config import settings
+from dashboard_common import (
+    badge as _badge,
+)
+from dashboard_common import (
+    escape_html as _e,
+)
+from dashboard_common import (
+    fmt_ts as _fmt_ts,
+)
+from dashboard_common import (
+    safe_url as _safe_url,
+)
 from tracer import build_trace_list_row, list_traces, read_trace
 
 logger = structlog.get_logger()
@@ -109,44 +120,15 @@ _AUTO_MERGE_DECISION_BADGE: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 
-def _e(text: Any) -> str:
-    """HTML-escape a value."""
-    return html.escape(str(text), quote=True)
-
-
 def _fmt_pct(value: float | None) -> str:
     if value is None:
         return "\u2014"
     return f"{value * 100:.0f}%"
 
 
-def _safe_url(url: str) -> str:
-    s = url.strip().lower()
-    return url if s.startswith("https://") or s.startswith("http://") else "#"
-
-
-def _fmt_ts(ts: str) -> str:
-    """Format ISO timestamp for short display."""
-    if not ts:
-        return ""
-    try:
-        from datetime import datetime
-
-        dt = datetime.fromisoformat(ts)
-        return dt.strftime("%b %d, %H:%M")
-    except (ValueError, TypeError):
-        return ts[:16]
-
-
-def _fmt_dur(seconds: float) -> str:
-    if seconds <= 0:
-        return "0s"
-    m, s = int(seconds // 60), int(seconds % 60)
-    return f"{m}m {s}s" if m else f"{s}s"
-
-
-def _badge(text: str, cls: str) -> str:
-    return f'<span class="badge {cls}">{_e(text)}</span>'
+# _e, _safe_url, _fmt_ts, _fmt_dur, _badge are imported from
+# dashboard_common at the top of this file. Historically they were
+# duplicated across four dashboard modules.
 
 
 def _resolve_auto_merge_label(

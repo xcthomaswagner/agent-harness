@@ -545,6 +545,98 @@ class TestDownloadAttachment:
         result = await stream_adapter.download_attachment(att, str(tmp_path))
         assert result.local_path == ""
 
+    @pytest.mark.parametrize(
+        "evil_filename",
+        [
+            "..",
+            ".",
+            "",
+            "has\x00nulbyte.png",
+        ],
+    )
+    async def test_rejects_unnormalizable_filename(
+        self,
+        stream_adapter: JiraAdapter,
+        stream_client: AsyncMock,
+        tmp_path: Path,
+        evil_filename: str,
+    ) -> None:
+        """Bug regression: filenames that can't be sanitized to a
+        legitimate basename (empty, ``.``, ``..``, NUL-bearing) must
+        be rejected outright — no file is written, the returned
+        Attachment has no local_path, and nothing escapes tmp_path."""
+        image_bytes = b"\x89PNG" + b"\x00" * 50
+        self._setup_stream(stream_client, image_bytes, str(len(image_bytes)))
+
+        # Plant a file in the parent directory that a successful traversal
+        # would overwrite. It must stay intact after the call.
+        parent_canary = tmp_path.parent / "canary.txt"
+        parent_canary.write_bytes(b"original")
+
+        att = Attachment(
+            filename=evil_filename,
+            url="https://acme.atlassian.net/secure/attachment/1/x.png",
+            content_type="image/png",
+        )
+        result = await stream_adapter.download_attachment(att, str(tmp_path))
+
+        assert result.local_path == "", (
+            f"evil filename {evil_filename!r} must be rejected"
+        )
+        # Nothing written outside tmp_path.
+        assert parent_canary.read_bytes() == b"original"
+        # No files created inside tmp_path either.
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        "traversal_input,expected_basename",
+        [
+            ("../../tmp/pwn.sh", "pwn.sh"),
+            ("../../../etc/cron.d/payload", "payload"),
+            ("/etc/passwd", "passwd"),
+            ("/tmp/absolute-path", "absolute-path"),
+            ("subdir/legit.png", "legit.png"),
+        ],
+    )
+    async def test_strips_path_components_to_basename(
+        self,
+        stream_adapter: JiraAdapter,
+        stream_client: AsyncMock,
+        tmp_path: Path,
+        traversal_input: str,
+        expected_basename: str,
+    ) -> None:
+        """Bug regression: untrusted ``filename`` values with path
+        components (``../foo``, absolute paths, subdirs) used to land
+        directly in ``dest / filename`` so the write escaped tmp_path.
+        Fixed by taking the basename — the write lands SAFELY inside
+        dest with just the last path component, and nothing is ever
+        written outside tmp_path. This is the correct safe behavior:
+        the legitimate case of ``subdir/legit.png`` still succeeds,
+        the traversal case of ``../../tmp/pwn.sh`` becomes
+        ``tmp_path/pwn.sh`` instead of ``/tmp/pwn.sh``."""
+        image_bytes = b"\x89PNG" + b"\x00" * 50
+        self._setup_stream(stream_client, image_bytes, str(len(image_bytes)))
+
+        # Plant a canary outside tmp_path — must stay intact.
+        parent_canary = tmp_path.parent / expected_basename
+        parent_canary.write_bytes(b"original-canary")
+
+        att = Attachment(
+            filename=traversal_input,
+            url="https://acme.atlassian.net/secure/attachment/1/x.png",
+            content_type="image/png",
+        )
+        result = await stream_adapter.download_attachment(att, str(tmp_path))
+
+        # The write succeeded — but INSIDE tmp_path with the basename.
+        assert result.local_path != ""
+        written = Path(result.local_path)
+        assert written.name == expected_basename
+        assert written.parent == tmp_path
+        # Canary outside tmp_path was NOT touched.
+        assert parent_canary.read_bytes() == b"original-canary"
+
 
 class TestDownloadImageAttachments:
     async def test_downloads_only_images(self, settings: Settings, tmp_path: Path) -> None:

@@ -31,10 +31,11 @@ Design notes
 
 from __future__ import annotations
 
-import html
 import json
 from pathlib import Path
 from typing import Any
+
+from dashboard_common import escape_html as _e
 
 # Artifact event name constants. Imported directly from tracer.py (commit 1)
 # — the authoritative producer. Reading them from any other source would
@@ -62,11 +63,6 @@ _TOOL_CATEGORY_COLORS: dict[str, str] = {
     "read": "#3B82F5",      # blue — read-only inspection
     "neutral": "#64748B",   # gray — everything else
 }
-
-
-def _e(text: Any) -> str:
-    """HTML-escape a value, coercing to string first."""
-    return html.escape("" if text is None else str(text), quote=True)
 
 
 def _tool_color(tool_name: str) -> str:

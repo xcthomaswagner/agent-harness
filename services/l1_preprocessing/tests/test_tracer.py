@@ -14,6 +14,7 @@ from tracer import (
     build_trace_list_row,
     compute_phase_durations,
     consolidate_worktree_logs,
+    derive_trace_status,
     extract_diagnostic_info,
     extract_escalation_reason,
     find_artifact,
@@ -1218,3 +1219,92 @@ class TestRunStartIdxKwarg:
         assert extract_diagnostic_info(entries) == extract_diagnostic_info(
             entries, run_start_idx=idx
         )
+
+
+class TestDeriveTraceStatus:
+    """Shared status-derivation helper used by both list_traces and
+    build_span_tree._build_summary. Previously the two sites were
+    hand-rolled, 18-branch vs 8-branch, and drifted — the detail view
+    silently missed half the labels."""
+
+    def _run(self, events: list[str], pr_url: str = "") -> str:
+        """Helper: build minimal entries from a list of event names and
+        derive the status."""
+        entries = [{"event": ev} for ev in events]
+        return derive_trace_status(entries, events, pr_url)
+
+    def test_empty_returns_unknown(self) -> None:
+        assert derive_trace_status([], [], "") == "Unknown"
+
+    def test_cleaned_up_wins_over_everything(self) -> None:
+        # stale_worktree_cleaned takes precedence even if later events
+        # include a terminal success marker.
+        events = ["webhook_received", "Pipeline complete", "stale_worktree_cleaned"]
+        assert self._run(events) == "Cleaned Up"
+
+    def test_escalated(self) -> None:
+        assert self._run(["Escalated"]) == "Escalated"
+
+    def test_failed_via_agent_finished_escalated(self) -> None:
+        entries = [
+            {"event": "agent_finished", "status": "escalated"},
+        ]
+        assert derive_trace_status(entries, ["agent_finished"], "") == "Failed"
+
+    def test_timed_out_case_insensitive(self) -> None:
+        assert self._run(["Pipeline timed out after 30m"]) == "Timed Out"
+
+    def test_complete(self) -> None:
+        assert self._run(["webhook_received", "Pipeline complete"]) == "Complete"
+
+    def test_pr_created_without_complete(self) -> None:
+        assert (
+            self._run(["webhook_received", "pr_created"], pr_url="https://x/pr/1")
+            == "PR Created"
+        )
+
+    def test_merged_and_implementing_and_planned_and_ci_fix(self) -> None:
+        # These four statuses were MISSING from the old _build_summary
+        # chain — the whole point of the consolidation.
+        assert self._run(["Merge complete"]) == "Merged"
+        assert self._run(["unit-1 complete"]) == "Implementing"
+        assert self._run(["Plan complete"]) == "Planned"
+        assert self._run(["ci_fix_spawned"]) == "CI Fix"
+
+    def test_agent_done_no_pr(self) -> None:
+        assert self._run(["agent_finished"]) == "Agent Done (no PR)"
+
+    def test_received_when_only_webhook(self) -> None:
+        assert self._run(["webhook_received"]) == "Received"
+
+    def test_implementing_label_wins_where_old_build_summary_fell_through(
+        self,
+    ) -> None:
+        """Before extraction, _build_summary's chain lacked the
+        ``unit-*complete*`` check, so a trace that had dispatched and
+        finished an implementation phase (no Plan / Review / QA yet)
+        would fall all the way through to ``events[-1]`` and render a
+        raw event string in the detail view, while the list view
+        correctly rendered ``Implementing``. With the shared helper
+        both views agree."""
+        entries = [
+            {"event": "webhook_received"},
+            {"event": "processing_started"},
+            {"event": "l2_dispatched"},
+            {"event": "unit-1 complete"},
+        ]
+        events = [e.get("event", "") for e in entries]
+        assert derive_trace_status(entries, events, "") == "Implementing"
+
+    def test_merged_label_when_no_pr_url(self) -> None:
+        """Merge complete without a pr_url on the trace summary must
+        render as Merged — _build_summary didn't have this branch at
+        all and would fall through to events[-1]."""
+        entries = [
+            {"event": "webhook_received"},
+            {"event": "processing_started"},
+            {"event": "l2_dispatched"},
+            {"event": "Merge complete"},
+        ]
+        events = [e.get("event", "") for e in entries]
+        assert derive_trace_status(entries, events, "") == "Merged"

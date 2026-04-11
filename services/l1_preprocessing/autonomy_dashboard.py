@@ -8,7 +8,6 @@ cards side-by-side and MUST NOT display a single averaged headline metric
 
 from __future__ import annotations
 
-import html
 import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
@@ -32,6 +31,7 @@ from autonomy_store import (
 )
 from client_profile import load_profile
 from config import settings
+from dashboard_common import escape_html as _e
 
 logger = structlog.get_logger()
 
@@ -95,11 +95,6 @@ _MODE_BADGE: dict[str, str] = {
     "semi_autonomous": "badge-warning",
     "full_autonomous": "badge-success",
 }
-
-
-def _e(text: Any) -> str:
-    """HTML-escape a value."""
-    return html.escape(str(text), quote=True)
 
 
 def _fmt_pct(value: float | None) -> str:

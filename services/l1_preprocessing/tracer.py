@@ -143,6 +143,71 @@ def count_traces() -> int:
     return sum(1 for _ in LOGS_DIR.glob("*.jsonl"))
 
 
+def derive_trace_status(
+    entries: list[dict[str, Any]],
+    events: list[str],
+    pr_url: str,
+) -> str:
+    """Single source of truth for trace → status-label mapping.
+
+    Previously this logic was duplicated between ``list_traces`` (18
+    branches, covering the full set of dashboard labels) and
+    ``_build_summary`` (8 branches, silently missing half the cases —
+    Cleaned Up / Failed / Timed Out / Merged / Implementing / Planned /
+    CI Fix / Agent Done / Processing / Received — so the detail view
+    fell back to ``events[-1] if events else "Unknown"`` for those
+    states). A re-triggered trace could then show one label in the list
+    view and a different label in the detail view.
+
+    The predicates run in order — the first match wins. ``entries`` is
+    accepted so branches that need to look at fields on individual
+    entries (not just the flat ``event`` name list) can do so.
+    """
+    if not entries:
+        return "Unknown"
+
+    if "stale_worktree_cleaned" in events:
+        # This run was cleaned up by a subsequent spawn.
+        return "Cleaned Up"
+    if "Escalated" in events:
+        return "Escalated"
+    if any(
+        e.get("event") == "agent_finished" and e.get("status") == "escalated"
+        for e in entries
+    ):
+        return "Failed"
+    if any("timed out" in ev.lower() for ev in events):
+        return "Timed Out"
+    if "Pipeline complete" in events:
+        return "Complete"
+    if pr_url and not any("Pipeline complete" in ev for ev in events):
+        return "PR Created"
+    if any("QA complete" in ev for ev in events):
+        return "QA Done"
+    if any("Review complete" in ev for ev in events):
+        return "Review Done"
+    if any("Merge complete" in ev for ev in events):
+        return "Merged"
+    if any("unit-" in ev and "complete" in ev for ev in events):
+        return "Implementing"
+    if any("Plan" in ev and ("complete" in ev or "approved" in ev) for ev in events):
+        return "Planned"
+    if any("l2_dispatched" in ev for ev in events):
+        return "Dispatched"
+    if any("ci_fix_spawned" in ev for ev in events):
+        return "CI Fix"
+    if any("agent_finished" in ev for ev in events) and not pr_url:
+        return "Agent Done (no PR)"
+    if any("processing_completed" in ev for ev in events):
+        return "Enriched"
+    if any("processing_started" in ev for ev in events):
+        return "Processing"
+    if any("webhook_received" in ev for ev in events):
+        return "Received"
+    last = entries[-1]
+    return str(last.get("event", "Unknown"))
+
+
 def list_traces(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
     """List ticket traces with summary info, paginated.
 
@@ -189,47 +254,10 @@ def list_traces(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
                 review_verdict = str(e.get("review_verdict", ""))
                 qa_result = str(e.get("qa_result", ""))
 
-        # --- Derive meaningful status from event history ---
-        if "stale_worktree_cleaned" in events:
-            # This run was cleaned up by a subsequent spawn — mark it clearly
-            status = "Cleaned Up"
-        elif "Escalated" in events:
-            status = "Escalated"
-        elif any(
-            e.get("event") == "agent_finished" and e.get("status") == "escalated"
-            for e in entries
-        ):
-            status = "Failed"
-        elif any("timed out" in ev.lower() for ev in events):
-            status = "Timed Out"
-        elif "Pipeline complete" in events:
-            status = "Complete"
-        elif pr_url and not any("Pipeline complete" in ev for ev in events):
-            status = "PR Created"
-        elif any("QA complete" in ev for ev in events):
-            status = "QA Done"
-        elif any("Review complete" in ev for ev in events):
-            status = "Review Done"
-        elif any("Merge complete" in ev for ev in events):
-            status = "Merged"
-        elif any("unit-" in ev and "complete" in ev for ev in events):
-            status = "Implementing"
-        elif any("Plan" in ev and ("complete" in ev or "approved" in ev) for ev in events):
-            status = "Planned"
-        elif any("l2_dispatched" in ev for ev in events):
-            status = "Dispatched"
-        elif any("ci_fix_spawned" in ev for ev in events):
-            status = "CI Fix"
-        elif any("agent_finished" in ev for ev in events) and not pr_url:
-            status = "Agent Done (no PR)"
-        elif any("processing_completed" in ev for ev in events):
-            status = "Enriched"
-        elif any("processing_started" in ev for ev in events):
-            status = "Processing"
-        elif any("webhook_received" in ev for ev in events):
-            status = "Received"
-        else:
-            status = last.get("event", "Unknown")
+        # Derive status label from the event history. Single source of
+        # truth shared with build_span_tree's _build_summary so both
+        # views agree on what a trace's status is.
+        status = derive_trace_status(entries, events, pr_url)
 
         # Compute the run-start index once per trace — threaded into
         # _derive_current_phase here AND down to build_trace_list_row via
@@ -779,23 +807,11 @@ def _build_summary(
             phases_seen.append(phase)
     summary["phases_completed"] = phases_seen
 
-    # Derive status (reuse existing logic pattern)
-    if "Escalated" in events:
-        summary["status"] = "Escalated"
-    elif "Pipeline complete" in events:
-        summary["status"] = "Complete"
-    elif summary["pr_url"] and "Pipeline complete" not in events:
-        summary["status"] = "PR Created"
-    elif "QA complete" in events:
-        summary["status"] = "QA Done"
-    elif "Review complete" in events:
-        summary["status"] = "Review Done"
-    elif any("l2_dispatched" in ev for ev in events):
-        summary["status"] = "Dispatched"
-    elif any("processing_completed" in ev for ev in events):
-        summary["status"] = "Enriched"
-    else:
-        summary["status"] = events[-1] if events else "Unknown"
+    # Derive status via the shared helper — this block used to be an
+    # inline 8-branch chain that was missing half the cases covered by
+    # list_traces, so the detail view and the list view could disagree
+    # on the same trace. Now they can't.
+    summary["status"] = derive_trace_status(run_entries, events, summary["pr_url"])
 
     # Duration
     if run_entries:

@@ -67,7 +67,13 @@ class Pipeline:
         self._figma_extractor = figma_extractor or FigmaExtractor(
             api_token=settings.figma_api_token
         )
-        self._temp_dirs: list[str] = []  # Track for cleanup after spawn
+        # Temp-dir tracking lives on each ``process()`` call, NOT on the
+        # Pipeline instance — this service runs as a module-level
+        # singleton and two concurrent webhook tasks would otherwise
+        # share the list. Ticket A's cleanup would rmtree ticket B's
+        # still-in-use attachment/figma dirs, breaking the spawned L2
+        # session silently. See the ``_process_temp_dirs`` list built
+        # in ``process()`` and passed down to helpers.
 
     def _get_adapter(
         self, ticket: EnrichedTicket | InfoRequest | DecompositionPlan
@@ -96,8 +102,13 @@ class Pipeline:
 
         tid = trace_id or generate_trace_id()
 
+        # Per-call temp-dir tracking — see the Pipeline constructor
+        # comment. Scoping the list here prevents concurrent webhook
+        # tasks from trampling each other's in-flight directories.
+        temp_dirs: list[str] = []
+
         # Step 0: Download image attachments so analyst can see them
-        ticket = await self._download_image_attachments(ticket, log)
+        ticket = await self._download_image_attachments(ticket, log, temp_dirs)
 
         # Step 1: Run analyst
         output = await self._analyst.analyze(ticket)
@@ -115,7 +126,7 @@ class Pipeline:
         if output_type == "enriched":
             if not isinstance(output, EnrichedTicket):
                 raise TypeError(f"Expected EnrichedTicket, got {type(output).__name__}")
-            return await self._handle_enriched(output, log, tid)
+            return await self._handle_enriched(output, log, tid, temp_dirs)
 
         if output_type == "info_request":
             if not isinstance(output, InfoRequest):
@@ -153,7 +164,7 @@ class Pipeline:
         return profile
 
     async def _download_image_attachments(
-        self, ticket: TicketPayload, log: Any
+        self, ticket: TicketPayload, log: Any, temp_dirs: list[str]
     ) -> TicketPayload:
         """Download image attachments from the ticket source so the analyst can see them."""
         image_attachments = [a for a in ticket.attachments if a.is_design_image]
@@ -163,7 +174,7 @@ class Pipeline:
         log.info("downloading_image_attachments", count=len(image_attachments))
 
         dest_dir = tempfile.mkdtemp(prefix=f"attachments-{ticket.id}-")
-        self._temp_dirs.append(dest_dir)
+        temp_dirs.append(dest_dir)
         # Route attachment download by source — ADO adapter lacks this method
         # so we skip for ADO tickets (attachments stay as URL-only references)
         if ticket.source == TicketSource.ADO:
@@ -183,7 +194,7 @@ class Pipeline:
         return ticket
 
     async def _extract_figma_if_needed(
-        self, enriched: EnrichedTicket, log: Any
+        self, enriched: EnrichedTicket, log: Any, temp_dirs: list[str]
     ) -> None:
         """Extract Figma design spec if a Figma link is found in the ticket."""
         if enriched.figma_design_spec:
@@ -195,7 +206,7 @@ class Pipeline:
             return
 
         figma_img_dir = tempfile.mkdtemp(prefix=f"figma-{enriched.id}-")
-        self._temp_dirs.append(figma_img_dir)
+        temp_dirs.append(figma_img_dir)
         spec = await self._figma_extractor.extract(
             figma_links[0]["url"], image_dest_dir=figma_img_dir,
         )
@@ -227,14 +238,20 @@ class Pipeline:
                 log.info("platform_profile_auto_detected", profile=detected)
 
     async def _handle_enriched(
-        self, enriched: EnrichedTicket, log: Any, trace_id: str = ""
+        self,
+        enriched: EnrichedTicket,
+        log: Any,
+        trace_id: str = "",
+        temp_dirs: list[str] | None = None,
     ) -> dict[str, Any]:
         """Handle an enriched ticket — write back to Jira and trigger L2."""
+        if temp_dirs is None:
+            temp_dirs = []
         tid = trace_id or generate_trace_id()
         adapter = self._get_adapter(enriched)
         profile = self._load_client_profile(enriched)
 
-        await self._extract_figma_if_needed(enriched, log)
+        await self._extract_figma_if_needed(enriched, log, temp_dirs)
         self._resolve_platform_profile(enriched, profile, log)
 
         done_status = profile.done_status if profile else "Done"
@@ -283,7 +300,7 @@ class Pipeline:
             trace_id=tid,
             client_profile_name=profile.name if profile else "",
         )
-        self._cleanup_temp_dirs(log)
+        self._cleanup_temp_dirs(log, temp_dirs)
 
         append_trace(enriched.id, tid, "pipeline", "l2_dispatched",
                      pipeline_mode=pipeline_mode, spawn_triggered=spawn_result,
@@ -385,16 +402,17 @@ class Pipeline:
 
         return ""
 
-    def _cleanup_temp_dirs(self, log: Any) -> None:
+    @staticmethod
+    def _cleanup_temp_dirs(log: Any, temp_dirs: list[str]) -> None:
         """Remove temporary directories created during processing."""
         import shutil
 
-        for d in self._temp_dirs:
+        for d in temp_dirs:
             try:
                 shutil.rmtree(d, ignore_errors=True)
             except Exception:
                 log.warning("temp_dir_cleanup_failed", path=d)
-        self._temp_dirs.clear()
+        temp_dirs.clear()
 
     @staticmethod
     def _write_ticket_json(enriched: EnrichedTicket) -> Path:

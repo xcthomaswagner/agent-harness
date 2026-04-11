@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -21,6 +22,33 @@ from models import (
 )
 
 logger = structlog.get_logger()
+
+def _sanitize_attachment_filename(raw: str) -> str | None:
+    """Turn an untrusted webhook filename into a safe basename or None.
+
+    Rejects empty strings, ``.``, ``..``, anything containing NUL bytes,
+    and (defence in depth) any value whose basename doesn't equal the
+    input after slashes are stripped. The returned value is always a
+    bare filename with no directory components — safe to use as the
+    right-hand side of ``dest / name`` and write to disk.
+
+    The caller should still verify the resolved path is inside the
+    intended destination directory; this helper handles the common
+    cases (path traversal via ``..``, absolute paths, NUL bytes) but
+    isn't a substitute for the resolve()/relative_to() check.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    if "\x00" in raw:
+        return None
+    # Take the last path component. ``Path("/etc/passwd").name`` ->
+    # ``passwd``; ``Path("../foo").name`` -> ``foo``; ``Path("..").name``
+    # -> ``..`` which we reject below.
+    name = Path(raw).name
+    if not name or name in (".", ".."):
+        return None
+    return name
+
 
 # Jira issue type name -> our TicketType
 _JIRA_TYPE_MAP: dict[str, TicketType] = {
@@ -378,17 +406,42 @@ class JiraAdapter:
         Skips if the file is too large (>5 MB) or the download fails.
         Returns the original attachment unchanged on failure.
         """
-        from pathlib import Path
-
         log = logger.bind(filename=attachment.filename, url=attachment.url)
 
         if not attachment.url:
             log.warning("attachment_download_skipped", reason="empty url")
             return attachment
 
+        # Sanitize the attacker-controlled filename. The value comes
+        # straight from the webhook payload and we build ``dest /
+        # filename`` below — without sanitization, a filename like
+        # ``../../tmp/pwn.sh`` or ``/etc/cron.d/x`` would write arbitrary
+        # bytes outside the temp dir. Take only the basename, drop path
+        # separators and NUL bytes, reject empty/dot results, and after
+        # constructing the path assert it resolves inside ``dest``.
+        safe_name = _sanitize_attachment_filename(attachment.filename)
+        if safe_name is None:
+            log.warning(
+                "attachment_download_skipped",
+                reason="invalid_filename",
+                raw_filename=attachment.filename,
+            )
+            return attachment
+
         dest = Path(dest_dir)
         dest.mkdir(parents=True, exist_ok=True)
-        file_path = dest / attachment.filename
+        file_path = dest / safe_name
+        # Defense in depth: even after basename sanitization, refuse any
+        # path that resolves outside the destination directory.
+        try:
+            file_path.resolve().relative_to(dest.resolve())
+        except ValueError:
+            log.warning(
+                "attachment_download_skipped",
+                reason="resolved_outside_dest",
+                raw_filename=attachment.filename,
+            )
+            return attachment
 
         try:
             async with self._client.stream("GET", attachment.url) as response:

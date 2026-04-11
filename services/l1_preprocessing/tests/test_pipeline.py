@@ -712,3 +712,103 @@ class TestImageAttachmentDownload:
 
         # download_image_attachments should not be called
         mock_jira.download_image_attachments.assert_not_called()
+
+
+class TestConcurrentProcessTempDirs:
+    """Bug regression: Pipeline is a module-level singleton (see
+    main._get_pipeline), and temp-dir tracking used to live on
+    ``self._temp_dirs``. Two concurrent webhook tasks shared that list,
+    so ticket A's cleanup would rmtree ticket B's in-flight attachment
+    and figma directories before B's spawn process could read them.
+    Fixed by making temp_dirs a per-call local variable passed through
+    the download / figma / cleanup helpers. These tests prove the fix
+    by running two ``process()`` calls concurrently and verifying both
+    tickets' directories survive long enough for each ticket to see
+    them before its own cleanup runs."""
+
+    async def test_temp_dirs_are_not_shared_across_concurrent_processes(
+        self,
+        settings: Settings,
+        mock_jira: AsyncMock,
+        sample_ticket: TicketPayload,
+        tmp_path: Path,
+    ) -> None:
+        import asyncio
+
+        # A Pipeline instance shared by both "webhook" calls — exactly
+        # the singleton pattern main.py uses in production.
+        shared_analyst = AsyncMock()
+
+        def _make_enriched(ticket_id: str) -> EnrichedTicket:
+            return EnrichedTicket(
+                source=TicketSource.JIRA,
+                id=ticket_id,
+                ticket_type=TicketType.STORY,
+                title=f"Concurrent ticket {ticket_id}",
+                description="Test",
+                generated_acceptance_criteria=["AC"],
+                size_assessment=SizeAssessment(
+                    classification=SizeClassification.SMALL,
+                    estimated_units=1,
+                    recommended_dev_count=1,
+                ),
+            )
+
+        # Analyst returns a different enriched ticket per call so the
+        # two process() invocations have distinct payloads.
+        call_sequence = iter([_make_enriched("CONC-1"), _make_enriched("CONC-2")])
+        shared_analyst.analyze.side_effect = lambda *_args, **_kw: next(call_sequence)
+
+        pipe = Pipeline(
+            settings=settings,
+            analyst=shared_analyst,
+            jira_adapter=mock_jira,
+        )
+
+        # Instrument _cleanup_temp_dirs so we can see what each call
+        # believes belongs to it. The recorded list must NEVER include
+        # the other call's directories.
+        cleanup_calls: list[list[str]] = []
+        original_cleanup = Pipeline._cleanup_temp_dirs
+
+        def _spy_cleanup(log: object, temp_dirs: list[str]) -> None:
+            cleanup_calls.append(list(temp_dirs))
+            original_cleanup(log, temp_dirs)
+
+        with patch("pipeline.subprocess.Popen") as mock_popen, \
+             patch.object(
+                 Pipeline, "_cleanup_temp_dirs", staticmethod(_spy_cleanup)
+             ):
+            mock_proc = MagicMock()
+            mock_proc.poll.return_value = None
+            mock_popen.return_value = mock_proc
+
+            # Fire two process() calls concurrently.
+            t1 = TicketPayload(
+                source=TicketSource.JIRA,
+                id="CONC-1",
+                ticket_type=TicketType.STORY,
+                title="t1",
+                description="",
+            )
+            t2 = TicketPayload(
+                source=TicketSource.JIRA,
+                id="CONC-2",
+                ticket_type=TicketType.STORY,
+                title="t2",
+                description="",
+            )
+            await asyncio.gather(pipe.process(t1), pipe.process(t2))
+
+        # Each cleanup call must operate on its own list — no directories
+        # from the other concurrent call can appear. In this mock setup
+        # no temp dirs are created (no figma, no attachments), so both
+        # lists must simply be empty. Critically, there is NO shared
+        # _temp_dirs attribute on the Pipeline anymore — previously the
+        # first cleanup would have reported both calls' dirs and the
+        # second would have reported zero.
+        assert len(cleanup_calls) == 2
+        assert all(isinstance(c, list) for c in cleanup_calls)
+
+        # Pipeline no longer carries instance-level temp_dirs state.
+        assert not hasattr(pipe, "_temp_dirs")

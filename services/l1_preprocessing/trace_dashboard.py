@@ -8,13 +8,27 @@ Provides three views:
 
 from __future__ import annotations
 
-import html
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
+from dashboard_common import (
+    badge as _badge,
+)
+from dashboard_common import (
+    escape_html as _e,
+)
+from dashboard_common import (
+    fmt_dur as _fmt_dur,
+)
+from dashboard_common import (
+    fmt_ts as _fmt_ts,
+)
+from dashboard_common import (
+    safe_url as _safe_url,
+)
 from diagnostic import render_diagnostic_checklist, run_diagnostic_checklist
 from investigate_command import build_investigate_command
 from tracer import (
@@ -93,40 +107,9 @@ _TERMINAL_STATUSES: frozenset[str] = frozenset(
 )
 
 
-def _e(text: str) -> str:
-    """HTML-escape a string."""
-    return html.escape(str(text), quote=True)
-
-
-def _safe_url(url: str) -> str:
-    """Return URL only if safe scheme."""
-    s = url.strip().lower()
-    return url if s.startswith("https://") or s.startswith("http://") else "#"
-
-
-def _fmt_dur(seconds: float) -> str:
-    """Format seconds as Nm Ss."""
-    if seconds <= 0:
-        return "0s"
-    m, s = int(seconds // 60), int(seconds % 60)
-    return f"{m}m {s}s" if m else f"{s}s"
-
-
-def _badge(text: str, cls: str) -> str:
-    """Render a badge span."""
-    return f'<span class="badge {cls}">{_e(text)}</span>'
-
-
-def _fmt_ts(ts: str) -> str:
-    """Format ISO timestamp for display."""
-    if not ts:
-        return ""
-    try:
-        dt = datetime.fromisoformat(ts)
-        return dt.strftime("%b %d, %H:%M")
-    except (ValueError, TypeError):
-        return ts[:16]
-
+# HTML helpers (_e, _badge, _fmt_dur, _fmt_ts, _safe_url) are imported
+# from dashboard_common at the top of this file. Historically they were
+# duplicated across four dashboard modules with subtle drift risk.
 
 # --- Trace List (Table View) ---
 
