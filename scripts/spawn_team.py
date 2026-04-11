@@ -365,15 +365,29 @@ def main() -> None:
     )
     trace_watcher.start()
 
+    # Two output files:
+    #   session-stream.jsonl — full event stream including every tool use
+    #     (this is what post-mortem analysis reads to verify which tools the
+    #     agent called; without it session.log only has the final summary
+    #     text and tool calls are invisible — see Finding 2 follow-up in
+    #     session_2026_04_10_p0_p2_sf_live.md)
+    #   session.log — human-readable extract of the final assistant message
+    #     for quick eyeballing
+    session_stream = worktree_dir / ".harness" / "logs" / "session-stream.jsonl"
     session_log = worktree_dir / ".harness" / "logs" / "session.log"
     timed_out = False
-    with session_log.open("w") as log_file:
+    with session_stream.open("w") as stream_file:
         try:
             proc = subprocess.run(
-                ["claude", "-p", prompt, "--dangerously-skip-permissions"],
+                [
+                    "claude", "-p", prompt,
+                    "--dangerously-skip-permissions",
+                    "--output-format", "stream-json",
+                    "--verbose",  # required by Claude Code headless when output-format=stream-json
+                ],
                 cwd=str(worktree_dir),
                 env=env,
-                stdout=log_file,
+                stdout=stream_file,
                 stderr=subprocess.STDOUT,
                 timeout=timeout_seconds,
             )
@@ -382,6 +396,37 @@ def main() -> None:
             timed_out = True
             exit_code = 124  # Standard timeout exit code
             print(f"[spawn] Session timed out after {timeout_seconds}s")
+
+    # Extract the final assistant text from the stream and write it to
+    # session.log for human readability. Stream events are NDJSON; look for
+    # the last assistant message's text blocks.
+    try:
+        summary_lines: list[str] = []
+        with session_stream.open() as sf:
+            for line in sf:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("type") == "assistant":
+                    msg = ev.get("message", {})
+                    for block in msg.get("content", []):
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text = block.get("text", "")
+                            if text:
+                                summary_lines.append(text)
+        session_log.write_text(
+            ("\n\n".join(summary_lines) if summary_lines else "(no assistant text in stream)")
+            + "\n"
+        )
+    except Exception as exc:
+        # Never let log extraction failure break the pipeline
+        print(f"[spawn] Warning: failed to extract session.log from stream: {exc}")
+        if not session_log.exists():
+            session_log.write_text(f"(session.log extraction failed: {exc})\n")
 
     agent_lock.unlink(missing_ok=True)
 
@@ -392,7 +437,7 @@ def main() -> None:
         print(f"[spawn] Session TIMED OUT after {timeout_seconds}s")
     else:
         print(f"[spawn] Session ended with exit code: {exit_code}")
-    print(f"[spawn] Logs at: {session_log}")
+    print(f"[spawn] Logs at: {session_log} (summary), {session_stream} (full stream)")
 
     # --- Step 5: Notify L1 of completion ---
     try:
