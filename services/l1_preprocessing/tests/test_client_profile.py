@@ -94,6 +94,47 @@ class TestLoadProfile:
         assert profile is not None
         assert profile.name == "minimal"
 
+    def test_rejects_path_traversal(
+        self, tmp_path: Path, profiles_dir: Path
+    ) -> None:
+        """Bug regression: names with path separators, ``..``, or
+        absolute paths used to reach arbitrary .yaml files on disk via
+        ``directory / f"{name}.yaml"`` (pathlib happily resolves
+        traversal segments). Fixed by validating the name against a
+        conservative regex before any filesystem access."""
+        # Plant a file one directory up from the profiles dir — an
+        # attacker would have to get through the regex to see it.
+        outside = tmp_path / "captured.yaml"
+        outside.write_text("client: Captured\n")
+
+        # Every variant must return None and never touch the outside file.
+        for evil in (
+            "../captured",
+            "../../etc/passwd",
+            "/etc/passwd",
+            "name/with/slashes",
+            "..",
+            "",
+            ".hidden",
+            "has space",
+            "name*glob",
+        ):
+            assert load_profile(evil, profiles_dir=profiles_dir) is None, (
+                f"{evil!r} must be rejected by the name validator"
+            )
+
+    def test_accepts_conservative_names(self, profiles_dir: Path) -> None:
+        """Names that match the allow regex must still work — otherwise
+        the fix would break every legitimate client like ``xcsf30`` or
+        ``fleet-pride``."""
+        for good in ("xcsf30", "fleet-pride", "abc_123", "Sitecore", "a"):
+            (profiles_dir / f"{good}.yaml").write_text(
+                f"client: {good}\n"
+            )
+            profile = load_profile(good, profiles_dir=profiles_dir)
+            assert profile is not None
+            assert profile.name == good
+
 
 class TestListProfiles:
     def test_lists_yaml_files(self, profiles_dir: Path) -> None:

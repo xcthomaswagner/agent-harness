@@ -197,3 +197,25 @@ def test_dashboard_escapes_html(
     assert r.status_code == 200
     assert "<img>" not in r.text
     assert "&lt;img&gt;" in r.text
+
+
+def test_status_badge_shared_with_trace_dashboard() -> None:
+    """Improvement regression: unified_dashboard._STATUS_BADGE used to be
+    a hand-copied dict that had drifted from trace_dashboard's copy —
+    unified was missing ``Failed``, ``Timed Out``, and ``Cleaned Up``,
+    so any trace in those states silently fell through to the
+    secondary-fallback class on the /dashboard landing page. Both
+    modules now import from dashboard_common, so the mapping is
+    literally the same object."""
+    import trace_dashboard
+    import unified_dashboard
+    from dashboard_common import STATUS_BADGE
+
+    # Both dashboards see the same canonical mapping.
+    assert trace_dashboard._STATUS_BADGE is STATUS_BADGE
+    assert unified_dashboard._STATUS_BADGE is STATUS_BADGE
+
+    # And the statuses that the unified dashboard used to be missing
+    # are now present — the whole point of the fix.
+    for previously_missing in ("Failed", "Timed Out", "Cleaned Up"):
+        assert previously_missing in STATUS_BADGE

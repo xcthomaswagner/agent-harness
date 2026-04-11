@@ -105,7 +105,14 @@ def build_tool_index(stream_path: Path) -> dict[str, Any]:
                     tool_use_by_id[tool_use_id] = (name, idx)
                 server = _mcp_server_name(name)
                 if server:
-                    mcp_servers_used.add(server)
+                    # Canonicalize to match mcp_servers_available (which
+                    # was canonicalized above from the init event). MCP
+                    # tool names preserve the original server form
+                    # (e.g. ``mcp__browser-bridge__browser_click`` ->
+                    # ``browser-bridge``), so without this both sides
+                    # drift and every hyphenated server that IS used
+                    # still shows up in mcp_servers_unused.
+                    mcp_servers_used.add(_canonical_server(server))
             continue
 
         if etype == "user":

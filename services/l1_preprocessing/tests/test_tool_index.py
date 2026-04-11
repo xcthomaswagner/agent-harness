@@ -117,6 +117,49 @@ def test_init_event_canonicalizes_server_names(tmp_path: Path) -> None:
     assert idx["mcp_servers_unused"] == ["plugin_context7_context7"]
 
 
+def test_hyphenated_server_name_marked_used_not_unused(tmp_path: Path) -> None:
+    """Bug regression: MCP tool names preserve hyphens in the server
+    segment (e.g. ``mcp__browser-bridge__browser_click``) but the init
+    event path canonicalized hyphens to underscores before adding to
+    ``mcp_servers_available``. Before the fix, the used side was added
+    RAW, so ``browser-bridge`` was used and ``browser_bridge`` was
+    available and unused — every hyphenated server that WAS heavily
+    used still fired the 'unused MCP server' diagnostic.
+
+    Fix canonicalizes both sides. This test covers every character the
+    canonicalizer normalizes (space, dot, colon, hyphen) in a tool
+    prefix so the two sets stay aligned."""
+    stream = tmp_path / "session-stream.jsonl"
+    _write_stream(
+        stream,
+        [
+            _init_event(
+                [
+                    ("browser-bridge", "connected"),
+                    ("outlook-mcp", "connected"),
+                    ("never-called", "connected"),
+                ]
+            ),
+            _assistant_tool_use(
+                "mcp__browser-bridge__browser_click", "t1"
+            ),
+            _assistant_tool_use(
+                "mcp__outlook-mcp__outlook_send_email", "t2"
+            ),
+        ],
+    )
+    idx = build_tool_index(stream)
+    # Both sides use canonical form.
+    assert set(idx["mcp_servers_available"]) == {
+        "browser_bridge",
+        "outlook_mcp",
+        "never_called",
+    }
+    assert set(idx["mcp_servers_used"]) == {"browser_bridge", "outlook_mcp"}
+    # And the unused set must only contain servers that were truly unused.
+    assert idx["mcp_servers_unused"] == ["never_called"]
+
+
 def test_orphan_tool_result_does_not_create_unknown_bucket(tmp_path: Path) -> None:
     """tool_result with unmatched tool_use_id must not pollute tool_errors."""
     stream = tmp_path / "session-stream.jsonl"

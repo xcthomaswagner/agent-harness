@@ -203,6 +203,53 @@ class TestFirstDeviation:
         check = _get_check(run_diagnostic_checklist(entries), "first_deviation")
         assert check["status"] == "red"
 
+    def test_dedup_skipped_trailing_webhook_does_not_hide_current_run_error(
+        self,
+    ) -> None:
+        """Improvement regression: diagnostic used to use its own
+        ``_run_start_idx`` that just walked back to the last
+        ``webhook_received`` — so a dedup-skipped trailing webhook
+        (no subsequent ``processing_started`` or agent activity) would
+        become the scan boundary and the legitimate error from the real
+        current run would drop off (silently becoming "no pipeline
+        error" → green). diagnostic now calls
+        ``tracer.find_run_start_idx``, which skips dedup-only webhooks
+        and picks the real boundary. This test proves the fix: the
+        current run's error must surface through first_deviation even
+        when a dedup-skipped webhook appears later in the trace.
+
+        first_deviation's two-signal discipline maps "pipeline error
+        only, no tool error" → yellow, so we assert yellow + the error
+        text, not red. Before the fix, the same input would have
+        returned green (the stale-webhook boundary hid the error).
+        """
+        entries = [
+            # --- real current run ---
+            {"event": "webhook_received", "phase": "intake"},
+            {"event": "processing_started"},
+            {
+                "trace_id": "x",
+                "phase": "pipeline",
+                "event": "error",
+                "error_type": "RuntimeError",
+                "error_message": "real error from current run",
+            },
+            # --- dedup-skipped trailing webhook (no processing_started
+            # after it, no agent activity) ---
+            {"event": "webhook_received", "phase": "intake"},
+        ]
+        check = _get_check(
+            run_diagnostic_checklist(entries), "first_deviation"
+        )
+        # With the fix, the pipeline error surfaces → yellow with the
+        # error text in evidence. Without the fix, the scan boundary
+        # was set AFTER the error so it returned green.
+        assert check["status"] == "yellow", (
+            f"expected yellow (pipeline error must surface through the "
+            f"dedup-skipped trailing webhook), got {check['status']}"
+        )
+        assert "RuntimeError" in check["evidence"]
+
     def test_stale_error_from_prior_run_ignored(self) -> None:
         """Fix #1: error from a prior run must not surface in current run.
 

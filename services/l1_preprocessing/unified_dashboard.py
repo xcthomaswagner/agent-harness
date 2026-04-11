@@ -84,23 +84,11 @@ tbody tr:hover { background: rgba(241,245,249,0.5); }
 .nav-link.active { background: #0F172A; color: #F7F9FB; font-weight: 600; }
 """
 
-# Status badge mapping (same as trace_dashboard)
-_STATUS_BADGE: dict[str, str] = {
-    "Complete": "badge-success",
-    "PR Created": "badge-success",
-    "Escalated": "badge-error",
-    "Agent Done (no PR)": "badge-error",
-    "Dispatched": "badge-error",
-    "QA Done": "badge-warning",
-    "Review Done": "badge-blue",
-    "Implementing": "badge-blue",
-    "Planned": "badge-blue",
-    "Merged": "badge-blue",
-    "CI Fix": "badge-warning",
-    "Processing": "badge-blue",
-    "Enriched": "badge-secondary",
-    "Received": "badge-secondary",
-}
+# Status badge mapping — imported from dashboard_common so the mapping
+# here can't drift from trace_dashboard's. Previously this copy was
+# missing Failed / Timed Out / Cleaned Up (silently rendered as the
+# secondary-fallback class), which the shared module now fixes.
+from dashboard_common import STATUS_BADGE as _STATUS_BADGE  # noqa: E402
 
 _MODE_BADGE: dict[str, str] = {
     "conservative": "badge-secondary",

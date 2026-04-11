@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,12 @@ import yaml
 logger = structlog.get_logger()
 
 PROFILES_DIR = Path(__file__).resolve().parents[2] / "runtime" / "client-profiles"
+
+# Profile names are filesystem-backed (``<name>.yaml``) and show up in HTTP
+# query parameters (``/api/autonomy/auto-merge-toggle?client_profile=...``),
+# so restrict them to a conservative charset that cannot escape the profiles
+# directory via traversal (``..``), absolute paths, or glob characters.
+_PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
 class ClientProfile:
@@ -123,7 +130,19 @@ def load_profile(name: str, profiles_dir: Path | None = None) -> ClientProfile |
 
     Looks for `<name>.yaml` in the profiles directory.
     Returns None if not found.
+
+    Rejects names that don't match ``^[A-Za-z0-9][A-Za-z0-9_-]*$`` — any
+    attempt at path traversal (``..``), absolute paths, or glob characters
+    is dropped at the entry point. Callers get None with a
+    ``client_profile_invalid_name`` warning instead of a filesystem hit.
+    The parse-error branch no longer echoes YAML error text (which could
+    contain file contents) into the log, in case a caller does manage to
+    pass the regex via a legitimate-looking but unexpected file.
     """
+    if not isinstance(name, str) or not _PROFILE_NAME_RE.match(name):
+        logger.warning("client_profile_invalid_name", name=name)
+        return None
+
     directory = profiles_dir or PROFILES_DIR
     path = directory / f"{name}.yaml"
 
@@ -133,8 +152,8 @@ def load_profile(name: str, profiles_dir: Path | None = None) -> ClientProfile |
 
     try:
         data = yaml.safe_load(path.read_text())
-    except yaml.YAMLError as exc:
-        logger.warning("client_profile_parse_error", name=name, error=str(exc)[:200])
+    except yaml.YAMLError:
+        logger.warning("client_profile_parse_error", name=name)
         return None
     if not isinstance(data, dict):
         logger.warning("client_profile_invalid", name=name, reason="YAML is not a dict")

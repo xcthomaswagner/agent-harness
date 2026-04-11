@@ -56,26 +56,10 @@ h1 { font-size: 20.8px; font-weight: 600; color: #0F172A; }
 .badge-secondary { background: #F1F5F9; color: #0F172A; }
 """
 
-# Status → badge class mapping
-_STATUS_BADGE: dict[str, str] = {
-    "Complete": "badge-success",
-    "PR Created": "badge-success",
-    "Escalated": "badge-error",
-    "Failed": "badge-error",
-    "Timed Out": "badge-error",
-    "Agent Done (no PR)": "badge-error",
-    "Cleaned Up": "badge-secondary",
-    "Dispatched": "badge-error",
-    "QA Done": "badge-warning",
-    "Review Done": "badge-blue",
-    "Implementing": "badge-blue",
-    "Planned": "badge-blue",
-    "Merged": "badge-blue",
-    "CI Fix": "badge-warning",
-    "Processing": "badge-blue",
-    "Enriched": "badge-secondary",
-    "Received": "badge-secondary",
-}
+# Status → badge class mapping — imported from the shared module so
+# trace_dashboard and unified_dashboard cannot drift. Aliased to the
+# existing private name so call sites below are unchanged.
+from dashboard_common import STATUS_BADGE as _STATUS_BADGE  # noqa: E402
 
 # Phase colors for duration bar and span icons
 _PHASE_COLORS: dict[str, str] = {

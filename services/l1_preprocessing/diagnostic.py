@@ -20,7 +20,7 @@ import html
 import re
 from typing import Any
 
-from tracer import ARTIFACT_TOOL_INDEX, find_artifact
+from tracer import ARTIFACT_TOOL_INDEX, find_artifact, find_run_start_idx
 
 _CHECK_ORDER = [
     "platform_detected",
@@ -102,26 +102,15 @@ def _find_profile_platform(entries: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def _run_start_idx(entries: list[dict[str, Any]]) -> int:
-    """Index of the most recent ``webhook_received`` event, or 0.
-
-    Mirrors ``tracer._find_run_start_idx`` at a simpler level: we only need
-    to slice off stale entries from prior pipeline runs for error scanning.
-    Kept self-contained (no private tracer import) so diagnostic.py has a
-    minimal surface area.
-    """
-    for i in range(len(entries) - 1, -1, -1):
-        ev = entries[i].get("event", "")
-        if isinstance(ev, str) and "webhook_received" in ev:
-            return i
-    return 0
-
-
 def _pipeline_error_entry(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
     # Only scan the current run's entries — a stale error from a prior run
     # (e.g. a re-triggered trace) must not surface as a "first deviation"
-    # for the latest run.
-    start = _run_start_idx(entries)
+    # for the latest run. Uses the canonical run-start finder from tracer,
+    # which correctly skips dedup-recognized webhooks that never led to
+    # processing (fix from commit f342f70). An earlier local copy here
+    # just walked back to the last ``webhook_received`` event and would
+    # misclassify the scan range on traces with a dedup-skipped webhook.
+    start = find_run_start_idx(entries)
     for e in entries[start:]:
         if e.get("event") == "error":
             return e
