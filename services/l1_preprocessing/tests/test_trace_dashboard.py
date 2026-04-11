@@ -60,6 +60,39 @@ class TestTracesListEndpoint:
         assert "text/html" in resp.headers["content-type"]
         assert "T-1" in resp.text
 
+    async def test_xss_in_pr_url_link_text(self) -> None:
+        """Bug regression: the traces table and detail summary bar both
+        render ``#{pr_url.split("/")[-1]}`` as link text. Before the fix,
+        neither wrapped the derived PR number in _e(), so a crafted
+        ``pr_url`` ending in ``</a><script>`` broke out of the anchor and
+        injected arbitrary script tags into the dashboard page. Only the
+        ``href`` side was escaped (via _safe_url + _e)."""
+        evil_url = "https://x/</a><script>alert('pr-xss')</script>"
+        evil_traces = [{
+            "ticket_id": "T-XSS-1",
+            "trace_id": "x",
+            "started_at": "2026-01-01",
+            "run_started_at": "2026-01-01",
+            "completed_at": "2026-01-01",
+            "duration": "", "status": "Complete",
+            "pr_url": evil_url,
+            "review_verdict": "", "qa_result": "",
+            "pipeline_mode": "", "phases": 1, "entries": 1,
+        }]
+        with (
+            patch("trace_dashboard.list_traces", return_value=evil_traces),
+            patch("trace_dashboard.count_traces", return_value=1),
+            patch("trace_dashboard.read_trace", return_value=[]),
+        ):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.get("/traces")
+        # The attack fragment must NOT appear unescaped in the response.
+        assert "<script>alert('pr-xss')</script>" not in resp.text
+        assert "alert(&#x27;pr-xss&#x27;)" in resp.text or "&lt;script&gt;" in resp.text
+
     async def test_xss_in_ticket_id(self) -> None:
         evil_traces = [{
             "ticket_id": '<script>alert("xss")</script>',
@@ -339,6 +372,29 @@ class TestTraceDetailEndpoint:
             ) as client:
                 resp = await client.get("/traces/XSS-1")
         assert 'onerror="alert' not in resp.text
+
+    async def test_xss_in_pr_url_summary_bar(self) -> None:
+        """Bug regression: the detail-view summary bar emits
+        ``#{pr_url.split("/")[-1]}`` as link text. Before the fix, that
+        derived PR number was not passed through _e(), so a crafted
+        ``pr_url`` ending in ``</a><script>`` escaped the anchor tag."""
+        evil_url = "https://x/</a><script>alert('detail-pr-xss')</script>"
+        entries = [
+            {"trace_id": "x", "timestamp": "2026-01-01",
+             "phase": "ticket_read", "event": "Pipeline started",
+             "source": "agent"},
+            {"trace_id": "x", "timestamp": "2026-01-01T00:10:00Z",
+             "phase": "complete", "event": "Pipeline complete",
+             "source": "agent", "pr_url": evil_url},
+        ]
+        with patch("trace_dashboard.read_trace", return_value=entries):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.get("/traces/XSS-PR-1")
+        assert resp.status_code == 200
+        assert "<script>alert('detail-pr-xss')</script>" not in resp.text
 
     async def test_phase_duration_bar(self) -> None:
         entries = [

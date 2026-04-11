@@ -23,6 +23,7 @@ from tracer import (
     compute_phase_durations,
     count_traces,
     extract_diagnostic_info,
+    find_run_start_idx,
     list_traces,
     read_trace,
 )
@@ -148,11 +149,15 @@ def _fmt_ts(ts: str) -> str:
 
 def _render_trace_table(traces: list[dict[str, Any]], total: int, page: int, per_page: int) -> str:
     """Render the Langfuse-style trace list table."""
-    # Enrich each trace with phase dots (use cached entries from list_traces)
+    # Enrich each trace with phase dots (use cached entries + run-start
+    # index from list_traces so build_trace_list_row doesn't re-scan).
     enriched: list[dict[str, Any]] = []
     for t in traces:
         entries = t.pop("_raw_entries", None) or read_trace(t["ticket_id"])
-        enriched.append(build_trace_list_row(t, entries))
+        run_start_idx = t.pop("_run_start_idx", None)
+        enriched.append(
+            build_trace_list_row(t, entries, run_start_idx=run_start_idx)
+        )
 
     # Compute stats
     n_complete = sum(1 for t in traces if t.get("status") in _COMPLETED_STATUSES)
@@ -222,7 +227,7 @@ def _render_trace_table(traces: list[dict[str, Any]], total: int, page: int, per
             _badge(qa, "badge-error") if qa else '<span class="meta">&mdash;</span>')
         pr_html = (
             f'<a href="{_e(_safe_url(pr))}" target="_blank" style="font-size:11.2px">'
-            f'#{pr.split("/")[-1]}</a>' if pr else '<span class="meta">&mdash;</span>')
+            f'#{_e(pr.split("/")[-1])}</a>' if pr else '<span class="meta">&mdash;</span>')
         mode_html = _badge(mode, "badge-secondary") if mode else '<span class="meta">&mdash;</span>'
 
         # Shorten ">24h (multi-run)" to ">24h" for table display
@@ -458,9 +463,13 @@ def _render_detail(ticket_id: str) -> str:
             f'<a href="/traces">&larr; Back</a></div></body></html>'
         )
 
-    tree = build_span_tree(entries)
+    # Compute the run-start index once and thread it into every consumer
+    # below. Previously, each of build_span_tree, compute_phase_durations,
+    # and extract_diagnostic_info was doing its own full reverse scan.
+    run_start_idx = find_run_start_idx(entries)
+    tree = build_span_tree(entries, run_start_idx=run_start_idx)
     s = tree["summary"]
-    durations = compute_phase_durations(entries)
+    durations = compute_phase_durations(entries, run_start_idx=run_start_idx)
 
     # Breadcrumb
     breadcrumb = f'<div class="meta" style="margin-bottom:8px"><a href="/traces">Traces</a> / {_e(ticket_id)}</div>'
@@ -495,7 +504,7 @@ def _render_detail(ticket_id: str) -> str:
         summary_items.append(f'<div><span class="meta">QA</span> {_badge(qa + qa_detail, q_cls)}</div>')
     summary_items.append(f'<div><span class="meta">Analyst</span> <span style="font-weight:500">{_e(token_str)}</span></div>')
     if pr_url:
-        summary_items.append(f'<div><span class="meta">PR</span> <a href="{_e(_safe_url(pr_url))}" target="_blank">#{pr_url.split("/")[-1]}</a></div>')
+        summary_items.append(f'<div><span class="meta">PR</span> <a href="{_e(_safe_url(pr_url))}" target="_blank">#{_e(pr_url.split("/")[-1])}</a></div>')
 
     summary_bar = (
         f'<div style="display:flex;gap:24px;flex-wrap:wrap;align-items:center;'
@@ -576,7 +585,7 @@ def _render_detail(ticket_id: str) -> str:
     # Error/failure box
     failure_box = ""
     if tree["errors"]:
-        diag = extract_diagnostic_info(entries)
+        diag = extract_diagnostic_info(entries, run_start_idx=run_start_idx)
         hint = diag.get("hint", "")
         err_items = ""
         for err in tree["errors"]:
@@ -751,7 +760,10 @@ def _render_board_column(title: str, color: str, traces: list[dict[str, Any]], c
         extra = ""
         if status in _FAILED_STATUSES or status in _STUCK_THRESHOLDS:
             entries = t.pop("_raw_entries", None) or read_trace(t["ticket_id"])
-            diag = extract_diagnostic_info(entries)
+            run_start_idx = t.pop("_run_start_idx", None)
+            diag = extract_diagnostic_info(
+                entries, run_start_idx=run_start_idx
+            )
             hint = diag.get("hint", "")
             if hint:
                 extra = (
@@ -883,8 +895,14 @@ async def traces_api(
         total = count_traces()
         offset = (page - 1) * per_page
         traces = list_traces(offset=offset, limit=per_page)
-    # Strip cached entries from JSON response (internal dashboard field)
-    clean = [{k: v for k, v in t.items() if k != "_raw_entries"} for t in traces]
+    # Strip cached internal fields from JSON response — these are only
+    # for dashboard-side performance (avoiding reread + rescan) and are
+    # not part of the public API surface.
+    internal_fields = {"_raw_entries", "_run_start_idx"}
+    clean = [
+        {k: v for k, v in t.items() if k not in internal_fields}
+        for t in traces
+    ]
     return {"total": total, "page": page, "per_page": per_page, "traces": clean}
 
 

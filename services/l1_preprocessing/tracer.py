@@ -231,12 +231,17 @@ def list_traces(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
         else:
             status = last.get("event", "Unknown")
 
+        # Compute the run-start index once per trace — threaded into
+        # _derive_current_phase here AND down to build_trace_list_row via
+        # the _run_start_idx field stashed on the trace dict. Prevents
+        # the list view from scanning the entries list 3x per trace.
+        run_start_idx = _find_run_start_idx(entries)
+        run_entries = entries[run_start_idx:]
+
         # --- Compute duration using only entries from the last run ---
         duration = ""
         run_started_at = ""
         try:
-            run_start_idx = _find_run_start_idx(entries)
-            run_entries = entries[run_start_idx:]
             if run_entries:
                 run_started_at = run_entries[0].get("timestamp", "")
                 start_ts = datetime.fromisoformat(run_started_at)
@@ -266,28 +271,49 @@ def list_traces(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
             "review_verdict": review_verdict,
             "qa_result": qa_result,
             "pipeline_mode": pipeline_mode,
-            "current_phase": _derive_current_phase(entries),
+            "current_phase": _derive_current_phase(
+                entries, run_start_idx=run_start_idx
+            ),
             "phases": total_phases,
             "entries": len(entries),
             "_raw_entries": entries,  # cached for dashboard; excluded from JSON API
+            "_run_start_idx": run_start_idx,  # cached for build_trace_list_row
         })
 
     return traces
 
 
-def _derive_current_phase(entries: list[dict[str, Any]]) -> str:
+def _derive_current_phase(
+    entries: list[dict[str, Any]],
+    *,
+    run_start_idx: int | None = None,
+) -> str:
     """Return the most recent agent phase name for live progress display.
 
     Walks the entries in reverse looking for the last agent-written phase.
-    Empty string if no agent activity yet.
+    Empty string if no agent activity yet. Pass ``run_start_idx`` to avoid
+    recomputing it when the caller already has it.
     """
-    run_start_idx = _find_run_start_idx(entries)
+    if run_start_idx is None:
+        run_start_idx = _find_run_start_idx(entries)
     for e in reversed(entries[run_start_idx:]):
         if e.get("source") == "agent":
             phase = e.get("phase", "")
             if phase and phase not in ("ticket_read",):
                 return str(phase)
     return ""
+
+
+def find_run_start_idx(entries: list[dict[str, Any]]) -> int:
+    """Public alias for ``_find_run_start_idx`` — callers that need to
+    compute the run-start index once and thread it through several
+    consumers (``build_span_tree``, ``compute_phase_durations``,
+    ``extract_diagnostic_info``, etc.) should call this and pass the
+    result in via the ``run_start_idx`` kwarg to each consumer. On
+    multi-thousand-entry traces this replaces 4-6 redundant scans with
+    a single O(N) walk per request.
+    """
+    return _find_run_start_idx(entries)
 
 
 def _find_run_start_idx(entries: list[dict[str, Any]]) -> int:
@@ -321,17 +347,24 @@ def _find_run_start_idx(entries: list[dict[str, Any]]) -> int:
     return candidates[0]
 
 
-def compute_phase_durations(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def compute_phase_durations(
+    entries: list[dict[str, Any]],
+    *,
+    run_start_idx: int | None = None,
+) -> list[dict[str, Any]]:
     """Compute per-phase durations from consecutive agent-phase timestamps.
 
     Filters to the last pipeline run and to ``source == "agent"`` entries
     (L2 pipeline phases written to pipeline.jsonl). Returns a list of dicts
     with ``phase``, ``event``, and ``duration_seconds`` for each phase.
+    Pass ``run_start_idx`` to avoid recomputing it when the caller already
+    has it.
     """
     if not entries:
         return []
 
-    run_start_idx = _find_run_start_idx(entries)
+    if run_start_idx is None:
+        run_start_idx = _find_run_start_idx(entries)
     run_entries = entries[run_start_idx:]
 
     # Filter to agent-written phase entries (L2 pipeline)
@@ -400,16 +433,22 @@ def extract_escalation_reason(entries: list[dict[str, Any]]) -> str:
     return ""
 
 
-def extract_diagnostic_info(entries: list[dict[str, Any]]) -> dict[str, Any]:
+def extract_diagnostic_info(
+    entries: list[dict[str, Any]],
+    *,
+    run_start_idx: int | None = None,
+) -> dict[str, Any]:
     """Extract error diagnostics and hints from trace entries.
 
     Returns a dict with ``errors`` (list of error events from the last run),
     ``hint`` (human-readable suggestion), and ``last_event`` (last non-error event).
+    Pass ``run_start_idx`` to avoid recomputing it when the caller already has it.
     """
     if not entries:
         return {"errors": [], "hint": "", "last_event": ""}
 
-    run_start_idx = _find_run_start_idx(entries)
+    if run_start_idx is None:
+        run_start_idx = _find_run_start_idx(entries)
     run_entries = entries[run_start_idx:]
 
     # Collect error events
@@ -591,11 +630,16 @@ def latest_artifacts(entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]
     return out
 
 
-def build_span_tree(entries: list[dict[str, Any]]) -> dict[str, Any]:
+def build_span_tree(
+    entries: list[dict[str, Any]],
+    *,
+    run_start_idx: int | None = None,
+) -> dict[str, Any]:
     """Group flat trace entries into an L1/L2/L3 span tree with artifact linking.
 
     Returns a dict with ``l1``, ``l2``, ``l3``, ``errors``, and ``summary`` keys.
     Designed to power both the Langfuse-style detail view and the trace list view.
+    Pass ``run_start_idx`` to avoid recomputing it when the caller already has it.
     """
     if not entries:
         return {
@@ -603,7 +647,8 @@ def build_span_tree(entries: list[dict[str, Any]]) -> dict[str, Any]:
             "summary": {},
         }
 
-    run_start_idx = _find_run_start_idx(entries)
+    if run_start_idx is None:
+        run_start_idx = _find_run_start_idx(entries)
     run_entries = entries[run_start_idx:]
 
     # Separate entries by layer — use ALL entries for L1 (they precede run boundary),
@@ -771,12 +816,16 @@ def _build_summary(
 
 
 def build_trace_list_row(
-    trace_summary: dict[str, Any], entries: list[dict[str, Any]]
+    trace_summary: dict[str, Any],
+    entries: list[dict[str, Any]],
+    *,
+    run_start_idx: int | None = None,
 ) -> dict[str, Any]:
     """Enrich a trace summary with phase dots and duration percentage for list rendering.
 
     Adds ``phase_dots`` (list of {phase, color} dicts) and ``duration_pct``
-    (0-100 relative to a 30-minute baseline) to the trace summary.
+    (0-100 relative to a 30-minute baseline) to the trace summary. Pass
+    ``run_start_idx`` to avoid recomputing it when the caller already has it.
     """
     phase_dot_colors: dict[str, str] = {
         "ticket_read": "#64748B",
@@ -793,7 +842,8 @@ def build_trace_list_row(
     }
 
     # Extract L2 phases from entries
-    run_start_idx = _find_run_start_idx(entries)
+    if run_start_idx is None:
+        run_start_idx = _find_run_start_idx(entries)
     run_entries = entries[run_start_idx:]
     phase_dots: list[dict[str, str]] = []
     seen_phases: set[str] = set()

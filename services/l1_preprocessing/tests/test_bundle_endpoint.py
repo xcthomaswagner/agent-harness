@@ -471,6 +471,43 @@ async def test_bundle_redacts_session_stream(
     )
 
 
+async def test_bundle_redacts_session_stream_with_non_utf8_bytes(
+    trace_dir: Path, client: AsyncClient,
+) -> None:
+    """Bug 1 regression guard: a session-stream containing non-UTF-8 bytes
+    must still be redacted. Previously, _redact_bytes did a strict
+    ``decode("utf-8")`` and on ``UnicodeDecodeError`` silently returned
+    the payload untouched with redaction count 0 — so any secret sharing
+    a file with a stray byte (common in terminal output, grep-on-binary,
+    latin-1 stderr) landed in the bundle verbatim. The fix decodes with
+    ``errors="surrogateescape"`` so every byte round-trips and the
+    redactor sees every line.
+    """
+    stream = trace_dir / "session-stream.jsonl"
+    stream.write_bytes(
+        (json.dumps({"type": "system", "subtype": "init"}) + "\n").encode()
+        + b'{"type":"assistant","text":"key=' + _SECRET.encode() + b'\xff\xfe"}\n'
+        + b"\xc3\x28 garbage trailing bytes\n"  # Invalid UTF-8 sequence
+    )
+    _seed_trace(trace_dir, "REDBUN-UTF8", stream_path=stream)
+
+    with patch("tracer.LOGS_DIR", trace_dir):
+        resp = await client.get("/traces/REDBUN-UTF8/bundle")
+    assert resp.status_code == 200
+
+    buf = io.BytesIO(resp.content)
+    with tarfile.open(fileobj=buf, mode="r:gz") as tar:
+        stream_member = tar.extractfile("session-stream.jsonl")
+        assert stream_member is not None
+        raw_body = stream_member.read()
+
+    # Secret must not be present anywhere — neither as UTF-8 text nor raw bytes.
+    assert _SECRET.encode() not in raw_body, (
+        "non-UTF-8 bytes must not cause redaction to silently bypass"
+    )
+    assert b"sk-ant-[REDACTED]" in raw_body
+
+
 async def test_bundle_readme_reports_redaction_count(
     trace_dir: Path, client: AsyncClient,
 ) -> None:

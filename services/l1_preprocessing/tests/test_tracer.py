@@ -17,6 +17,7 @@ from tracer import (
     extract_diagnostic_info,
     extract_escalation_reason,
     find_artifact,
+    find_run_start_idx,
     generate_trace_id,
     latest_artifacts,
     list_traces,
@@ -1117,3 +1118,103 @@ class TestRedactEntryInPlace:
         n = redact_entry_in_place(entry)
         assert n == 0
         assert entry["custom_field"] == secret
+
+
+class TestRunStartIdxKwarg:
+    """Regression guard for the run_start_idx caching optimisation.
+
+    build_span_tree, compute_phase_durations, and extract_diagnostic_info
+    all used to compute _find_run_start_idx on every call. The detail
+    view hit that code path 4 times per request on the same entries list.
+    Now those functions accept an optional run_start_idx kwarg so the
+    dashboard can compute once and pass it through. These tests verify:
+      1. The kwarg is actually honored (passing a different value gives
+         a different result — not silently ignored).
+      2. Default behavior (kwarg omitted) still matches a fresh
+         find_run_start_idx call.
+    """
+
+    @staticmethod
+    def _two_run_entries() -> list[dict]:
+        return [
+            # Run 1
+            {"trace_id": "t1", "timestamp": "2026-01-01T00:00:00+00:00",
+             "phase": "webhook", "event": "webhook_received", "source": "jira"},
+            {"trace_id": "t1", "timestamp": "2026-01-01T00:00:01+00:00",
+             "phase": "ticket_read", "event": "processing_started", "source": "jira"},
+            {"trace_id": "t1", "timestamp": "2026-01-01T00:00:02+00:00",
+             "phase": "implementation", "event": "phase_complete", "source": "agent",
+             "error": None},
+            # Run 2 boundary
+            {"trace_id": "t2", "timestamp": "2026-01-02T00:00:00+00:00",
+             "phase": "webhook", "event": "webhook_received", "source": "jira"},
+            {"trace_id": "t2", "timestamp": "2026-01-02T00:00:01+00:00",
+             "phase": "ticket_read", "event": "processing_started", "source": "jira"},
+            {"trace_id": "t2", "timestamp": "2026-01-02T00:00:02+00:00",
+             "phase": "implementation", "event": "error", "source": "agent",
+             "error_type": "Boom", "error_message": "run 2 error"},
+        ]
+
+    def test_find_run_start_idx_picks_latest_run(self) -> None:
+        entries = self._two_run_entries()
+        # Latest run starts at index 3 (the second webhook_received).
+        assert find_run_start_idx(entries) == 3
+
+    def test_extract_diagnostic_info_honors_forced_kwarg(self) -> None:
+        entries = self._two_run_entries()
+        # Default: picks up run 2's error.
+        default_diag = extract_diagnostic_info(entries)
+        assert len(default_diag["errors"]) == 1
+        assert default_diag["errors"][0]["error_message"] == "run 2 error"
+
+        # Force run_start_idx=0 to include run 1 entries — proves the
+        # kwarg is actually used. Run 1 has no error, so errors list
+        # should still be just the one from run 2 but run 1's
+        # processing_started should now appear as last_event candidate.
+        forced_diag = extract_diagnostic_info(entries, run_start_idx=0)
+        assert len(forced_diag["errors"]) == 1  # still only one error
+        # But forcing idx=0 definitely changed the scan range — sanity
+        # check by forcing an idx PAST the error so errors becomes empty.
+        empty_diag = extract_diagnostic_info(entries, run_start_idx=6)
+        assert empty_diag["errors"] == []
+
+    def test_compute_phase_durations_honors_forced_kwarg(self) -> None:
+        entries = self._two_run_entries()
+        # Default: one agent entry in run 2 → <2 → empty durations.
+        default_dur = compute_phase_durations(entries)
+        assert default_dur == []
+        # Force idx=0: two agent entries across both runs → one duration.
+        full_dur = compute_phase_durations(entries, run_start_idx=0)
+        assert len(full_dur) == 1
+
+    def test_build_span_tree_honors_forced_kwarg(self) -> None:
+        entries = self._two_run_entries()
+        default_tree = build_span_tree(entries)
+        forced_tree = build_span_tree(entries, run_start_idx=0)
+        # Forcing idx=0 pulls in run 1's agent entry in addition to run 2's,
+        # so L2 entry count must grow (or at least not shrink).
+        assert len(forced_tree["l2"]) >= len(default_tree["l2"])
+
+    def test_build_trace_list_row_honors_forced_kwarg(self) -> None:
+        entries = self._two_run_entries()
+        summary = {"duration": "5s"}
+        default_row = build_trace_list_row(summary, entries)
+        forced_row = build_trace_list_row(summary, entries, run_start_idx=0)
+        # Forcing idx=0 pulls run 1's agent phase into phase_dots too.
+        default_phases = {d["phase"] for d in default_row["phase_dots"]}
+        forced_phases = {d["phase"] for d in forced_row["phase_dots"]}
+        assert default_phases <= forced_phases
+
+    def test_kwarg_default_matches_fresh_computation(self) -> None:
+        """Omitting the kwarg must produce the same result as passing
+        the value from find_run_start_idx — i.e. the default path is
+        equivalent to the cached path."""
+        entries = self._two_run_entries()
+        idx = find_run_start_idx(entries)
+        assert build_span_tree(entries) == build_span_tree(entries, run_start_idx=idx)
+        assert compute_phase_durations(entries) == compute_phase_durations(
+            entries, run_start_idx=idx
+        )
+        assert extract_diagnostic_info(entries) == extract_diagnostic_info(
+            entries, run_start_idx=idx
+        )

@@ -14,6 +14,12 @@ written to disk. The passes run in a fixed order:
    with Shannon entropy ≥4.5 bits/char as a likely secret. Catches new
    credential shapes we haven't written explicit patterns for yet.
 
+Passes 2 and 3 are fused into a single per-line loop in ``redact()``: there's
+no cross-line state between them and the entropy pass takes each already-line-
+redacted line as-is. Keeping them conceptually separate in the docstring is
+intentional — new contributors should reason about them as distinct stages
+even though the implementation runs both on each line before moving on.
+
 The redactor is designed to be **idempotent**: ``redact(redact(x)[0])`` must
 produce the same text as ``redact(x)`` and report zero new redactions on the
 second call. The POST /admin/re-redact admin endpoint depends on this — it
@@ -285,20 +291,24 @@ def redact(text: str) -> tuple[str, int]:
             total += n
             current = new_text
 
-    # --- Pass 2: line patterns, applied per line ---
-    out_lines: list[str] = []
+    # --- Passes 2 + 3: line patterns then entropy fallback, per line ---
+    #
+    # Previously split into two separate ``for line in ...`` loops with an
+    # intermediate ``out_lines`` list. There's no cross-line state between
+    # them — the entropy pass runs independently on each already-line-
+    # redacted line — so one loop that runs both per line produces the
+    # same output, allocates one list instead of two, and halves the
+    # Python-level per-line loop overhead on the redaction hot path
+    # (consolidation + bundle export + /admin/re-redact all go through
+    # here on files that can reach thousands of lines).
+    final_lines: list[str] = []
     for line in current.split("\n"):
         redacted_line = line
         for lp in _LINE_PATTERNS:
             redacted_line, n = lp.pattern.subn(lp.replacement, redacted_line)
             if n:
                 total += n
-        out_lines.append(redacted_line)
-
-    # --- Pass 3: entropy fallback, per line ---
-    final_lines: list[str] = []
-    for line in out_lines:
-        flagged, n = _redact_entropy(line)
+        flagged, n = _redact_entropy(redacted_line)
         if n:
             total += n
         final_lines.append(flagged)

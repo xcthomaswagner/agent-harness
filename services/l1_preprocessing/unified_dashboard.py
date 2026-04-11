@@ -252,7 +252,10 @@ def _render_recent_traces() -> str:
     enriched: list[dict[str, Any]] = []
     for t in traces:
         entries = t.pop("_raw_entries", None) or read_trace(t["ticket_id"])
-        enriched.append(build_trace_list_row(t, entries))
+        run_start_idx = t.pop("_run_start_idx", None)
+        enriched.append(
+            build_trace_list_row(t, entries, run_start_idx=run_start_idx)
+        )
 
     rows_html = ""
     for t in enriched:
@@ -264,7 +267,7 @@ def _render_recent_traces() -> str:
         pr = t.get("pr_url", "")
         pr_html = (
             f'<a href="{_e(_safe_url(pr))}" target="_blank" style="font-size:11.2px">'
-            f'#{pr.split("/")[-1]}</a>'
+            f'#{_e(pr.split("/")[-1])}</a>'
             if pr
             else '<span class="meta">&mdash;</span>'
         )

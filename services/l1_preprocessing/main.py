@@ -536,13 +536,22 @@ def _build_bundle(ticket_id: str, entries: list[dict[str, Any]]) -> bytes:
     total_redacted = 0
 
     def _redact_bytes(payload: bytes) -> tuple[bytes, int]:
-        """Decode, redact, re-encode. Non-UTF-8 bytes pass through untouched."""
-        try:
-            text = payload.decode("utf-8")
-        except UnicodeDecodeError:
-            return payload, 0
+        """Decode, redact, re-encode.
+
+        Uses ``errors="surrogateescape"`` on both ends so non-UTF-8 bytes
+        round-trip losslessly through ``redact()``. Strict UTF-8 decoding
+        would silently bypass redaction on any file containing stray
+        bytes — common in ``session-stream.jsonl`` where tool output can
+        include terminal escape sequences, latin-1 from legacy systems,
+        or binary dumps from tools like ``grep``/``curl``. Since the
+        bundle path is the ONLY redaction pass that ever runs over the
+        session stream (consolidation deliberately stores it by
+        reference), a silent bypass would leak credentials that happened
+        to share a file with any non-UTF-8 byte.
+        """
+        text = payload.decode("utf-8", errors="surrogateescape")
         redacted_text, n = redact(text)
-        return redacted_text.encode("utf-8"), n
+        return redacted_text.encode("utf-8", errors="surrogateescape"), n
 
     # Build the artifact index once — six lookups below would otherwise
     # each scan the full entries list in reverse. See tracer.latest_artifacts.
