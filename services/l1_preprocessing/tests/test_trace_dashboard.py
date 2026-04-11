@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from main import app
 from trace_dashboard import _classify_traces
 from trace_dashboard import _e as _escape
+from tracer import ARTIFACT_TOOL_INDEX
 
 
 class TestEscape:
@@ -361,6 +362,31 @@ class TestTraceDetailEndpoint:
             ) as client:
                 resp = await client.get("/traces/TOK-1")
         assert "1,500 in" in resp.text
+
+    async def test_tool_usage_panel_renders_when_tool_index_present(self) -> None:
+        """Integration: /traces/<id> shows Tool Usage panel when tool_index artifact is present."""
+        entries = [
+            {"trace_id": "x", "ticket_id": "TOOLS-1",
+             "timestamp": "2026-01-01T10:00:00Z",
+             "phase": "webhook", "event": "received", "source": "l1"},
+            {"trace_id": "x", "ticket_id": "TOOLS-1",
+             "timestamp": "2026-01-01T10:05:00Z",
+             "phase": "artifact", "event": ARTIFACT_TOOL_INDEX,
+             "index": {
+                 "tool_call_count": 7,
+                 "assistant_turns": 4,
+                 "tool_counts": {"Read": 4, "Bash": 3},
+             }},
+        ]
+        with patch("trace_dashboard.read_trace", return_value=entries):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.get("/traces/TOOLS-1")
+        assert resp.status_code == 200
+        assert "Tool Usage" in resp.text
+        assert "7 tool calls across 4 assistant turns" in resp.text
 
     async def test_error_box_displayed(self) -> None:
         entries = [
