@@ -321,8 +321,14 @@ def find_profile_by_repo(
             return ClientProfile(data, path.stem)
         if url:
             # URL may be https://github.com/owner/repo[.git] — match suffix.
+            # Require the owner/repo segment to be preceded by a slash so
+            # ``alpha/service`` does NOT match an unrelated profile whose
+            # URL ends with ``team-alpha/service``. The previous bare
+            # ``endswith(target)`` clause admitted any suffix match and
+            # could route webhooks to the wrong client profile (wrong
+            # credentials, wrong callbacks).
             url_clean = url.rstrip("/").removesuffix(".git")
-            if url_clean.endswith("/" + target) or url_clean.endswith(target):
+            if url_clean == target or url_clean.endswith("/" + target):
                 logger.info(
                     "client_profile_matched_by_repo",
                     name=path.stem,

@@ -208,6 +208,49 @@ class TestFindProfileByRepo:
     def test_find_profile_by_repo_empty_input(self, profiles_dir: Path) -> None:
         assert find_profile_by_repo("", profiles_dir=profiles_dir) is None
 
+    def test_find_profile_by_repo_does_not_partial_match_owner(
+        self, profiles_dir: Path
+    ) -> None:
+        """Bug regression: the url-match fallback used bare
+        ``url_clean.endswith(target)`` which admitted any suffix match.
+        ``find_profile_by_repo("alpha/service")`` would match a profile
+        with ``url: https://gitlab.example.com/team-alpha/service``
+        because the URL's trailing characters happened to contain the
+        target. Fixed by requiring the preceding ``/`` separator (or
+        exact match), so ``alpha/service`` cannot cross-match an
+        unrelated ``team-alpha/service`` profile."""
+        (profiles_dir / "team_alpha.yaml").write_text(
+            "client: Team Alpha\n"
+            "client_repo:\n"
+            "  url: https://gitlab.example.com/team-alpha/service\n"
+        )
+        # A separate profile legitimately owns alpha/service (different org).
+        (profiles_dir / "alpha.yaml").write_text(
+            "client: Alpha Inc\n"
+            "client_repo:\n"
+            "  url: https://github.com/alpha/service\n"
+        )
+
+        # The target alpha/service must match ``alpha.yaml``, not
+        # ``team_alpha.yaml``. Before the fix the alphabetically-first
+        # profile (``alpha.yaml``) wins by the ``/``-separator clause
+        # anyway, so we also verify that a bare name that ONLY ends in
+        # an unrelated suffix cannot match.
+        profile = find_profile_by_repo(
+            "alpha/service", profiles_dir=profiles_dir
+        )
+        assert profile is not None
+        assert profile.name == "alpha"
+
+        # And a name that only exists as a suffix substring of the
+        # team_alpha URL (not preceded by /) must NOT match.
+        assert (
+            find_profile_by_repo(
+                "lpha/service", profiles_dir=profiles_dir
+            )
+            is None
+        )
+
 
 class TestAdoProperties:
     def test_ticket_source_type(self) -> None:

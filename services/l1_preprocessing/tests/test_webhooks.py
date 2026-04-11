@@ -286,14 +286,44 @@ def _seed_ticket(ticket_id: str):
     the four-line setup for _last_trigger_state + _active_tickets + payload
     construction.
     """
+    import time as _time
+
     from models import TicketPayload
 
     main._last_trigger_state[ticket_id] = True
-    main._active_tickets.add(ticket_id)
+    # _active_tickets is now a dict[ticket_id, claim_time] for TTL support.
+    main._active_tickets[ticket_id] = _time.time()
     return TicketPayload(
         source="ado", id=ticket_id, ticket_type="story",
         title="t", description="d", acceptance_criteria=["a"],
     )
+
+
+def test_try_claim_ticket_expires_stale_claims() -> None:
+    """Bug regression: in the Redis worker path the RQ worker runs in
+    a separate process and never calls _release_ticket, so the claim
+    would leak forever and subsequent webhooks for the same ticket
+    would be permanently rejected as "already processing" until the
+    FastAPI process restarted. Fixed by giving claims a TTL — a stale
+    entry older than _ACTIVE_TICKET_TTL_SEC is treated as free and
+    immediately reclaimed."""
+    # Plant a stale claim that's older than the TTL window.
+    stale_time = __import__("time").time() - (main._ACTIVE_TICKET_TTL_SEC + 1)
+    main._active_tickets["STALE-1"] = stale_time
+
+    # A new webhook attempt should successfully reclaim the ticket.
+    assert main._try_claim_ticket("STALE-1") is True
+    # And the claim is now fresh.
+    assert main._active_tickets["STALE-1"] > stale_time
+
+    main._active_tickets.pop("STALE-1", None)
+
+
+def test_try_claim_ticket_rejects_fresh_claims() -> None:
+    """Happy path: a recent claim must still block a duplicate attempt."""
+    main._active_tickets["FRESH-1"] = __import__("time").time()
+    assert main._try_claim_ticket("FRESH-1") is False
+    main._active_tickets.pop("FRESH-1", None)
 
 
 async def test_process_ticket_clears_trigger_state_on_exception() -> None:
@@ -531,7 +561,7 @@ async def test_agent_complete_clears_trigger_state_after_delay() -> None:
     # Seed state as if a pipeline had dispatched this ticket and was now
     # completing. _check_trigger_edge would have set state=True at webhook
     # receipt; _process_ticket keeps it around because spawn_triggered=True.
-    main._active_tickets.add("SCRUM-9")
+    main._active_tickets["SCRUM-9"] = __import__("time").time()
     main._last_trigger_state["SCRUM-9"] = True
 
     completion = {

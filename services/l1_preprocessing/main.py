@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import hmac
 import io
 import json
-import os
 import re
 import secrets
 import subprocess
@@ -57,6 +55,7 @@ from tracer import (
     ARTIFACT_SESSION_STREAM,
     ARTIFACT_TOOL_INDEX,
     append_trace,
+    atomic_write_text,
     consolidate_worktree_logs,
     find_artifact,
     generate_trace_id,
@@ -168,8 +167,18 @@ def _get_pipeline() -> Pipeline:
 
 
 # --- Idempotency: prevent duplicate processing ---
-
-_active_tickets: set[str] = set()
+#
+# Claims are stored as ``{ticket_id: claim_timestamp_unix_seconds}``
+# rather than a bare set so we can TTL-expire them. Before the TTL,
+# the Redis worker path (queue_worker.process_ticket_sync runs in a
+# separate process and never calls _release_ticket) could leak a
+# claim forever on any ticket that didn't trigger L2 — the FastAPI
+# process would then permanently reject every future webhook for
+# that ticket with a 202/"already processing" response until
+# restart. TTL matches the /api/agent-complete release window so a
+# stuck claim auto-clears within a reasonable timebox.
+_ACTIVE_TICKET_TTL_SEC = 15 * 60  # 15 minutes
+_active_tickets: dict[str, float] = {}
 _active_tickets_lock = __import__("threading").Lock()
 
 # Per-ticket edge-detection memory for the trigger tag. See
@@ -206,20 +215,27 @@ def _bump_webhook_counter(key: str) -> None:
 def _try_claim_ticket(ticket_id: str) -> bool:
     """Atomically check if a ticket is active and claim it if not.
 
-    Returns True if claimed (caller should process), False if already active.
-    Thread-safe via lock — prevents TOCTOU race between check and add.
+    Returns True if claimed (caller should process), False if already
+    active. Thread-safe via lock — prevents TOCTOU race between check
+    and add. TTL-expires stale claims so a dropped release (Redis
+    worker crash, cross-process claim leak, forgotten _release_ticket
+    in a code path that didn't bubble up) unblocks future webhooks
+    after ``_ACTIVE_TICKET_TTL_SEC`` seconds instead of wedging until
+    a process restart.
     """
+    now = time.time()
     with _active_tickets_lock:
-        if ticket_id in _active_tickets:
+        claimed_at = _active_tickets.get(ticket_id)
+        if claimed_at is not None and (now - claimed_at) < _ACTIVE_TICKET_TTL_SEC:
             return False
-        _active_tickets.add(ticket_id)
+        _active_tickets[ticket_id] = now
         return True
 
 
 def _release_ticket(ticket_id: str) -> None:
     """Release a ticket from the active set."""
     with _active_tickets_lock:
-        _active_tickets.discard(ticket_id)
+        _active_tickets.pop(ticket_id, None)
 
 
 def _check_trigger_edge(ticket_id: str, tag_present_now: bool) -> bool:
@@ -1109,18 +1125,13 @@ async def admin_re_redact() -> dict[str, int]:
         new_text = "\n".join(out_lines)
         if raw.endswith("\n") and not new_text.endswith("\n"):
             new_text += "\n"
-        # Atomic replace: write a sibling temp file and os.replace() it over
-        # the original. A crash mid-write leaves the original intact instead
-        # of producing a truncated file.
-        tmp_file = trace_file.with_suffix(trace_file.suffix + ".re-redact.tmp")
+        # Atomic replace via the shared tracer helper — a crash mid-write
+        # leaves the original file intact instead of producing a
+        # truncated one.
         try:
-            tmp_file.write_text(new_text)
-            os.replace(tmp_file, trace_file)
+            atomic_write_text(trace_file, new_text)
         except OSError:
             logger.exception("re_redact_write_failed", trace_file=str(trace_file))
-            # Best-effort cleanup of the temp file on failure.
-            with contextlib.suppress(OSError):
-                tmp_file.unlink(missing_ok=True)
 
     if additional_patterns:
         logger.warning(

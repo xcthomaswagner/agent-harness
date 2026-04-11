@@ -14,6 +14,8 @@ from typing import Any
 
 import structlog
 
+from tracer import atomic_write_text
+
 logger = structlog.get_logger()
 
 DEFAULT_TRACKING_PATH = Path(__file__).resolve().parents[2] / "data" / "cross-ticket.json"
@@ -73,7 +75,17 @@ class CrossTicketCoordinator:
             return []
 
     def _save(self, items: list[SubTicketStatus]) -> None:
-        self._path.write_text(json.dumps([i.to_dict() for i in items], indent=2))
+        # Atomic write via a sibling temp file so a crash mid-write
+        # leaves the previous tracking file intact instead of producing
+        # a truncated one. Two concurrent ``register_sub_tickets`` or
+        # ``update_sub_ticket`` calls can still trample each other's
+        # in-memory view (that's the _load/_save race the dedup fix in
+        # ``register_sub_tickets`` already documents), but the write
+        # itself can no longer corrupt the file.
+        atomic_write_text(
+            self._path,
+            json.dumps([i.to_dict() for i in items], indent=2),
+        )
 
     def register_sub_tickets(
         self, parent_id: str, sub_ticket_ids: list[str]

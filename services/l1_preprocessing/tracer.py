@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -89,6 +90,31 @@ def redact_entry_in_place(entry: dict[str, Any]) -> int:
                     total += n
 
     return total
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` atomically via a sibling temp file.
+
+    Uses the same pattern ``admin_re_redact`` already had inline:
+    write to ``<path>.<suffix>.atomic-write.tmp``, then ``os.replace``
+    it over the real path. A crash mid-write leaves the original
+    file intact instead of producing a truncated one. Shared with
+    ``cross_ticket_coordinator._save`` so the tracking file can't be
+    corrupted if two concurrent tasks race on the same save — the
+    winning ``os.replace`` is atomic on POSIX and the loser's temp
+    file is silently overwritten.
+
+    On failure the temp file is best-effort unlinked so a botched
+    write doesn't leave garbage next to the target.
+    """
+    tmp = path.with_suffix(path.suffix + ".atomic-write.tmp")
+    try:
+        tmp.write_text(content)
+        os.replace(tmp, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
 
 
 def generate_trace_id() -> str:

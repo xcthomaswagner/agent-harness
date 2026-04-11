@@ -103,6 +103,29 @@ _DQ_STATUS_BADGE: dict[str, str] = {
 }
 
 
+def _metric_row(label: str, value_html: str) -> str:
+    """Render one ``<div class="metric-row">`` block.
+
+    Previously _render_profile_card hand-rolled ~8 identical copies
+    of this HTML, with subtle variation between "label + plain text"
+    and "label + badge". Consolidating kills ~30 lines of mechanical
+    duplication and makes adding a new metric a one-line call.
+    ``value_html`` is trusted HTML — callers who pass user data must
+    run it through ``_e`` first (the helper uses ``_e`` on the label
+    but not the value, mirroring the previous hand-rolled shape).
+    """
+    return (
+        '<div class="metric-row">'
+        f'<span class="metric-label">{_e(label)}</span>'
+        f'<span class="metric-value">{value_html}</span></div>'
+    )
+
+
+def _badge_span(cls: str, text: str) -> str:
+    """Render a ``<span class="badge ...">`` pill with escaped text."""
+    return f'<span class="badge {cls}">{_e(text)}</span>'
+
+
 def _catch_rate_badge_class(value: float | None) -> str:
     if value is None:
         return "badge-secondary"
@@ -228,49 +251,36 @@ def _render_profile_card(metrics: dict[str, Any]) -> str:
     else:
         notes_html = ""
 
+    rows = [
+        _metric_row("First-pass acceptance", _e(fpa_line)),
+        _metric_row("Merged", str(merged)),
+        _metric_row(
+            "Defect escape",
+            _badge_span(defect_escape_cls, defect_escape_text),
+        ),
+        _metric_row(
+            "Self-review catch", _badge_span(catch_cls, catch_display)
+        ),
+        _metric_row(
+            "Sidecar coverage",
+            _badge_span(sidecar_cls, sidecar_display),
+        ),
+        _metric_row("Human issues", _e(humans_line)),
+        _metric_row("Sample size", f"{sample} PRs"),
+        _metric_row("Recommended mode", _badge_span(mode_cls, mode)),
+        # Data quality has a trailing notes_html fragment inline; fold
+        # both into the row's value_html.
+        _metric_row(
+            "Data quality",
+            f"{_badge_span(dq_badge_cls, dq_status)}{notes_html}",
+        ),
+    ]
     return (
         '<div class="card">'
         f'<h2>{_e(profile)}</h2>'
-        '<div class="metric-row">'
-        '<span class="metric-label">First-pass acceptance</span>'
-        f'<span class="metric-value">{_e(fpa_line)}</span></div>'
-        '<div class="metric-row">'
-        '<span class="metric-label">Merged</span>'
-        f'<span class="metric-value">{merged}</span></div>'
-        '<div class="metric-row">'
-        '<span class="metric-label">Defect escape</span>'
-        f'<span class="metric-value">'
-        f'<span class="badge {defect_escape_cls}">{_e(defect_escape_text)}</span>'
-        '</span></div>'
-        '<div class="metric-row">'
-        '<span class="metric-label">Self-review catch</span>'
-        f'<span class="metric-value">'
-        f'<span class="badge {catch_cls}">{_e(catch_display)}</span>'
-        '</span></div>'
-        '<div class="metric-row">'
-        '<span class="metric-label">Sidecar coverage</span>'
-        f'<span class="metric-value">'
-        f'<span class="badge {sidecar_cls}">{_e(sidecar_display)}</span>'
-        '</span></div>'
-        '<div class="metric-row">'
-        '<span class="metric-label">Human issues</span>'
-        f'<span class="metric-value">{_e(humans_line)}</span></div>'
-        '<div class="metric-row">'
-        '<span class="metric-label">Sample size</span>'
-        f'<span class="metric-value">{sample} PRs</span></div>'
-        '<div class="metric-row">'
-        '<span class="metric-label">Recommended mode</span>'
-        f'<span class="metric-value">'
-        f'<span class="badge {mode_cls}">{_e(mode)}</span></span></div>'
-        '<div class="metric-row">'
-        '<span class="metric-label">Data quality</span>'
-        f'<span class="metric-value">'
-        f'<span class="badge {dq_badge_cls}">{_e(dq_status)}</span>'
-        f'{notes_html}'
-        '</span></div>'
-        f'{auto_merge_html}'
-        f'{sparkline_html}'
-        '</div>'
+        + "".join(rows)
+        + f"{auto_merge_html}{sparkline_html}"
+        + "</div>"
     )
 
 
