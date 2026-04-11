@@ -219,6 +219,17 @@ async def test_ado_webhook_processes_when_ai_tag_present() -> None:
         assert response.json()["status"] == "accepted"
 
 
+def _mock_process_ticket_that_releases() -> AsyncMock:
+    """Build an AsyncMock replacement for _process_ticket that releases the
+    active ticket claim (matching the real function's no-spawn behavior) but
+    does NOT clear trigger state. Lets webhook-level tests exercise edge
+    detection without the real pipeline or the no-spawn state-clear path.
+    """
+    async def _release(ticket, trace_id=""):
+        main._release_ticket(ticket.id)
+    return AsyncMock(side_effect=_release)
+
+
 async def test_ado_webhook_second_call_with_same_tag_is_not_a_new_edge() -> None:
     """Regression test for Finding 4 from session 2026-04-10 post-mortem.
 
@@ -227,39 +238,137 @@ async def test_ado_webhook_second_call_with_same_tag_is_not_a_new_edge() -> None
     commit, comment, or field edit after the pipeline already dispatched) must
     NOT re-trigger the pipeline. The first call edges absent→present and
     accepts; the second sees present→present and skips.
+
+    _process_ticket is mocked out so the no-spawn state-clear path from Bug 1's
+    fix doesn't reset the edge memory between the two webhooks — we're testing
+    the webhook-handler level edge detection in isolation.
     """
     payload = _ado_payload(work_item_id=7777, tags="ai-implement")
-    async with await _make_client() as client:
-        first = await client.post("/webhooks/ado", json=payload)
-        assert first.status_code == 202
-        assert first.json()["status"] == "accepted"
+    with patch.object(main, "_process_ticket", _mock_process_ticket_that_releases()):
+        async with await _make_client() as client:
+            first = await client.post("/webhooks/ado", json=payload)
+            assert first.status_code == 202
+            assert first.json()["status"] == "accepted"
 
-        second = await client.post("/webhooks/ado", json=payload)
-        assert second.status_code == 202
-        assert second.json()["status"] == "skipped"
-        assert "not a new edge" in second.json()["reason"]
+            second = await client.post("/webhooks/ado", json=payload)
+            assert second.status_code == 202
+            assert second.json()["status"] == "skipped"
+            assert "not a new edge" in second.json()["reason"]
 
 
 async def test_ado_webhook_tag_removed_then_readded_retriggers() -> None:
     """If the tag is removed and then re-added, that IS a new edge and the
     pipeline should fire again. Without clearing state on tag-absent webhooks
     a re-add after the first cascade would be silently skipped forever."""
-    async with await _make_client() as client:
-        # First fire: absent → present. Accepted.
-        p1 = _ado_payload(work_item_id=8888, tags="ai-implement")
-        r1 = await client.post("/webhooks/ado", json=p1)
-        assert r1.json()["status"] == "accepted"
+    with patch.object(main, "_process_ticket", _mock_process_ticket_that_releases()):
+        async with await _make_client() as client:
+            # First fire: absent → present. Accepted.
+            p1 = _ado_payload(work_item_id=8888, tags="ai-implement")
+            r1 = await client.post("/webhooks/ado", json=p1)
+            assert r1.json()["status"] == "accepted"
 
-        # Tag removed. Webhook arrives with no trigger tags. State cleared.
-        p2 = _ado_payload(work_item_id=8888, tags="sprint-7")
-        r2 = await client.post("/webhooks/ado", json=p2)
-        assert r2.json()["status"] == "skipped"
-        assert "ai-implement" in r2.json()["reason"]  # reason is "tag not found"
+            # Tag removed. Webhook arrives with no trigger tags. State cleared.
+            p2 = _ado_payload(work_item_id=8888, tags="sprint-7")
+            r2 = await client.post("/webhooks/ado", json=p2)
+            assert r2.json()["status"] == "skipped"
+            assert "ai-implement" in r2.json()["reason"]  # reason is "tag not found"
 
-        # Tag re-added. Should be treated as a fresh edge, accepted again.
-        p3 = _ado_payload(work_item_id=8888, tags="ai-implement")
-        r3 = await client.post("/webhooks/ado", json=p3)
-        assert r3.json()["status"] == "accepted"
+            # Tag re-added. Should be treated as a fresh edge, accepted again.
+            p3 = _ado_payload(work_item_id=8888, tags="ai-implement")
+            r3 = await client.post("/webhooks/ado", json=p3)
+            assert r3.json()["status"] == "accepted"
+
+
+async def test_process_ticket_clears_trigger_state_on_exception() -> None:
+    """Regression: if _process_ticket raises, the trigger-state must be
+    cleared so a subsequent webhook for the same ticket can re-trigger.
+
+    Without this, _check_trigger_edge has already set the state to True at
+    webhook receipt, and the next webhook (with the same tag still present)
+    is silently dropped as "not a new edge" — permanently wedging the ticket
+    until the tag is removed-and-readded or the service restarts.
+    """
+    from models import TicketPayload
+
+    # Seed: simulate that a prior webhook observed the tag present. Then a
+    # failing pipeline should clear that state.
+    main._last_trigger_state["FAIL-1"] = True
+    main._active_tickets.add("FAIL-1")
+
+    ticket = TicketPayload(
+        source="ado", id="FAIL-1", ticket_type="story",
+        title="t", description="d", acceptance_criteria=["a"],
+    )
+
+    failing_pipeline = AsyncMock()
+    failing_pipeline.process = AsyncMock(side_effect=RuntimeError("pipeline boom"))
+
+    with patch("main._get_pipeline", return_value=failing_pipeline):
+        await main._process_ticket(ticket)
+
+    assert "FAIL-1" not in main._last_trigger_state, \
+        "trigger state must be cleared on pipeline failure"
+    assert "FAIL-1" not in main._active_tickets, \
+        "ticket should also be released from _active_tickets on failure"
+
+
+async def test_process_ticket_clears_trigger_state_on_no_spawn() -> None:
+    """Regression: if the pipeline returns without spawning L2 (e.g. analyst
+    decided the ticket needs clarification), trigger-state must be cleared
+    so the user can re-trigger after addressing the clarification request.
+    """
+    from models import TicketPayload
+
+    main._last_trigger_state["NOSPAWN-1"] = True
+    main._active_tickets.add("NOSPAWN-1")
+
+    ticket = TicketPayload(
+        source="ado", id="NOSPAWN-1", ticket_type="story",
+        title="t", description="d", acceptance_criteria=["a"],
+    )
+
+    # Pipeline returns without spawn_triggered (analyst flagged as
+    # needs-clarification, or enrichment failed, or any non-L2 path).
+    no_spawn_pipeline = AsyncMock()
+    no_spawn_pipeline.process = AsyncMock(
+        return_value={"ticket_id": "NOSPAWN-1", "status": "needs_clarification"}
+    )
+
+    with patch("main._get_pipeline", return_value=no_spawn_pipeline):
+        await main._process_ticket(ticket)
+
+    assert "NOSPAWN-1" not in main._last_trigger_state, \
+        "trigger state must be cleared on no-spawn completion"
+    assert "NOSPAWN-1" not in main._active_tickets
+
+
+async def test_process_ticket_keeps_trigger_state_on_successful_spawn() -> None:
+    """When L2 is spawned successfully, _process_ticket must NOT clear the
+    trigger state (agent-complete's _delayed_release owns cleanup). Clearing
+    early would allow cascading webhooks to re-dispatch during the agent run.
+    """
+    from models import TicketPayload
+
+    main._last_trigger_state["SPAWN-1"] = True
+    main._active_tickets.add("SPAWN-1")
+
+    ticket = TicketPayload(
+        source="ado", id="SPAWN-1", ticket_type="story",
+        title="t", description="d", acceptance_criteria=["a"],
+    )
+
+    spawn_pipeline = AsyncMock()
+    spawn_pipeline.process = AsyncMock(
+        return_value={"ticket_id": "SPAWN-1", "spawn_triggered": True}
+    )
+
+    with patch("main._get_pipeline", return_value=spawn_pipeline):
+        await main._process_ticket(ticket)
+
+    assert main._last_trigger_state.get("SPAWN-1") is True, \
+        "trigger state must persist while L2 is running — cleared on agent_complete"
+    assert "SPAWN-1" in main._active_tickets, \
+        "active ticket must also persist until agent_complete"
 
 
 async def test_ado_webhook_remaps_ticket_id(tmp_path: Path) -> None:
@@ -377,6 +486,90 @@ async def test_agent_complete_escalated_adds_label() -> None:
             response = await client.post("/api/agent-complete", json=completion)
         assert response.status_code == 200
         mock_adapter.add_label.assert_called_once_with("SCRUM-3", "needs-human")
+
+
+async def test_webhook_stats_counters() -> None:
+    """The /stats/webhooks endpoint exposes cumulative counters for each
+    ADO webhook outcome (accepted edge, skipped not-edge, skipped no-tag)
+    plus the current release-delay setting and live-state sizes. This is
+    the operator-facing visibility for the cascade-prevention fix.
+
+    _process_ticket is patched out so the real analyst pipeline doesn't
+    run — we're testing the webhook-handler counter wiring, not the
+    pipeline. Without the patch the no-spawn-state-clear behavior from
+    Bug 1's fix would reset _last_trigger_state between calls and the
+    second webhook would hit the accepted path instead of not-edge.
+    """
+    with patch.object(main, "_process_ticket", new_callable=AsyncMock):
+        async with await _make_client() as client:
+            # Accepted edge: fresh ticket, tag present.
+            accepted = _ado_payload(work_item_id=9001, tags="ai-implement")
+            r = await client.post("/webhooks/ado", json=accepted)
+            assert r.json()["status"] == "accepted"
+
+            # Skipped not-edge: same ticket, tag still present.
+            r = await client.post("/webhooks/ado", json=accepted)
+            assert r.json()["status"] == "skipped"
+            assert "not a new edge" in r.json()["reason"]
+
+            # Skipped no-tag: different ticket, no trigger tag.
+            no_tag = _ado_payload(work_item_id=9002, tags="sprint-7")
+            r = await client.post("/webhooks/ado", json=no_tag)
+            assert r.json()["status"] == "skipped"
+
+            stats = await client.get("/stats/webhooks")
+            assert stats.status_code == 200
+            body = stats.json()
+
+    counters = body["counters"]
+    assert counters["ado_accepted_edge"] == 1
+    assert counters["ado_skipped_not_edge"] == 1
+    assert counters["ado_skipped_no_tag"] == 1
+    assert body["release_delay_sec"] == main._AGENT_COMPLETE_RELEASE_DELAY_SEC
+
+
+async def test_agent_complete_clears_trigger_state_after_delay() -> None:
+    """After agent-complete fires, the delayed-release background task must
+    clear both _active_tickets and _last_trigger_state once the cooldown
+    window expires. This path was previously untested because the default
+    60-second delay makes tests impractical — now configurable via
+    _AGENT_COMPLETE_RELEASE_DELAY_SEC which we monkeypatch to 0.
+    """
+    import asyncio
+
+    # Seed state as if a pipeline had dispatched this ticket and was now
+    # completing. _check_trigger_edge would have set state=True at webhook
+    # receipt; _process_ticket keeps it around because spawn_triggered=True.
+    main._active_tickets.add("SCRUM-9")
+    main._last_trigger_state["SCRUM-9"] = True
+
+    completion = {
+        "ticket_id": "SCRUM-9",
+        "status": "complete",
+        "pr_url": "https://github.com/org/repo/pull/9",
+        "branch": "ai/SCRUM-9",
+    }
+
+    with (
+        patch.object(main, "_AGENT_COMPLETE_RELEASE_DELAY_SEC", 0),
+        patch.object(main, "_get_jira_adapter") as mock_get,
+    ):
+        mock_adapter = AsyncMock()
+        mock_get.return_value = mock_adapter
+
+        async with await _make_client() as client:
+            response = await client.post("/api/agent-complete", json=completion)
+        assert response.status_code == 200
+
+        # The delayed-release is a fire-and-forget task. Yield control a few
+        # times so it can run to completion.
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    assert "SCRUM-9" not in main._active_tickets, \
+        "ticket should be released from _active_tickets after delay"
+    assert "SCRUM-9" not in main._last_trigger_state, \
+        "trigger state should be cleared after delay so future re-tag retriggers"
 
 
 # --- Jira Webhook: malformed payloads ---

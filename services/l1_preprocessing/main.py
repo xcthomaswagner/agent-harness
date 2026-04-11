@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import os
 import re
 import subprocess
 import sys
@@ -114,6 +115,16 @@ def _get_pipeline() -> Pipeline:
 
 # --- Idempotency: prevent duplicate processing ---
 
+# Seconds to keep a ticket claimed after agent-complete fires. The window
+# absorbs self-triggered ADO webhooks from our own comment-post and
+# status-transition write-backs so they don't cascade into re-runs. Edge-
+# detection state is cleared on the same schedule (see _delayed_release).
+# Tunable via L1_AGENT_COMPLETE_RELEASE_DELAY_SEC for tests and for operators
+# who need a longer window on slower ADO instances.
+_AGENT_COMPLETE_RELEASE_DELAY_SEC: int = int(
+    os.environ.get("L1_AGENT_COMPLETE_RELEASE_DELAY_SEC", "60")
+)
+
 _active_tickets: set[str] = set()
 _active_tickets_lock = __import__("threading").Lock()
 _BACKGROUND_TASKS: set[asyncio.Task[None]] = set()  # prevent GC of fire-and-forget tasks
@@ -124,6 +135,23 @@ _BACKGROUND_TASKS: set[asyncio.Task[None]] = set()  # prevent GC of fire-and-for
 # that motivated this.
 _last_trigger_state: dict[str, bool] = {}
 _last_trigger_state_lock = __import__("threading").Lock()
+
+# Webhook outcome counters — give operators visibility into how often the
+# edge-detection path is blocking cascades vs. accepting fresh triggers.
+# Keys are outcome names; values are monotonic counts since process start
+# (or last _reset_state). Exposed via GET /stats/webhooks.
+_webhook_counters: dict[str, int] = {
+    "ado_accepted_edge": 0,
+    "ado_skipped_not_edge": 0,
+    "ado_skipped_no_tag": 0,
+}
+_webhook_counters_lock = __import__("threading").Lock()
+
+
+def _bump_webhook_counter(key: str) -> None:
+    """Increment a webhook outcome counter. Thread-safe."""
+    with _webhook_counters_lock:
+        _webhook_counters[key] = _webhook_counters.get(key, 0) + 1
 
 
 def _try_claim_ticket(ticket_id: str) -> bool:
@@ -194,6 +222,9 @@ def _reset_state() -> None:
         _active_tickets.clear()
     with _last_trigger_state_lock:
         _last_trigger_state.clear()
+    with _webhook_counters_lock:
+        for key in _webhook_counters:
+            _webhook_counters[key] = 0
 
 
 # --- Pipeline processing (background) ---
@@ -238,8 +269,13 @@ async def _process_ticket(ticket: TicketPayload, trace_id: str = "") -> None:
         # Only release if L2 was NOT spawned — spawned tickets stay claimed
         # until /api/agent-complete is called. This prevents duplicate processing
         # from ADO webhooks triggered by our own comment/status write-backs.
+        # Edge-detection state is cleared alongside the active-ticket release so
+        # a future re-trigger (user re-tags after fixing the ticket) is not
+        # silently dropped as "not a new edge" — the trigger state otherwise
+        # stays True from when _check_trigger_edge set it at webhook receipt.
         if not result.get("spawn_triggered"):
             _release_ticket(ticket.id)
+            _clear_trigger_state(ticket.id)
     except Exception as exc:
         log.exception("processing_ticket_failed")
         append_trace(
@@ -247,7 +283,11 @@ async def _process_ticket(ticket: TicketPayload, trace_id: str = "") -> None:
             error_type=type(exc).__name__,
             error_message=str(exc)[:500],
         )
+        # Same rationale as the no-spawn release above: clear edge-detection
+        # state so the next webhook for this ticket can re-trigger after the
+        # failure is addressed.
         _release_ticket(ticket.id)
+        _clear_trigger_state(ticket.id)
 
 
 # --- Endpoints ---
@@ -263,6 +303,26 @@ async def health() -> dict[str, object]:
         "ado_configured": bool(settings.ado_org_url and settings.ado_pat),
         "webhook_secret": bool(settings.webhook_secret),
         "client_repo": bool(settings.default_client_repo),
+    }
+
+
+@app.get("/stats/webhooks")
+async def webhook_stats() -> dict[str, object]:
+    """Cumulative webhook outcome counts since process start / last reset.
+
+    Exposes edge-detection behavior so operators can see cascade pressure
+    without grepping logs. A steady climb in `ado_skipped_not_edge` relative
+    to `ado_accepted_edge` indicates ADO is firing many follow-up webhooks
+    for the same tagged ticket — typically harmless (the fix for Finding 4
+    is working), but worth investigating if the ratio seems wrong.
+    """
+    with _webhook_counters_lock:
+        counters = dict(_webhook_counters)
+    return {
+        "counters": counters,
+        "release_delay_sec": _AGENT_COMPLETE_RELEASE_DELAY_SEC,
+        "active_tickets": len(_active_tickets),
+        "tracked_trigger_states": len(_last_trigger_state),
     }
 
 
@@ -454,12 +514,14 @@ async def ado_webhook(
     # the tag triggers a fresh edge. Then skip — there's nothing to do.
     if not tag_present:
         _clear_trigger_state(ticket.id)
+        _bump_webhook_counter("ado_skipped_no_tag")
         reason = f"Neither '{ai_label}' nor '{quick_label}' tag found"
         return {"status": "skipped", "ticket_id": ticket.id, "reason": reason}
 
     # Edge-detect the trigger tag to skip non-dispatching cascade webhooks
     # (PR merge ArtifactLinks, comments, field edits). See _check_trigger_edge.
     if not _check_trigger_edge(ticket.id, tag_present):
+        _bump_webhook_counter("ado_skipped_not_edge")
         logger.info(
             "ado_webhook_not_edge",
             ticket_id=ticket.id,
@@ -482,6 +544,7 @@ async def ado_webhook(
     append_trace(ticket.id, trace_id, "webhook", "ado_webhook_received",
                  ticket_type=ticket.ticket_type, source="ado",
                  ticket_title=ticket.title)
+    _bump_webhook_counter("ado_accepted_edge")
 
     dispatch = _enqueue_or_background(ticket, background_tasks, trace_id=trace_id)
     if dispatch == "duplicate":
@@ -736,12 +799,13 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
     log.info("agent_completion_received", pr_url=payload.pr_url)
 
     # Delay releasing the ticket — ADO fires webhooks when we post comments
-    # and transition status below. Keep the ticket claimed for 60s to absorb
-    # those self-triggered webhooks before allowing reprocessing. Edge-detection
+    # and transition status below. Keep the ticket claimed to absorb those
+    # self-triggered webhooks before allowing reprocessing. Edge-detection
     # memory is cleared on the same schedule so the lifecycles align and a
     # future re-add of the trigger tag produces a fresh edge as expected.
-    async def _delayed_release(ticket_id: str, delay: int = 60) -> None:
-        await asyncio.sleep(delay)
+    # Window is tunable via _AGENT_COMPLETE_RELEASE_DELAY_SEC (env var).
+    async def _delayed_release(ticket_id: str) -> None:
+        await asyncio.sleep(_AGENT_COMPLETE_RELEASE_DELAY_SEC)
         _release_ticket(ticket_id)
         _clear_trigger_state(ticket_id)
 
