@@ -1004,7 +1004,20 @@ def consolidate_worktree_logs(
     imported = 0
     skipped = 0
     if pipeline_log.exists():
-        for line in pipeline_log.read_text().splitlines():
+        # errors="replace" tolerates any stray invalid UTF-8 bytes
+        # (ANSI escapes, binary-ish tool stderr that leaked into the
+        # log). A strict decode here used to abort consolidation
+        # mid-function, silently dropping every artifact file that
+        # gets imported AFTER pipeline.jsonl (code-review, qa-matrix,
+        # judge-verdict, effective CLAUDE.md, plans, session-stream
+        # reference, tool_index). The caller wraps consolidation in
+        # a broad try/except so the endpoint survived, but the
+        # resulting trace lost most of its observability — this is
+        # the same "non-UTF-8 silent bypass" class of bug that
+        # _redact_bytes had before the surrogateescape fix.
+        for line in pipeline_log.read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -1073,7 +1086,11 @@ def consolidate_worktree_logs(
                 ticket_id, trace_id,
                 phase="artifact",
                 event=event_name,
-                content=_redact_and_count(artifact_path.read_text()[:5000]),
+                content=_redact_and_count(
+                    artifact_path.read_text(
+                        encoding="utf-8", errors="replace"
+                    )[:5000]
+                ),
             )
 
     # Effective CLAUDE.md — injected at worktree root, captures the instructions
@@ -1084,7 +1101,11 @@ def consolidate_worktree_logs(
             ticket_id, trace_id,
             phase="artifact",
             event=ARTIFACT_EFFECTIVE_CLAUDE_MD,
-            content=_redact_and_count(effective_claude_md.read_text()[:5000]),
+            content=_redact_and_count(
+                effective_claude_md.read_text(
+                    encoding="utf-8", errors="replace"
+                )[:5000]
+            ),
         )
 
     # session-stream.jsonl is stored by reference — it can be megabytes and
@@ -1162,7 +1183,9 @@ def consolidate_worktree_logs(
             phase="artifact",
             event=ARTIFACT_PLAN,
             plan_version=plan_path.stem,
-            content=_redact_and_count(plan_path.read_text()[:5000]),
+            content=_redact_and_count(
+                plan_path.read_text(encoding="utf-8", errors="replace")[:5000]
+            ),
         )
 
     if total_redacted:

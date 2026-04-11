@@ -251,6 +251,47 @@ class TestWriteBack:
         # Should append to existing tags
         assert "existing-tag; needs-splitting" in str(patch_ops)
 
+    async def test_add_label_skips_when_already_present(
+        self,
+        adapter: AdoAdapter,
+        mock_client: AsyncMock,
+    ) -> None:
+        """Bug regression: add_label used to unconditionally append
+        ``"; {label}"``, so calling it twice with the same label
+        produced ``"existing-tag; existing-tag"``. Over many retries
+        the tag list would grow unbounded. Fixed with a
+        case-insensitive check against existing ``;``-separated
+        elements — no PATCH is sent when the label is already on
+        the work item.
+        """
+        dummy_request = httpx.Request("GET", "https://test")
+        mock_client.get.return_value = httpx.Response(
+            200,
+            json={"fields": {"System.Tags": "existing-tag; ai_complete"}},
+            request=dummy_request,
+        )
+        await adapter.add_label("AcmeProject-42", "ai_complete")
+
+        mock_client.get.assert_called_once()
+        # No PATCH — the tag is already present.
+        mock_client.patch.assert_not_called()
+
+    async def test_add_label_case_insensitive_dedup(
+        self,
+        adapter: AdoAdapter,
+        mock_client: AsyncMock,
+    ) -> None:
+        """Case-insensitive exact-element match: ``AI_Complete`` should
+        dedupe against ``ai_complete`` already on the work item."""
+        dummy_request = httpx.Request("GET", "https://test")
+        mock_client.get.return_value = httpx.Response(
+            200,
+            json={"fields": {"System.Tags": "ai_complete; done"}},
+            request=dummy_request,
+        )
+        await adapter.add_label("AcmeProject-42", "AI_Complete")
+        mock_client.patch.assert_not_called()
+
 
 def test_ado_adapter_satisfies_ticket_writeback_protocol(
     settings: Settings,

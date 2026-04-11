@@ -228,6 +228,68 @@ class TestConsolidateWorktreeLogs:
         path = trace_dir / "C-5.jsonl"
         assert not path.exists() or path.read_text().strip() == ""
 
+    def test_tolerates_non_utf8_pipeline_jsonl(
+        self, trace_dir: Path, tmp_path: Path
+    ) -> None:
+        """Bug regression: ``Path.read_text()`` defaults to strict
+        UTF-8, so a single invalid byte in pipeline.jsonl raised
+        ``UnicodeDecodeError`` and aborted consolidation mid-function
+        — every artifact file imported AFTER pipeline.jsonl
+        (code-review.md, qa-matrix.md, CLAUDE.md, plans) was silently
+        dropped from the trace. Fixed with ``errors='replace'`` on
+        every read_text call. This test plants a pipeline.jsonl with
+        a stray 0x80 byte alongside a code-review.md and verifies
+        BOTH land in the trace store."""
+        wt = tmp_path / "worktree"
+        logs = wt / ".harness" / "logs"
+        logs.mkdir(parents=True)
+        # Pipeline.jsonl with a good line followed by a rogue byte.
+        good_line = json.dumps({"phase": "impl", "event": "done"}) + "\n"
+        (logs / "pipeline.jsonl").write_bytes(
+            good_line.encode() + b"\x80 garbage non-utf8 byte\n"
+        )
+        (logs / "code-review.md").write_text("## Code Review\nAPPROVED")
+
+        with patch("tracer.LOGS_DIR", trace_dir):
+            consolidate_worktree_logs("C-UTF8", "trace-utf8", str(wt))
+            entries = read_trace("C-UTF8")
+
+        # The good pipeline.jsonl line must have been imported.
+        assert any(e.get("event") == "done" for e in entries), (
+            "pipeline.jsonl good line should survive a rogue byte"
+        )
+        # And code-review.md, which gets imported AFTER pipeline.jsonl,
+        # must also be present — before the fix this would have been
+        # silently dropped when UnicodeDecodeError aborted the function.
+        assert any(
+            e.get("event") == "code_review_artifact" for e in entries
+        ), "artifacts after pipeline.jsonl must still be imported"
+
+    def test_tolerates_non_utf8_artifact_file(
+        self, trace_dir: Path, tmp_path: Path
+    ) -> None:
+        """Bug regression: artifact file reads also used strict UTF-8.
+        A rogue byte in code-review.md used to abort consolidation
+        and silently drop every subsequent artifact."""
+        wt = tmp_path / "worktree"
+        logs = wt / ".harness" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "pipeline.jsonl").write_text(
+            json.dumps({"phase": "impl", "event": "done"}) + "\n"
+        )
+        (logs / "code-review.md").write_bytes(
+            b"## Code Review\n\x80 rogue byte\nAPPROVED"
+        )
+        (logs / "qa-matrix.md").write_text("## QA\nPASS")
+
+        with patch("tracer.LOGS_DIR", trace_dir):
+            consolidate_worktree_logs("C-UTF8-2", "trace-utf8-2", str(wt))
+            entries = read_trace("C-UTF8-2")
+
+        # Both artifacts must land — qa-matrix imports AFTER code-review.
+        assert any(e.get("event") == "code_review_artifact" for e in entries)
+        assert any(e.get("event") == "qa_matrix_artifact" for e in entries)
+
     def test_truncates_long_content(
         self, trace_dir: Path, tmp_path: Path
     ) -> None:

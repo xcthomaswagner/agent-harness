@@ -307,7 +307,16 @@ class AdoAdapter:
         )
 
     async def add_label(self, ticket_id: str, label: str) -> None:
-        """Add a tag to an ADO work item."""
+        """Add a tag to an ADO work item, idempotently.
+
+        Short-circuits when the tag is already present (case-insensitive
+        exact match on a ``;``-separated element). Without this guard,
+        calling ``add_label("PROJ-1", "ai_complete")`` twice produced
+        ``System.Tags = "ai_complete; ai_complete"``, and over many
+        retries (judge → fix cycles, re-runs, manual re-labels) the
+        tag list would grow unbounded — polluting the edge-detection
+        state machine and inflating ``labels`` in downstream tracing.
+        """
         project, wi_id = self._parse_ticket_id(ticket_id)
 
         # First, get current tags
@@ -316,7 +325,23 @@ class AdoAdapter:
         response.raise_for_status()
         current_tags = response.json().get("fields", {}).get("System.Tags", "")
 
+        # Idempotency guard — case-insensitive exact match on any
+        # existing ``;``-separated tag element.
+        label_stripped = label.strip()
+        existing_tags = {
+            t.strip().lower()
+            for t in current_tags.split(";")
+            if t.strip()
+        }
+        if label_stripped.lower() in existing_tags:
+            logger.info(
+                "ado_label_already_present",
+                ticket_id=ticket_id,
+                label=label,
+            )
+            return
+
         # Append new tag
-        new_tags = f"{current_tags}; {label}" if current_tags else label
+        new_tags = f"{current_tags}; {label_stripped}" if current_tags else label_stripped
         await self.update_fields(ticket_id, {"System.Tags": new_tags})
         logger.info("ado_label_added", ticket_id=ticket_id, label=label)
