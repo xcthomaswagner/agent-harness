@@ -235,6 +235,143 @@ class TestConsolidateWorktreeLogs:
         content_entry = [e for e in entries if e.get("content")]
         assert len(content_entry[0]["content"]) <= 5000
 
+    def _make_worktree(self, tmp_path: Path, ticket_id: str) -> Path:
+        """Create a fake worktree matching the real spawn_team layout.
+
+        Real layout (scripts/spawn_team.py:243):
+            <client_repo.parent>/worktrees/<branch>
+        So the worktree's parent is the worktrees dir, and its grandparent
+        is the client_repo.parent — where trace-archive lives.
+        """
+        wt = tmp_path / "worktrees" / f"ai-{ticket_id}"
+        logs = wt / ".harness" / "logs"
+        logs.mkdir(parents=True)
+
+        (wt / "CLAUDE.md").write_text("# Effective harness instructions\n")
+        (logs / "session.log").write_text("[spawn] starting\n[spawn] done\n")
+        (logs / "pipeline.jsonl").write_text(
+            json.dumps({"phase": "impl", "event": "done"}) + "\n"
+        )
+
+        stream_events = [
+            {
+                "type": "system",
+                "subtype": "init",
+                "mcp_servers": [
+                    {"name": "salesforce", "status": "connected"},
+                    {"name": "playwright", "status": "connected"},
+                ],
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "name": "Bash", "id": "t1"}
+                    ]
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "mcp__salesforce__sf_deploy",
+                            "id": "t2",
+                        }
+                    ]
+                },
+            },
+        ]
+        (logs / "session-stream.jsonl").write_text(
+            "\n".join(json.dumps(e) for e in stream_events) + "\n"
+        )
+        return wt
+
+    def test_imports_session_stream_and_tool_index_archive_exists(
+        self, trace_dir: Path, tmp_path: Path
+    ) -> None:
+        """Archive path exists — should be preferred over live path."""
+        wt = self._make_worktree(tmp_path, "C-7")
+
+        # Pre-populate the archive file at the canonical location — this is
+        # what spawn_team.py:561 does on successful runs. The archive lives
+        # at <client_repo.parent>/trace-archive/<ticket>/, which equals
+        # wt.parent.parent/trace-archive/<ticket>/ because:
+        #   wt = <tmp_path>/worktrees/ai-C-7
+        #   wt.parent = <tmp_path>/worktrees
+        #   wt.parent.parent = <tmp_path> (== client_repo.parent)
+        archive_dir = tmp_path / "trace-archive" / "C-7"
+        archive_dir.mkdir(parents=True)
+        archive_stream = archive_dir / "session-stream.jsonl"
+        archive_stream.write_text(
+            (wt / ".harness" / "logs" / "session-stream.jsonl").read_text()
+        )
+
+        with patch("tracer.LOGS_DIR", trace_dir):
+            consolidate_worktree_logs("C-7", "trace-xyz", str(wt))
+            entries = read_trace("C-7")
+
+        events_by_name = {e.get("event"): e for e in entries}
+        assert "session_log_artifact" in events_by_name
+        assert "effective_claude_md_artifact" in events_by_name
+        assert "Effective harness" in events_by_name[
+            "effective_claude_md_artifact"
+        ]["content"]
+
+        stream_entry = events_by_name["session_stream_artifact"]
+        # Exact equality — do NOT use endswith, which masks path bugs.
+        expected_archive = str(archive_stream)
+        assert stream_entry["artifact_path"] == expected_archive
+        assert stream_entry["size_bytes"] > 0
+        assert stream_entry["line_count"] == 3
+
+        tool_index_entry = events_by_name["tool_index"]
+        idx = tool_index_entry["index"]
+        assert idx["tool_counts"] == {"Bash": 1, "mcp__salesforce__sf_deploy": 1}
+        assert idx["tool_call_count"] == 2
+        assert idx["mcp_servers_used"] == ["salesforce"]
+        assert idx["mcp_servers_unused"] == ["playwright"]
+
+    def test_session_stream_falls_back_to_live_path_when_no_archive(
+        self, trace_dir: Path, tmp_path: Path
+    ) -> None:
+        """Failed/escalated runs never archive — fall back to live worktree path."""
+        wt = self._make_worktree(tmp_path, "C-8")
+        # Do NOT create the archive dir — simulates status != "complete".
+
+        with patch("tracer.LOGS_DIR", trace_dir):
+            consolidate_worktree_logs("C-8", "trace-fail", str(wt))
+            entries = read_trace("C-8")
+
+        events_by_name = {e.get("event"): e for e in entries}
+        stream_entry = events_by_name["session_stream_artifact"]
+
+        expected_live = str(wt / ".harness" / "logs" / "session-stream.jsonl")
+        assert stream_entry["artifact_path"] == expected_live
+        # Sanity: we didn't accidentally point to a (non-existent) archive path
+        assert "trace-archive" not in stream_entry["artifact_path"]
+
+    def test_session_stream_artifact_skipped_when_missing(
+        self, trace_dir: Path, tmp_path: Path
+    ) -> None:
+        """If session-stream.jsonl doesn't exist at all, no artifact entry is written."""
+        wt = tmp_path / "worktrees" / "ai-C-9"
+        logs = wt / ".harness" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "pipeline.jsonl").write_text(
+            json.dumps({"phase": "impl", "event": "done"}) + "\n"
+        )
+        # No session-stream.jsonl at all.
+
+        with patch("tracer.LOGS_DIR", trace_dir):
+            consolidate_worktree_logs("C-9", "trace-none", str(wt))
+            entries = read_trace("C-9")
+
+        event_names = {e.get("event") for e in entries}
+        assert "session_stream_artifact" not in event_names
+        assert "tool_index" not in event_names
+
 
 class TestComputePhaseDurations:
     """Tests for compute_phase_durations — per-phase timing from agent entries."""
