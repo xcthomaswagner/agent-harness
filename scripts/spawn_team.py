@@ -84,27 +84,60 @@ def _trace_watcher(
 
     _log(f"Tailing {jsonl_path}")
     posted = 0
+
+    def _post_entry(raw: str) -> None:
+        """Parse one complete NDJSON line and POST it to L1."""
+        nonlocal posted
+        try:
+            entry = json.loads(raw)
+            entry["ticket_id"] = ticket_id
+            entry["trace_id"] = trace_id
+            data = json.dumps(entry).encode()
+            req = urllib.request.Request(
+                f"{l1_url}/api/agent-trace",
+                data=data,
+                headers={"Content-Type": "application/json"},
+            )
+            urllib.request.urlopen(req, timeout=3)
+            posted += 1
+            _log(f"Posted: {entry.get('phase')}/{entry.get('event', '')[:40]}")
+        except Exception as exc:
+            _log(f"POST failed: {exc}")
+
+    # Partial-line buffer. readline() against a file being actively written
+    # can return a chunk without a trailing newline when it catches the
+    # writer mid-flush; we accumulate those chunks until the newline arrives
+    # rather than attempting to parse (and losing) the incomplete line.
+    buffer = ""
     with jsonl_path.open("r") as f:
         while not stop_event.is_set():
-            line = f.readline()
-            if line.strip():
-                try:
-                    entry = json.loads(line)
-                    entry["ticket_id"] = ticket_id
-                    entry["trace_id"] = trace_id
-                    data = json.dumps(entry).encode()
-                    req = urllib.request.Request(
-                        f"{l1_url}/api/agent-trace",
-                        data=data,
-                        headers={"Content-Type": "application/json"},
-                    )
-                    urllib.request.urlopen(req, timeout=3)
-                    posted += 1
-                    _log(f"Posted: {entry.get('phase')}/{entry.get('event', '')[:40]}")
-                except Exception as exc:
-                    _log(f"POST failed: {exc}")
-            else:
+            chunk = f.readline()
+            if not chunk:
                 stop_event.wait(2)  # Poll every 2 seconds
+                continue
+            buffer += chunk
+            if not buffer.endswith("\n"):
+                continue  # partial line — wait for the rest
+            line, buffer = buffer.strip(), ""
+            if line:
+                _post_entry(line)
+
+        # Drain pass: stop_event was set, but the subprocess may have flushed
+        # its final events to the file between our last read and now. Read to
+        # EOF one more time so the last few entries (pr_created, complete,
+        # etc.) are not dropped.
+        try:
+            remainder = f.read()
+        except OSError as exc:
+            _log(f"Final drain read failed: {exc}")
+            remainder = ""
+        if remainder:
+            buffer += remainder
+            for raw_line in buffer.splitlines():
+                stripped = raw_line.strip()
+                if stripped:
+                    _post_entry(stripped)
+
     _log(f"Stopped after posting {posted} entries")
 
 
