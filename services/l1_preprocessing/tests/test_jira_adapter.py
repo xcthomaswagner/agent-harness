@@ -90,6 +90,71 @@ class TestNormalize:
         assert ticket.linked_items[0].relationship == "Blocks"
         assert ticket.linked_items[0].title == "Release 2.1"
 
+    def test_linked_items_tolerate_explicit_null_outward_side(
+        self, adapter: JiraAdapter
+    ) -> None:
+        """Bug regression: Jira can emit ``"outwardIssue": null`` for
+        some link shapes, which made ``link.get("outwardIssue",
+        link.get("inwardIssue", {}))`` return None — then ``.get(
+        "key")`` crashed with AttributeError. The filter at the end
+        of the comprehension used truthiness (``or``) and passed the
+        link through to the extractor, which exploded on the
+        explicit null side. Fix uses ``or`` to resolve the side
+        correctly and coerces type/fields through ``or {}``."""
+        payload = load_fixture("jira_webhook_story.json")
+        # Overwrite the issuelinks with a shape where outwardIssue is
+        # explicitly null and only inwardIssue is populated.
+        payload["issue"]["fields"]["issuelinks"] = [
+            {
+                "type": {"name": "Blocks"},
+                "outwardIssue": None,
+                "inwardIssue": {
+                    "key": "ACME-50",
+                    "fields": {"summary": "Release 2.1"},
+                },
+            }
+        ]
+        ticket = adapter.normalize(payload)
+        assert len(ticket.linked_items) == 1
+        assert ticket.linked_items[0].id == "ACME-50"
+        assert ticket.linked_items[0].title == "Release 2.1"
+
+    def test_linked_items_tolerate_null_type(
+        self, adapter: JiraAdapter
+    ) -> None:
+        """Belt-and-braces: an explicit null ``type`` must not crash."""
+        payload = load_fixture("jira_webhook_story.json")
+        payload["issue"]["fields"]["issuelinks"] = [
+            {
+                "type": None,
+                "outwardIssue": {
+                    "key": "ACME-99",
+                    "fields": {"summary": "linked"},
+                },
+            }
+        ]
+        ticket = adapter.normalize(payload)
+        assert len(ticket.linked_items) == 1
+        assert ticket.linked_items[0].id == "ACME-99"
+        assert ticket.linked_items[0].relationship == ""
+
+    def test_linked_items_skip_entry_with_both_sides_null(
+        self, adapter: JiraAdapter
+    ) -> None:
+        """A link with both sides null is skipped entirely instead of
+        raising — the previous truthiness filter would also skip but
+        the new code does it explicitly via the helper."""
+        payload = load_fixture("jira_webhook_story.json")
+        payload["issue"]["fields"]["issuelinks"] = [
+            {
+                "type": {"name": "Blocks"},
+                "outwardIssue": None,
+                "inwardIssue": None,
+            }
+        ]
+        ticket = adapter.normalize(payload)
+        assert ticket.linked_items == []
+
     def test_bug_webhook(self, adapter: JiraAdapter) -> None:
         payload = load_fixture("jira_webhook_bug.json")
         ticket = adapter.normalize(payload)

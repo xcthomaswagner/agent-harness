@@ -1188,17 +1188,32 @@ def list_defect_links_for_profile(
     *,
     since_iso: str | None = None,
     limit: int = 50,
+    confirmed: int | None = None,
+    category: str | None = None,
 ) -> list[sqlite3.Row]:
     """Return defect_links for PRs in the given profile, most recent first.
 
     Joins defect_links to pr_runs on pr_runs.client_profile. Optional
-    since_iso filters on defect_links.reported_at.
+    since_iso filters on defect_links.reported_at. ``confirmed`` and
+    ``category`` are optional SQL-side filters — push them in here
+    rather than filtering in Python after LIMIT. Without this, the
+    escaped-defects dashboard panel could silently drop escaped rows
+    whenever a profile had more recent non-escaped/unconfirmed rows
+    within the same window: SQL LIMIT applies first, and the Python
+    ``[r for r in rows if confirmed==1 and category=='escaped']``
+    filter then saw an empty set.
     """
     clauses = ["pr.client_profile = ?"]
     params: list[object] = [client_profile]
     if since_iso is not None:
         clauses.append("dl.reported_at >= ?")
         params.append(since_iso)
+    if confirmed is not None:
+        clauses.append("dl.confirmed = ?")
+        params.append(int(confirmed))
+    if category is not None:
+        clauses.append("dl.category = ?")
+        params.append(category)
     sql = (
         "SELECT dl.*, pr.pr_number, pr.pr_url, pr.client_profile, "
         "pr.ticket_id, pr.merged_at "

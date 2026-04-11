@@ -113,18 +113,39 @@ class JiraAdapter:
             for att in fields.get("attachment", [])
         ]
 
-        # Linked issues
-        linked_items = [
-            LinkedItem(
-                id=link.get("outwardIssue", link.get("inwardIssue", {})).get("key", ""),
+        # Linked issues.
+        #
+        # Jira can emit issuelinks with an explicit ``"outwardIssue":
+        # null`` on the opposite side of the link (rather than omitting
+        # the key), which means ``link.get("outwardIssue",
+        # link.get("inwardIssue", {}))`` returns ``None`` instead of
+        # falling back — and the subsequent ``.get("key")`` raises
+        # AttributeError, aborting the entire ticket normalization
+        # inside the list comprehension. Same hazard applies to the
+        # ``type`` field. Resolve the side with an explicit ``or``
+        # chain so a None value falls through to the next option,
+        # ending at an empty dict.
+        def _resolve_link(link: dict[str, Any]) -> LinkedItem | None:
+            side = link.get("outwardIssue") or link.get("inwardIssue")
+            if not isinstance(side, dict):
+                return None
+            link_type = link.get("type") or {}
+            fields_on_side = side.get("fields") or {}
+            return LinkedItem(
+                id=side.get("key", ""),
                 source=TicketSource.JIRA,
-                relationship=link.get("type", {}).get("name", ""),
-                title=link.get("outwardIssue", link.get("inwardIssue", {}))
-                .get("fields", {})
-                .get("summary", ""),
+                relationship=link_type.get("name", ""),
+                title=fields_on_side.get("summary", ""),
             )
-            for link in fields.get("issuelinks", [])
-            if link.get("outwardIssue") or link.get("inwardIssue")
+
+        linked_items = [
+            li
+            for li in (
+                _resolve_link(link)
+                for link in fields.get("issuelinks", []) or []
+                if isinstance(link, dict)
+            )
+            if li is not None
         ]
 
         # Labels

@@ -459,19 +459,29 @@ def _render_escaped_defects_section(
     since_iso = (
         datetime.now(UTC) - timedelta(days=window_days)
     ).isoformat()
+    # Push the confirmed/category filter down into SQL so the LIMIT
+    # applies to escaped rows only. Previously we fetched the top N
+    # defect_links (any category) per profile and THEN filtered in
+    # Python — a profile with 25+ more-recent non-escaped rows would
+    # silently drop every escaped row and the panel would render
+    # empty. See the regression test in test_autonomy_dashboard.
     all_rows: list[sqlite3.Row] = []
     for p in profiles:
         rows = list_defect_links_for_profile(
-            conn, p, since_iso=since_iso, limit=limit
+            conn,
+            p,
+            since_iso=since_iso,
+            limit=limit,
+            confirmed=1,
+            category="escaped",
         )
         all_rows.extend(rows)
 
-    escaped = [
-        r for r in all_rows
-        if int(r["confirmed"]) == 1 and r["category"] == "escaped"
-    ]
-    escaped.sort(key=lambda r: r["reported_at"] or "", reverse=True)
-    escaped = escaped[:limit]
+    # Already filtered + per-profile limited; sort cross-profile then
+    # cap at the global limit for the final table.
+    escaped = sorted(
+        all_rows, key=lambda r: r["reported_at"] or "", reverse=True
+    )[:limit]
 
     header = '<h2 style="margin-top:24px">Escaped Defects</h2>'
     if not escaped:

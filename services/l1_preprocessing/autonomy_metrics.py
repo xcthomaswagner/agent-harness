@@ -83,6 +83,58 @@ def _chunked_in_query(
 _CATCH_RATE_CONFIDENCE_THRESHOLD = 0.8
 
 
+def _count_human_issues_and_matches(
+    conn: sqlite3.Connection,
+    pr_run_ids: list[int],
+) -> tuple[int, int]:
+    """Return ``(human_issue_count, matched_human_issue_count)`` for ``pr_run_ids``.
+
+    Centralizes the two-query catch-rate pattern that previously
+    lived inline in three metric functions
+    (``compute_profile_metrics``, ``compute_ticket_type_breakdown``,
+    ``compute_daily_trend``). Each site ran the exact same pair of
+    chunked ``IN (...)`` queries:
+
+    1. Select all ``review_issues`` rows with
+       ``source = 'human_review' AND is_valid = 1`` whose pr_run_id
+       is in the caller's list.
+    2. Count distinct ``human_issue_id`` values in ``issue_matches``
+       whose confidence passes ``_CATCH_RATE_CONFIDENCE_THRESHOLD``
+       and whose ``matched_by`` is not the unpromoted ``suggested``
+       tier.
+
+    Returns zero counts when ``pr_run_ids`` is empty. A single
+    source of truth here means a future tweak to the catch-rate
+    definition (e.g., promoting tier-4 matches, tightening the
+    confidence threshold) lands in one place instead of three —
+    dashboard views cannot disagree on the metric.
+    """
+    if not pr_run_ids:
+        return 0, 0
+
+    human_rows = _chunked_in_query(
+        conn,
+        "SELECT id FROM review_issues WHERE pr_run_id IN ({placeholders}) "
+        "AND source = 'human_review' AND is_valid = 1",
+        pr_run_ids,
+    )
+    human_count = len(human_rows)
+    if not human_rows:
+        return 0, 0
+
+    human_ids = [int(h["id"]) for h in human_rows]
+    matched_rows = _chunked_in_query(
+        conn,
+        "SELECT DISTINCT human_issue_id FROM issue_matches "
+        "WHERE human_issue_id IN ({placeholders}) AND confidence >= ? "
+        "AND matched_by != 'suggested'",
+        human_ids,
+        extra_params=[_CATCH_RATE_CONFIDENCE_THRESHOLD],
+    )
+    matched_count = len({int(m["human_issue_id"]) for m in matched_rows})
+    return human_count, matched_count
+
+
 def _recommend_mode(
     sample_size: int,
     first_pass_acceptance_rate: float,
@@ -161,30 +213,10 @@ def compute_profile_metrics(
         ai_issue_count = 0
         prs_with_ai = 0
     else:
-        # Valid human-review issues in window.
-        human_rows = _chunked_in_query(
-            conn,
-            "SELECT id FROM review_issues WHERE pr_run_id IN ({placeholders}) "
-            "AND source = 'human_review' AND is_valid = 1",
-            pr_run_ids,
+        # Catch rate — single shared helper.
+        human_issue_count, matched_human_issue_count = (
+            _count_human_issues_and_matches(conn, pr_run_ids)
         )
-        human_issue_count = len(human_rows)
-
-        if human_rows:
-            human_ids = [int(h["id"]) for h in human_rows]
-            matched_rows = _chunked_in_query(
-                conn,
-                "SELECT DISTINCT human_issue_id FROM issue_matches "
-                "WHERE human_issue_id IN ({placeholders}) AND confidence >= ? "
-                "AND matched_by != 'suggested'",
-                human_ids,
-                extra_params=[_CATCH_RATE_CONFIDENCE_THRESHOLD],
-            )
-            matched_human_issue_count = len(
-                {int(m["human_issue_id"]) for m in matched_rows}
-            )
-        else:
-            matched_human_issue_count = 0
 
         # Sidecar coverage (distinct pr_runs with any valid AI/QA issue).
         ai_pr_rows = _chunked_in_query(
@@ -348,32 +380,9 @@ def compute_ticket_type_breakdown(
             defect_escape = round(escaped / len(merged_with_at), 3)
 
         pr_ids = [int(g["id"]) for g in group]
-        if pr_ids:
-            humans = _chunked_in_query(
-                conn,
-                "SELECT id FROM review_issues WHERE pr_run_id IN ({placeholders}) "
-                "AND source = 'human_review' AND is_valid = 1",
-                pr_ids,
-            )
-            h_count = len(humans)
-            if humans:
-                h_ids = [int(h["id"]) for h in humans]
-                matched_rows = _chunked_in_query(
-                    conn,
-                    "SELECT DISTINCT human_issue_id FROM issue_matches "
-                    "WHERE human_issue_id IN ({placeholders}) AND confidence >= ? "
-                    "AND matched_by != 'suggested'",
-                    h_ids,
-                    extra_params=[_CATCH_RATE_CONFIDENCE_THRESHOLD],
-                )
-                matched_count = len(
-                    {int(m["human_issue_id"]) for m in matched_rows}
-                )
-            else:
-                matched_count = 0
-        else:
-            h_count = 0
-            matched_count = 0
+        h_count, matched_count = _count_human_issues_and_matches(
+            conn, pr_ids
+        )
         catch_rate = (
             round(matched_count / h_count, 3) if h_count > 0 else None
         )

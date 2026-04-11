@@ -401,6 +401,132 @@ def _diag_checklist_html(entries: list[dict[str, Any]]) -> str:
     return render_diagnostic_checklist(run_diagnostic_checklist(entries))
 
 
+# ---------------------------------------------------------------------------
+# Detail-view section renderers
+# ---------------------------------------------------------------------------
+#
+# ``_render_detail`` used to be a ~250-line function that inlined every
+# visual section (summary bar, investigate / discuss disclosures,
+# phase duration bar, failure box, span trees, raw events). Each
+# section is extracted below so the function body becomes a thin
+# orchestration of fragment assembly and each helper is individually
+# testable with plain dict fixtures instead of having to go through
+# the full ``read_trace`` path.
+
+
+def _render_investigate_box(ticket_id: str) -> str:
+    """Copy-investigation-command disclosure — native ``<details>``.
+
+    Builds the ready-to-paste shell snippet from the canonical
+    template in ``investigate_command.py`` so the dashboard and the
+    ``/traces/{id}/discuss`` endpoint cannot drift.
+    """
+    investigate_cmd = build_investigate_command(ticket_id)
+    return (
+        '<details style="margin-bottom:20px;padding:10px 14px;background:#F7F9FB;'
+        'border:1px solid #E2E8F0;border-radius:8px">'
+        '<summary style="cursor:pointer;font-weight:600;font-size:12px;color:#334155">'
+        'Investigate this trace locally (copy command)</summary>'
+        '<pre style="margin-top:10px;padding:10px 12px;background:#0F172A;color:#E2E8F0;'
+        'border-radius:6px;font-size:11.5px;line-height:1.55;white-space:pre-wrap;'
+        'word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">'
+        f'{_e(investigate_cmd)}</pre></details>'
+    )
+
+
+def _render_discuss_box(ticket_id: str) -> str:
+    """Audited 'Discuss with Claude' disclosure — three-step command.
+
+    Mints a session token via ``POST /traces/{id}/discuss`` (writes
+    to ``discuss-audit.jsonl``), runs the returned investigate
+    command, then feeds the Claude transcript to
+    ``capture_discuss_output.py``. Both this and the cheaper
+    ``_render_investigate_box`` live inside ``<details>`` elements
+    so they expand without JavaScript.
+    """
+    discuss_cmd = (
+        "# Step 1: request a session token (writes to discuss-audit.jsonl)\n"
+        f"curl -sSf -X POST http://localhost:8000/traces/{ticket_id}/discuss \\\n"
+        "  -H 'X-API-Key: ...' | jq -r .investigate_command > /tmp/investigate.sh\n"
+        "\n"
+        "# Step 2: run the investigation\n"
+        "bash /tmp/investigate.sh\n"
+        "\n"
+        "# Step 3: when Claude's output has the three sections\n"
+        "# (## Root cause, ## Proposed fix, ## Memory entry):\n"
+        "python scripts/capture_discuss_output.py --transcript /tmp/transcript.md"
+    )
+    return (
+        '<details style="margin-bottom:20px;padding:10px 14px;background:#F7F9FB;'
+        'border:1px solid #E2E8F0;border-radius:8px">'
+        '<summary style="cursor:pointer;font-weight:600;font-size:12px;color:#334155">'
+        '\U0001f50d Open in Claude for investigation</summary>'
+        '<pre style="margin-top:10px;padding:10px 12px;background:#0F172A;color:#E2E8F0;'
+        'border-radius:6px;font-size:11.5px;line-height:1.55;white-space:pre-wrap;'
+        'word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">'
+        f'{_e(discuss_cmd)}</pre></details>'
+    )
+
+
+def _render_duration_bar(durations: list[dict[str, Any]]) -> str:
+    """Phase-duration bar — proportional segments colored by phase.
+
+    Returns empty string when ``durations`` is empty or the total
+    duration is zero (avoids a divide-by-zero inside the per-segment
+    percentage computation).
+    """
+    if not durations:
+        return ""
+    total_secs = sum(d["duration_seconds"] for d in durations)
+    if total_secs <= 0:
+        return ""
+    segs = ""
+    for d in durations:
+        pct = max(1, (d["duration_seconds"] / total_secs) * 100)
+        color = _PHASE_COLORS.get(d["phase"], "#64748B")
+        label = d["phase"].replace("_", " ")
+        segs += (
+            f'<div style="width:{pct:.1f}%;background:{color};display:flex;'
+            f'align-items:center;justify-content:center;font-size:11.2px;'
+            f'color:white;font-weight:500;white-space:nowrap;overflow:hidden;'
+            f'padding:0 8px" title="{_e(label)}: {_fmt_dur(d["duration_seconds"])}">'
+            f'{_e(label)} {_fmt_dur(d["duration_seconds"])}</div>'
+        )
+    return (
+        f'<div style="display:flex;border-radius:4px;overflow:hidden;'
+        f'border:1px solid #E2E8F0;margin-bottom:20px;height:32px">{segs}</div>'
+    )
+
+
+def _render_failure_box(
+    entries: list[dict[str, Any]],
+    tree: dict[str, Any],
+    run_start_idx: int,
+) -> str:
+    """Error/failure box — only rendered when ``tree['errors']`` is non-empty."""
+    if not tree["errors"]:
+        return ""
+    diag = extract_diagnostic_info(entries, run_start_idx=run_start_idx)
+    hint = diag.get("hint", "")
+    err_items = ""
+    for err in tree["errors"]:
+        e = err["entry"]
+        err_items += (
+            f'<div style="margin-top:4px"><strong>{_e(e.get("error_type", "Error"))}</strong>'
+            f' <span class="meta">at {_e(e.get("timestamp", "")[:19])}</span>'
+            f'<div style="margin-left:12px;color:#334155">{_e(e.get("error_message", ""))}</div></div>'
+        )
+    hint_html = (
+        f'<div style="margin-bottom:6px"><strong>Hint:</strong> {_e(hint)}</div>'
+        if hint else ""
+    )
+    return (
+        f'<div style="margin-bottom:20px;padding:12px 16px;background:#FBE6F1;'
+        f'border:1px solid #F5C6CB;border-left:4px solid #DB2626;border-radius:8px">'
+        f'{hint_html}{err_items}</div>'
+    )
+
+
 def _render_detail(ticket_id: str) -> str:
     """Render the Langfuse-style trace detail view."""
     entries = read_trace(ticket_id)
@@ -461,95 +587,12 @@ def _render_detail(ticket_id: str) -> str:
         f'border-radius:8px;margin-bottom:20px">{"".join(summary_items)}</div>'
     )
 
-    # Copy-investigation-command disclosure — native <details>, zero JS. Reveals
-    # a ready-to-paste shell snippet the dev can select/copy to download the
-    # bundle and launch a local claude investigation. The command text is
-    # built from the canonical template in investigate_command.py so the
-    # dashboard and the /traces/{id}/discuss endpoint cannot drift.
-    investigate_cmd = build_investigate_command(ticket_id)
-    investigate_box = (
-        '<details style="margin-bottom:20px;padding:10px 14px;background:#F7F9FB;'
-        'border:1px solid #E2E8F0;border-radius:8px">'
-        '<summary style="cursor:pointer;font-weight:600;font-size:12px;color:#334155">'
-        'Investigate this trace locally (copy command)</summary>'
-        '<pre style="margin-top:10px;padding:10px 12px;background:#0F172A;color:#E2E8F0;'
-        'border-radius:6px;font-size:11.5px;line-height:1.55;white-space:pre-wrap;'
-        'word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">'
-        f'{_e(investigate_cmd)}</pre></details>'
-    )
-
-    # Audited "Discuss with Claude" disclosure — the /traces/<id>/discuss
-    # endpoint (commit 7) writes to discuss-audit.jsonl before returning a
-    # session token and the investigate command. The investigate_box above
-    # is the cheap no-auth path for local hacking; this one is the audited
-    # path and drives the capture_discuss_output.py helper (commit 9) that
-    # parses the skill's three output sections. Both boxes use <details> —
-    # zero JS — and the discuss_box sits directly below the investigate_box
-    # so the audited workflow is obvious but not intrusive.
-    discuss_cmd = (
-        "# Step 1: request a session token (writes to discuss-audit.jsonl)\n"
-        f"curl -sSf -X POST http://localhost:8000/traces/{ticket_id}/discuss \\\n"
-        "  -H 'X-API-Key: ...' | jq -r .investigate_command > /tmp/investigate.sh\n"
-        "\n"
-        "# Step 2: run the investigation\n"
-        "bash /tmp/investigate.sh\n"
-        "\n"
-        "# Step 3: when Claude's output has the three sections\n"
-        "# (## Root cause, ## Proposed fix, ## Memory entry):\n"
-        "python scripts/capture_discuss_output.py --transcript /tmp/transcript.md"
-    )
-    discuss_box = (
-        '<details style="margin-bottom:20px;padding:10px 14px;background:#F7F9FB;'
-        'border:1px solid #E2E8F0;border-radius:8px">'
-        '<summary style="cursor:pointer;font-weight:600;font-size:12px;color:#334155">'
-        '\U0001f50d Open in Claude for investigation</summary>'
-        '<pre style="margin-top:10px;padding:10px 12px;background:#0F172A;color:#E2E8F0;'
-        'border-radius:6px;font-size:11.5px;line-height:1.55;white-space:pre-wrap;'
-        'word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">'
-        f'{_e(discuss_cmd)}</pre></details>'
-    )
-
-    # Phase duration bar
-    dur_bar = ""
-    if durations:
-        total_secs = sum(d["duration_seconds"] for d in durations)
-        if total_secs > 0:
-            segs = ""
-            for d in durations:
-                pct = max(1, (d["duration_seconds"] / total_secs) * 100)
-                color = _PHASE_COLORS.get(d["phase"], "#64748B")
-                label = d["phase"].replace("_", " ")
-                segs += (
-                    f'<div style="width:{pct:.1f}%;background:{color};display:flex;'
-                    f'align-items:center;justify-content:center;font-size:11.2px;'
-                    f'color:white;font-weight:500;white-space:nowrap;overflow:hidden;'
-                    f'padding:0 8px" title="{_e(label)}: {_fmt_dur(d["duration_seconds"])}">'
-                    f'{_e(label)} {_fmt_dur(d["duration_seconds"])}</div>'
-                )
-            dur_bar = (
-                f'<div style="display:flex;border-radius:4px;overflow:hidden;'
-                f'border:1px solid #E2E8F0;margin-bottom:20px;height:32px">{segs}</div>'
-            )
-
-    # Error/failure box
-    failure_box = ""
-    if tree["errors"]:
-        diag = extract_diagnostic_info(entries, run_start_idx=run_start_idx)
-        hint = diag.get("hint", "")
-        err_items = ""
-        for err in tree["errors"]:
-            e = err["entry"]
-            err_items += (
-                f'<div style="margin-top:4px"><strong>{_e(e.get("error_type", "Error"))}</strong>'
-                f' <span class="meta">at {_e(e.get("timestamp", "")[:19])}</span>'
-                f'<div style="margin-left:12px;color:#334155">{_e(e.get("error_message", ""))}</div></div>'
-            )
-        hint_html = f'<div style="margin-bottom:6px"><strong>Hint:</strong> {_e(hint)}</div>' if hint else ""
-        failure_box = (
-            f'<div style="margin-bottom:20px;padding:12px 16px;background:#FBE6F1;'
-            f'border:1px solid #F5C6CB;border-left:4px solid #DB2626;border-radius:8px">'
-            f'{hint_html}{err_items}</div>'
-        )
+    # Section builders live at module scope for testability — see the
+    # header comment block above _render_investigate_box.
+    investigate_box = _render_investigate_box(ticket_id)
+    discuss_box = _render_discuss_box(ticket_id)
+    dur_bar = _render_duration_bar(durations)
+    failure_box = _render_failure_box(entries, tree, run_start_idx)
 
     # --- Span tree sections ---
     def _section(title: str, icon_type: str, color: str, nodes: list[dict[str, Any]], default_open: bool = True) -> str:

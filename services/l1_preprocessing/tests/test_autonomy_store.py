@@ -836,6 +836,66 @@ class TestInsertDefectLink:
         finally:
             conn.close()
 
+    def test_list_defect_links_for_profile_filters_before_limit(
+        self, db_path: Path
+    ) -> None:
+        """Bug regression: before the fix, list_defect_links_for_profile
+        applied LIMIT in SQL before any confirmed/category filter, so
+        the Python-side ``[r for r in rows if confirmed=1 and
+        category='escaped']`` in the dashboard could see an empty set
+        if more-recent non-escaped rows filled the SQL LIMIT window.
+        Fix pushes the filter into SQL via optional confirmed/category
+        kwargs. This test plants 3 non-escaped rows that would have
+        filled a LIMIT=2 plus 1 escaped row; the old code would have
+        returned 0 escaped rows — the new code must return 1."""
+        from autonomy_store import list_defect_links_for_profile
+
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr_id = _merged_pr(conn, client_profile="rockwell")
+            # Three most-recent non-escaped rows.
+            for i, ts in enumerate(
+                [
+                    "2026-04-05T00:00:00+00:00",
+                    "2026-04-04T00:00:00+00:00",
+                    "2026-04-03T00:00:00+00:00",
+                ]
+            ):
+                insert_defect_link(
+                    conn,
+                    pr_run_id=pr_id,
+                    defect_key=f"PRE-{i}",
+                    source="jira",
+                    reported_at=ts,
+                    category="pre_existing",
+                )
+            # One older escaped row.
+            insert_defect_link(
+                conn,
+                pr_run_id=pr_id,
+                defect_key="ESC-1",
+                source="jira",
+                reported_at="2026-04-01T00:00:00+00:00",
+                category="escaped",
+            )
+
+            # With the pre-fix behavior (no filter), the top-2 rows
+            # would both be pre_existing and the escaped row would be
+            # dropped. With the fix, SQL filters first and LIMIT=2
+            # still sees the escaped row.
+            rows = list_defect_links_for_profile(
+                conn,
+                "rockwell",
+                limit=2,
+                confirmed=1,
+                category="escaped",
+            )
+            assert len(rows) == 1
+            assert rows[0]["defect_key"] == "ESC-1"
+        finally:
+            conn.close()
+
 
 class TestListConfirmedEscapedDefects:
     def test_in_window_counts(self, db_path: Path) -> None:
