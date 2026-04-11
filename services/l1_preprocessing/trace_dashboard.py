@@ -625,12 +625,19 @@ def _render_detail(ticket_id: str) -> str:
         else ""
     )
 
+    # Session observability panels (commit 2 of post-mortem observability plan).
+    # Isolated in trace_dashboard_panels.py to avoid merge conflicts with
+    # commits 3 and 4 also modifying this file.
+    from trace_dashboard_panels import render_session_panels
+    session_html = render_session_panels(entries)
+
     return f"""<!DOCTYPE html><html><head>
 {refresh_meta}
 <title>Trace &mdash; {_e(ticket_id)}</title>
 <style>{_LANGFUSE_STYLES}</style>
 </head><body><div class="page">
 {breadcrumb}{title}{summary_bar}{dur_bar}{failure_box}
+{session_html}
 {l1_html}{l2_html}{l3_html}{raw_html}
 </div></body></html>"""
 
