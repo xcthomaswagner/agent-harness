@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import io
 import json
+import os
 import re
 import secrets
 import subprocess
@@ -37,6 +39,12 @@ from autonomy_store import ensure_schema, open_connection, resolve_db_path
 from client_profile import find_profile_by_ado_project
 from config import settings
 from diagnostic import run_diagnostic_checklist
+from investigate_command import (
+    DISCUSS_BASE_URL as _DISCUSS_BASE_URL,
+)
+from investigate_command import (
+    build_investigate_command as _build_investigate_command,
+)
 from models import TicketPayload
 from pipeline import Pipeline
 from redaction import redact
@@ -687,34 +695,32 @@ async def trace_bundle(ticket_id: str) -> Response:
 # local-only. Don't be clever about deriving it from the request host; that
 # breaks when ngrok forwards public traffic to loopback.
 
-_DISCUSS_BASE_URL = "http://localhost:8000"
 _DISCUSS_SESSION_TTL = timedelta(hours=1)
 _DISCUSS_AUDIT_FILENAME = "discuss-audit.jsonl"
 
-_INVESTIGATE_COMMAND_TEMPLATE = (
-    "mkdir -p /tmp/trace-{ticket_id} && \\\n"
-    "curl -sSf {base}/traces/{ticket_id}/bundle | "
-    "tar xz -C /tmp/trace-{ticket_id} && \\\n"
-    "cd /tmp/trace-{ticket_id} && \\\n"
-    "claude -p \"I'm investigating a failed agent run. Read all the files "
-    "in this directory. Start by reading diagnostic.json (if it exists) "
-    "and tool-index.json, then tell me what the first deviation point was. "
-    "Cite specific line numbers for every claim.\""
-)
+# Serializes writes to discuss-audit.jsonl across concurrent discuss
+# requests. Two callers interleaving their ``open("a") / write`` pair on
+# the same file would otherwise race — the append-mode open ensures each
+# ``write()`` lands at EOF, but a write without a trailing newline from
+# one caller could still be stitched onto another caller's JSON object.
+# The lock also keeps the blocking I/O explicitly off the event loop when
+# combined with ``asyncio.to_thread``.
+_discuss_audit_lock = asyncio.Lock()
 
 
-def _build_investigate_command(ticket_id: str, base_url: str = _DISCUSS_BASE_URL) -> str:
-    """Render the copy-paste shell snippet for a local post-mortem session.
+def _write_discuss_audit_line(entry: dict[str, Any]) -> None:
+    """Blocking helper: append one JSON line to discuss-audit.jsonl.
 
-    This is the same command the trace-dashboard investigate disclosure
-    renders — kept as a canonical template so the endpoint and the dashboard
-    cannot drift. A follow-up commit can swap ``trace_dashboard.py`` to
-    import this helper; today the dashboard still builds its own copy.
+    Called from inside ``asyncio.to_thread`` under ``_discuss_audit_lock``.
+    Kept tiny so the thread stays busy for the minimum time.
     """
-    return _INVESTIGATE_COMMAND_TEMPLATE.format(ticket_id=ticket_id, base=base_url)
+    audit_path = tracer.LOGS_DIR / _DISCUSS_AUDIT_FILENAME
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    with audit_path.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
 
 
-def _append_discuss_audit(
+async def _append_discuss_audit(
     ticket_id: str,
     session_token: str,
     source_ip: str,
@@ -726,6 +732,10 @@ def _append_discuss_audit(
     it serves as the cross-ticket "who investigated what and when" record.
     Created on first use. One line per endpoint invocation. Never rotated
     or truncated from here — operator can rotate manually if it grows.
+
+    Async so callers don't block the event loop on disk I/O: the actual
+    write runs in a worker thread, serialized by ``_discuss_audit_lock``
+    so concurrent discuss requests can't interleave partial JSON lines.
     """
     entry = {
         "timestamp": datetime.now(UTC).isoformat(),
@@ -734,10 +744,8 @@ def _append_discuss_audit(
         "source_ip": source_ip,
         "user_agent": user_agent,
     }
-    audit_path = tracer.LOGS_DIR / _DISCUSS_AUDIT_FILENAME
-    audit_path.parent.mkdir(parents=True, exist_ok=True)
-    with audit_path.open("a") as f:
-        f.write(json.dumps(entry) + "\n")
+    async with _discuss_audit_lock:
+        await asyncio.to_thread(_write_discuss_audit_line, entry)
 
 
 class DiscussResponse(BaseModel):
@@ -795,7 +803,7 @@ async def discuss_trace(ticket_id: str, request: Request) -> DiscussResponse:
 
     source_ip = request.client.host if request.client else ""
     user_agent = request.headers.get("user-agent", "")
-    _append_discuss_audit(
+    await _append_discuss_audit(
         ticket_id=ticket_id,
         session_token=session_token,
         source_ip=source_ip,
@@ -956,6 +964,7 @@ async def admin_re_redact() -> dict[str, int]:
             continue
 
         out_lines: list[str] = []
+        file_changed = False  # only rewrite the file if at least one line differed
         for line in raw.splitlines():
             if not line.strip():
                 out_lines.append(line)
@@ -971,6 +980,7 @@ async def admin_re_redact() -> dict[str, int]:
                 if n:
                     additional_patterns += n
                     entries_redacted += 1
+                    file_changed = True
                 out_lines.append(redacted_line)
                 continue
 
@@ -1001,15 +1011,32 @@ async def admin_re_redact() -> dict[str, int]:
 
             if changed:
                 entries_redacted += 1
+                file_changed = True
             out_lines.append(json.dumps(entry))
+
+        # Skip the write entirely when nothing changed. This closes a real
+        # data-loss window: if a live pipeline was appending to this file
+        # between our read_text() and write_text(), an unconditional rewrite
+        # silently clobbered the appended entries. A no-op rewrite has no
+        # reason to exist and no reason to take that risk.
+        if not file_changed:
+            continue
 
         new_text = "\n".join(out_lines)
         if raw.endswith("\n") and not new_text.endswith("\n"):
             new_text += "\n"
+        # Atomic replace: write a sibling temp file and os.replace() it over
+        # the original. A crash mid-write leaves the original intact instead
+        # of producing a truncated file.
+        tmp_file = trace_file.with_suffix(trace_file.suffix + ".re-redact.tmp")
         try:
-            trace_file.write_text(new_text)
+            tmp_file.write_text(new_text)
+            os.replace(tmp_file, trace_file)
         except OSError:
             logger.exception("re_redact_write_failed", trace_file=str(trace_file))
+            # Best-effort cleanup of the temp file on failure.
+            with contextlib.suppress(OSError):
+                tmp_file.unlink(missing_ok=True)
 
     if additional_patterns:
         logger.warning(

@@ -119,6 +119,45 @@ async def test_post_admin_re_redact_idempotent_when_patterns_unchanged(
     )
 
 
+async def test_post_admin_re_redact_skips_write_when_nothing_changed(
+    trace_dir: Path, client: AsyncClient,
+) -> None:
+    """Bug 1 regression guard: an unchanged file must NOT be rewritten by
+    the endpoint. The previous implementation unconditionally called
+    ``write_text`` on every file, which (a) bumped mtimes, (b) opened a
+    data-loss window where concurrent appends from tracer.append_trace
+    could be clobbered between ``read_text`` and ``write_text``.
+
+    This test seeds a clean trace, captures its mtime + bytes, runs the
+    endpoint, and asserts both are identical afterward.
+    """
+    with patch("tracer.LOGS_DIR", trace_dir):
+        append_trace(
+            "RR-CLEAN", "t0", "artifact", ARTIFACT_CODE_REVIEW,
+            content="# Clean review\nLooks good.\n",
+        )
+        trace_file = trace_dir / "RR-CLEAN.jsonl"
+        before_bytes = trace_file.read_bytes()
+        before_mtime_ns = trace_file.stat().st_mtime_ns
+
+        resp = await client.post("/admin/re-redact")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["traces_processed"] == 1
+    assert body["entries_redacted"] == 0
+    assert body["additional_patterns_found"] == 0
+
+    after_bytes = trace_file.read_bytes()
+    after_mtime_ns = trace_file.stat().st_mtime_ns
+    assert after_bytes == before_bytes, (
+        "clean trace must be byte-identical after re-redact"
+    )
+    assert after_mtime_ns == before_mtime_ns, (
+        "clean trace mtime must not change — no-write shortcut is the bug-1 fix"
+    )
+
+
 async def test_post_admin_re_redact_covers_non_content_fields(
     trace_dir: Path, client: AsyncClient,
 ) -> None:
@@ -353,3 +392,46 @@ async def test_discuss_audit_captures_source_ip_and_user_agent(
     # ASGITransport reports a client host — just assert it's a string and
     # was captured (any non-None value from request.client.host is fine).
     assert isinstance(entry["source_ip"], str)
+
+
+# --- Concurrent discuss audit writes --------------------------------------
+#
+# Regression guard for the audit-log race fix. Before the fix,
+# ``_append_discuss_audit`` called blocking ``open("a")`` directly on the
+# event loop, so two in-flight discuss requests could interleave their
+# writes. Now the handler awaits ``asyncio.to_thread`` under a module-level
+# ``asyncio.Lock``. This test fires many discuss calls concurrently and
+# asserts every line is well-formed JSON with the expected ticket_id — an
+# interleaved write would produce malformed JSON (two half-entries on one
+# physical line) and fail ``json.loads``.
+
+
+async def test_discuss_audit_log_handles_concurrent_writes(
+    trace_dir: Path, client: AsyncClient,
+) -> None:
+    """Concurrent discuss calls must each land as a complete JSON line."""
+    import asyncio
+
+    with patch("tracer.LOGS_DIR", trace_dir):
+        _seed_minimal_trace("DISC-CONC")
+        # Fire 20 discuss calls concurrently against the same trace. The
+        # handler serializes the audit-log write via asyncio.Lock + to_thread.
+        responses = await asyncio.gather(
+            *[client.post("/traces/DISC-CONC/discuss") for _ in range(20)],
+        )
+
+    assert all(r.status_code == 200 for r in responses)
+
+    audit_file = trace_dir / "discuss-audit.jsonl"
+    lines = audit_file.read_text().splitlines()
+    assert len(lines) == 20
+
+    tokens = set()
+    for line in lines:
+        # Malformed interleaving would crash here.
+        entry = json.loads(line)
+        assert entry["ticket_id"] == "DISC-CONC"
+        tokens.add(entry["session_token"])
+
+    # Each call must have minted a unique token.
+    assert len(tokens) == 20

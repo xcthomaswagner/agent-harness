@@ -447,6 +447,29 @@ def test_idempotent_entropy_flag() -> None:
     assert n == 0
 
 
+def test_idempotent_json_field_wrapping_entropy_placeholder() -> None:
+    # Bug 2 regression guard: a JSON field (access_token / password /
+    # api_key) that first gets flagged by the entropy pass — so the value
+    # becomes e.g. ``[FLAGGED_ENTROPY_44_REDACTED]`` — must NOT be re-flagged
+    # by the line pass on a second run. Previously the negative lookahead
+    # only matched ``[REDACTED]`` literally, so a value wrapping an entropy
+    # placeholder looked like an unredacted field and got re-redacted,
+    # breaking the ``/admin/re-redact`` idempotency canary.
+    novel_blob = "aB3xYz0QRS7tUvWxYzAbCdEfGhIjKlMnOpQrStUvWxYz"
+    # ``password`` is the cleanest case: no line pattern catches it, so
+    # only the entropy pass fires on the first run. This forces the second
+    # run to rely purely on the updated negative lookahead.
+    text = f'{{"password": "{novel_blob}"}}'
+    first, first_n = redact(text)
+    assert first_n >= 1
+    assert "REDACTED" in first
+    second, second_n = redact(first)
+    assert second == first, (
+        "JSON field wrapping an entropy placeholder must be a fixed point"
+    )
+    assert second_n == 0
+
+
 def test_idempotent_across_multiple_pattern_types() -> None:
     text = (
         "key=sk-ant-" + "A" * 40 + "\n"

@@ -16,6 +16,7 @@ from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
 from diagnostic import render_diagnostic_checklist, run_diagnostic_checklist
+from investigate_command import build_investigate_command
 from tracer import (
     build_span_tree,
     build_trace_list_row,
@@ -504,17 +505,10 @@ def _render_detail(ticket_id: str) -> str:
 
     # Copy-investigation-command disclosure — native <details>, zero JS. Reveals
     # a ready-to-paste shell snippet the dev can select/copy to download the
-    # bundle and launch a local claude investigation.
-    investigate_cmd = (
-        f"mkdir -p /tmp/trace-{ticket_id} && \\\n"
-        f"curl -sSf http://localhost:8000/traces/{ticket_id}/bundle | "
-        f"tar xz -C /tmp/trace-{ticket_id} && \\\n"
-        f"cd /tmp/trace-{ticket_id} && \\\n"
-        f"claude -p \"I'm investigating a failed agent run. Read all the files "
-        f"in this directory. Start by reading diagnostic.json (if it exists) "
-        f"and tool-index.json, then tell me what the first deviation point was. "
-        f"Cite specific line numbers for every claim.\""
-    )
+    # bundle and launch a local claude investigation. The command text is
+    # built from the canonical template in investigate_command.py so the
+    # dashboard and the /traces/{id}/discuss endpoint cannot drift.
+    investigate_cmd = build_investigate_command(ticket_id)
     investigate_box = (
         '<details style="margin-bottom:20px;padding:10px 14px;background:#F7F9FB;'
         'border:1px solid #E2E8F0;border-radius:8px">'

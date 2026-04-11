@@ -142,11 +142,16 @@ _LINE_PATTERNS: list[_LinePattern] = [
     ),
     # JSON ``"access_token"`` / ``"accessToken"`` / ``"AccessToken"`` fields.
     # Case-insensitive so PascalCase (.NET / Azure) payloads are covered.
-    # The negative lookahead on ``[REDACTED]`` keeps the pattern idempotent
-    # when rerun over already-redacted content.
+    # The negative lookahead matches any value whose contents already include
+    # ``REDACTED`` anywhere. This keeps the pattern idempotent across ALL
+    # placeholder shapes the redactor ever emits — the literal ``[REDACTED]``,
+    # the block placeholders like ``[JWT_REDACTED]``, and entropy-pass
+    # placeholders like ``[FLAGGED_ENTROPY_40_REDACTED]``. A narrower
+    # lookahead would silently violate idempotency when a field was first
+    # redacted by the entropy pass and later re-scanned by the line pass.
     _LinePattern(
         re.compile(
-            r'"access_?token"\s*:\s*"(?!\[REDACTED\]")[^"]+"',
+            r'"access_?token"\s*:\s*"(?![^"]*REDACTED[^"]*")[^"]+"',
             re.IGNORECASE,
         ),
         '"access_token":"[REDACTED]"',
@@ -154,7 +159,7 @@ _LINE_PATTERNS: list[_LinePattern] = [
     # JSON ``"password"`` fields, case-insensitive.
     _LinePattern(
         re.compile(
-            r'"password"\s*:\s*"(?!\[REDACTED\]")[^"]+"',
+            r'"password"\s*:\s*"(?![^"]*REDACTED[^"]*")[^"]+"',
             re.IGNORECASE,
         ),
         '"password":"[REDACTED]"',
@@ -163,7 +168,7 @@ _LINE_PATTERNS: list[_LinePattern] = [
     # case-insensitive.
     _LinePattern(
         re.compile(
-            r'"api_?key"\s*:\s*"(?!\[REDACTED\]")[^"]+"',
+            r'"api_?key"\s*:\s*"(?![^"]*REDACTED[^"]*")[^"]+"',
             re.IGNORECASE,
         ),
         '"api_key":"[REDACTED]"',
