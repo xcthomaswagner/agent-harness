@@ -674,3 +674,21 @@ class TestDownloadImageAttachments:
         assert result[0].local_path != ""  # PNG downloaded
         assert result[1].local_path == ""  # PDF skipped
         assert result[2].local_path != ""  # JPEG downloaded
+
+
+def test_jira_adapter_satisfies_ticket_writeback_protocol(
+    settings: Settings,
+) -> None:
+    """Protocol regression: JiraAdapter must conform to
+    TicketWriteBackAdapter so pipeline._get_adapter's return type
+    stays honest. The @runtime_checkable protocol lets us verify this
+    with isinstance without touching the adapter class definition."""
+    from adapters.base import TicketWriteBackAdapter
+
+    adapter = JiraAdapter(settings=settings)
+    assert isinstance(adapter, TicketWriteBackAdapter)
+    # And the three required methods are async coroutines.
+    import inspect
+    assert inspect.iscoroutinefunction(adapter.write_comment)
+    assert inspect.iscoroutinefunction(adapter.transition_status)
+    assert inspect.iscoroutinefunction(adapter.add_label)

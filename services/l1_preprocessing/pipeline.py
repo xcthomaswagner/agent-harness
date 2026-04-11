@@ -18,6 +18,7 @@ from typing import Any
 import structlog
 
 from adapters.ado_adapter import AdoAdapter
+from adapters.base import TicketWriteBackAdapter
 from adapters.jira_adapter import JiraAdapter
 from analyst import TicketAnalyst
 from client_profile import ClientProfile, find_profile_by_project_key, load_profile
@@ -77,10 +78,15 @@ class Pipeline:
 
     def _get_adapter(
         self, ticket: EnrichedTicket | InfoRequest | DecompositionPlan
-    ) -> JiraAdapter | AdoAdapter:
+    ) -> TicketWriteBackAdapter:
         """Return the appropriate adapter for write-back operations.
 
-        Routes to JiraAdapter or AdoAdapter based on ticket.source.
+        Routes to JiraAdapter or AdoAdapter based on ticket.source. The
+        return type is the structural ``TicketWriteBackAdapter``
+        protocol (see ``adapters/base.py``) — callers should only
+        depend on ``write_comment`` / ``transition_status`` /
+        ``add_label``. Adding a new ticket source is a matter of
+        implementing those three methods.
         """
         if ticket.source == TicketSource.ADO:
             return self._ado_adapter
@@ -254,12 +260,19 @@ class Pipeline:
         await self._extract_figma_if_needed(enriched, log, temp_dirs)
         self._resolve_platform_profile(enriched, profile, log)
 
-        done_status = profile.done_status if profile else "Done"
         in_progress_status = profile.in_progress_status if profile else "In Progress"
 
         if enriched.callback:
+            # Always transition to the profile's in_progress_status when
+            # L1 starts work — the profile's ``done_status`` is reserved
+            # for "pipeline complete / PR created" and must never be set
+            # at ingest time (the schema comment is explicit about this).
+            # An older version had ``target_status = in_progress_status
+            # if done_status == "Done" else done_status`` which silently
+            # marked tickets Done at ingest for any profile whose
+            # done_status was customized away from the literal "Done".
+            target_status = in_progress_status
             try:
-                target_status = in_progress_status if done_status == "Done" else done_status
                 await adapter.transition_status(enriched.id, target_status)
                 log.info("ticket_transitioned", target=target_status)
             except Exception as exc:
@@ -316,6 +329,40 @@ class Pipeline:
             "figma_extracted": enriched.figma_design_spec is not None,
         }
 
+    async def _safe_adapter_writeback(
+        self,
+        adapter: TicketWriteBackAdapter,
+        ticket_id: str,
+        log: Any,
+        *,
+        op_name: str,
+        comment: str | None = None,
+        transition: str | None = None,
+        label: str | None = None,
+    ) -> bool:
+        """Post a comment / transition status / add a label on a ticket, swallowing errors.
+
+        Shared between ``_handle_info_request`` and ``_handle_decomposition``
+        (which used to copy-paste the same try/except with the same
+        ``error=str(exc)[:200]`` truncation). Each optional step is
+        performed in the order ``comment → transition → label`` when
+        provided. On success logs ``<op_name>_written``; on any
+        exception logs ``<op_name>_failed`` with the truncated error
+        and returns False so callers can branch if needed.
+        """
+        try:
+            if comment is not None:
+                await adapter.write_comment(ticket_id, comment)
+            if transition is not None:
+                await adapter.transition_status(ticket_id, transition)
+            if label is not None:
+                await adapter.add_label(ticket_id, label)
+            log.info(f"{op_name}_written")
+            return True
+        except Exception as exc:
+            log.warning(f"{op_name}_failed", error=str(exc)[:200])
+            return False
+
     async def _handle_info_request(
         self, info_req: InfoRequest, log: Any
     ) -> dict[str, Any]:
@@ -327,15 +374,14 @@ class Pipeline:
         )
 
         if info_req.callback:
-            adapter = self._get_adapter(info_req)
-            try:
-                await adapter.write_comment(info_req.ticket_id, comment)
-                await adapter.transition_status(
-                    info_req.ticket_id, "Needs Clarification"
-                )
-                log.info("info_request_posted")
-            except Exception as exc:
-                log.warning("info_request_write_failed", error=str(exc)[:200])
+            await self._safe_adapter_writeback(
+                self._get_adapter(info_req),
+                info_req.ticket_id,
+                log,
+                op_name="info_request",
+                comment=comment,
+                transition="Needs Clarification",
+            )
 
         return {
             "status": "info_request",
@@ -359,13 +405,14 @@ class Pipeline:
         )
 
         if decomp.callback:
-            adapter = self._get_adapter(decomp)
-            try:
-                await adapter.write_comment(decomp.ticket_id, comment)
-                await adapter.add_label(decomp.ticket_id, "needs-splitting")
-                log.info("decomposition_flagged")
-            except Exception as exc:
-                log.warning("decomposition_write_failed", error=str(exc)[:200])
+            await self._safe_adapter_writeback(
+                self._get_adapter(decomp),
+                decomp.ticket_id,
+                log,
+                op_name="decomposition",
+                comment=comment,
+                label="needs-splitting",
+            )
 
         return {
             "status": "decomposition",

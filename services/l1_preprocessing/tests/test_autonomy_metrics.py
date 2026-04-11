@@ -491,6 +491,67 @@ def test_ticket_type_breakdown_groups_correctly(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_ticket_type_breakdown_excludes_backfilled_from_fpa(
+    tmp_path: Path,
+) -> None:
+    """Bug regression: compute_ticket_type_breakdown used to compute
+    FPA over the full row group, including backfilled rows whose
+    ``first_pass_accepted`` defaults to 0. That gave the by-type
+    dashboard a systematically lower FPA than compute_profile_metrics
+    (which explicitly filters backfilled rows), so the overall panel
+    and the by-type panel could disagree on the same data. Fixed by
+    filtering live rows in compute_ticket_type_breakdown the same way.
+
+    This test seeds one live ``bug`` PR with first_pass_accepted=1
+    alongside five backfilled ``bug`` PRs, and asserts that the
+    by-type FPA matches the overall FPA (1.0) — not 1/6=0.167.
+    """
+    conn = _mk_conn(tmp_path / "a.db")
+    try:
+        # 1 live bug PR, accepted first-pass.
+        upsert_pr_run(conn, PrRunUpsert(
+            ticket_id="RW-LIVE",
+            pr_number=1,
+            repo_full_name="acme/widgets",
+            head_sha="live-sha",
+            client_profile="rockwell",
+            ticket_type="bug",
+            opened_at="2026-04-01T12:00:00+00:00",
+            first_pass_accepted=1,
+            merged=1,
+            merged_at="2026-04-01T13:00:00+00:00",
+        ))
+        # 5 backfilled bug PRs — first_pass_accepted defaults to 0.
+        for i in range(5):
+            upsert_pr_run(conn, PrRunUpsert(
+                ticket_id=f"RW-BF-{i}",
+                pr_number=100 + i,
+                repo_full_name="acme/widgets",
+                head_sha=f"bf{i}",
+                client_profile="rockwell",
+                ticket_type="bug",
+                opened_at="2026-04-01T12:00:00+00:00",
+                backfilled=1,
+            ))
+
+        # Both the overall panel and the by-type panel must agree.
+        overall = compute_profile_metrics(conn, "rockwell", 30)
+        assert overall["first_pass_acceptance_rate"] == 1.0
+
+        by_type_rows = compute_ticket_type_breakdown(conn, "rockwell", 30)
+        bug_row = next(r for r in by_type_rows if r["ticket_type"] == "bug")
+        assert bug_row["first_pass_acceptance_rate"] == 1.0, (
+            "by-type FPA must exclude backfilled rows — same as the "
+            "overall panel"
+        )
+        # Sample size in the by-type row reflects live rows only
+        # (so it matches the FPA denominator). Before the fix it
+        # would have been 6.
+        assert bug_row["sample_size"] == 1
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Chunking helper (Task 5)
 # ---------------------------------------------------------------------------

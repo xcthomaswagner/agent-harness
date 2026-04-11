@@ -250,3 +250,19 @@ class TestWriteBack:
         patch_ops = mock_client.patch.call_args[1]["json"]
         # Should append to existing tags
         assert "existing-tag; needs-splitting" in str(patch_ops)
+
+
+def test_ado_adapter_satisfies_ticket_writeback_protocol(
+    settings: Settings,
+) -> None:
+    """Protocol regression: AdoAdapter must conform to
+    TicketWriteBackAdapter so pipeline._get_adapter's return type
+    stays honest."""
+    from adapters.base import TicketWriteBackAdapter
+
+    adapter = AdoAdapter(settings=settings)
+    assert isinstance(adapter, TicketWriteBackAdapter)
+    import inspect
+    assert inspect.iscoroutinefunction(adapter.write_comment)
+    assert inspect.iscoroutinefunction(adapter.transition_status)
+    assert inspect.iscoroutinefunction(adapter.add_label)

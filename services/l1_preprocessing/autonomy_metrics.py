@@ -296,8 +296,17 @@ def compute_ticket_type_breakdown(
 
     out: list[dict[str, Any]] = []
     for ticket_type, group in sorted(by_type.items()):
-        sample = len(group)
-        fp = sum(1 for g in group if int(g["first_pass_accepted"]) == 1)
+        # Exclude backfilled rows from FPA — same rationale as
+        # compute_profile_metrics: backfilled ``first_pass_accepted``
+        # is unknown (defaults to 0), not a confirmed failure, so
+        # counting them would systematically bias the by-type
+        # dashboard toward conservative mode. Before this filter the
+        # overall FPA panel and the by-type panel could show
+        # contradictory numbers for any profile with backfilled
+        # history.
+        live_group = [g for g in group if not int(g["backfilled"])]
+        sample = len(live_group)
+        fp = sum(1 for g in live_group if int(g["first_pass_accepted"]) == 1)
         merged_with_at = [
             int(g["id"]) for g in group
             if int(g["merged"]) == 1 and g["merged_at"]

@@ -401,6 +401,131 @@ class TestRouteEnriched:
         )
 
 
+class TestEnrichedTransitionStatus:
+    """Bug regression: _handle_enriched used to compute ``target_status =
+    in_progress_status if done_status == "Done" else done_status``, which
+    silently marked tickets as Done at ingest for any profile whose
+    done_status was customized away from the literal string ``"Done"``.
+    The schema comment says done_status is "Status set on PR creation"
+    so it should never be the ingest-time transition target. Fixed by
+    always using in_progress_status."""
+
+    async def test_enriched_transitions_to_in_progress_status_default(
+        self,
+        pipeline: Pipeline,
+        mock_analyst: AsyncMock,
+        mock_jira: AsyncMock,
+        sample_ticket: TicketPayload,
+    ) -> None:
+        """With the default profile (done_status="Done",
+        in_progress_status="In Progress"), ingest must transition to
+        "In Progress"."""
+        enriched = EnrichedTicket(
+            **sample_ticket.model_dump(),
+            generated_acceptance_criteria=["AC"],
+            size_assessment=SizeAssessment(
+                classification=SizeClassification.SMALL,
+                estimated_units=1,
+                recommended_dev_count=1,
+            ),
+        )
+        mock_analyst.analyze.return_value = enriched
+
+        with patch("pipeline.Pipeline._load_client_profile", return_value=None):
+            await pipeline.process(sample_ticket)
+
+        mock_jira.transition_status.assert_called_once_with(
+            sample_ticket.id, "In Progress"
+        )
+
+    async def test_enriched_transitions_to_custom_in_progress_status(
+        self,
+        pipeline: Pipeline,
+        mock_analyst: AsyncMock,
+        mock_jira: AsyncMock,
+        sample_ticket: TicketPayload,
+    ) -> None:
+        """xcsf30-style profile: ADO Agile uses ``Active`` for in-progress
+        and ``Done`` for pipeline complete. Ingest must transition to
+        ``Active``, not ``Done``."""
+        from types import SimpleNamespace
+
+        fake_profile = SimpleNamespace(
+            name="xcsf30",
+            done_status="Done",
+            in_progress_status="Active",
+            quick_label="ai-quick",
+            client_repo_path="",
+            platform_profile="",
+        )
+        enriched = EnrichedTicket(
+            **sample_ticket.model_dump(),
+            generated_acceptance_criteria=["AC"],
+            size_assessment=SizeAssessment(
+                classification=SizeClassification.SMALL,
+                estimated_units=1,
+                recommended_dev_count=1,
+            ),
+        )
+        mock_analyst.analyze.return_value = enriched
+
+        with patch(
+            "pipeline.Pipeline._load_client_profile", return_value=fake_profile
+        ):
+            await pipeline.process(sample_ticket)
+
+        mock_jira.transition_status.assert_called_once_with(
+            sample_ticket.id, "Active"
+        )
+
+    async def test_enriched_never_transitions_to_done_status(
+        self,
+        pipeline: Pipeline,
+        mock_analyst: AsyncMock,
+        mock_jira: AsyncMock,
+        sample_ticket: TicketPayload,
+    ) -> None:
+        """Bug regression: profile with done_status="Resolved" used to
+        trigger ``target_status = "Resolved"`` because the old
+        conditional was ``in_progress_status if done_status == "Done"
+        else done_status`` — closing the ticket before L2 even ran.
+        After the fix, in_progress_status wins unconditionally and the
+        ticket can never be transitioned to done_status at ingest."""
+        from types import SimpleNamespace
+
+        fake_profile = SimpleNamespace(
+            name="custom-workflow",
+            done_status="Resolved",  # not "Done"
+            in_progress_status="In Progress",
+            quick_label="ai-quick",
+            client_repo_path="",
+            platform_profile="",
+        )
+        enriched = EnrichedTicket(
+            **sample_ticket.model_dump(),
+            generated_acceptance_criteria=["AC"],
+            size_assessment=SizeAssessment(
+                classification=SizeClassification.SMALL,
+                estimated_units=1,
+                recommended_dev_count=1,
+            ),
+        )
+        mock_analyst.analyze.return_value = enriched
+
+        with patch(
+            "pipeline.Pipeline._load_client_profile", return_value=fake_profile
+        ):
+            await pipeline.process(sample_ticket)
+
+        # Critical assertion: the ticket must NOT be transitioned to
+        # the done_status at ingest.
+        target = mock_jira.transition_status.call_args[0][1]
+        assert target != "Resolved", (
+            f"Ingest must not transition to done_status ({target!r})"
+        )
+        assert target == "In Progress"
+
+
 # --- Route: Info Request ---
 
 
