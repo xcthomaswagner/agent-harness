@@ -154,9 +154,14 @@ async def test_bundle_contents_have_expected_files(
         assert "tool_calls" in idx
 
 
-async def test_bundle_readme_contains_redaction_warning(
+async def test_bundle_readme_contains_redaction_block(
     trace_dir: Path, client: AsyncClient,
 ) -> None:
+    """A clean trace (no secrets) produces a ``REDACTED (0 patterns)`` block.
+
+    Replaces the old ``NOT REDACTED`` warning — commit 6 wires the redactor
+    into the bundle pipeline so every bundle reports its redaction count.
+    """
     _seed_trace(trace_dir, "BUN-3")
     with patch("tracer.LOGS_DIR", trace_dir):
         resp = await client.get("/traces/BUN-3/bundle")
@@ -167,8 +172,11 @@ async def test_bundle_readme_contains_redaction_warning(
         readme = tar.extractfile("readme.txt")
         assert readme is not None
         text = readme.read().decode()
-    assert "NOT REDACTED" in text
-    assert "commit 6" in text
+    assert "REDACTED (0 patterns)" in text
+    assert "NOT REDACTED" not in text, (
+        "the old `NOT REDACTED` warning block must be gone now that the "
+        "redactor runs on every bundle"
+    )
     assert "BUN-3" in text
 
 
@@ -389,4 +397,183 @@ async def test_bundle_ticket_json_fallback_uses_real_field_names(
     # Negative assertion — the old broken field name must not appear.
     assert "ticket_title" not in payload, (
         "`ticket_title` is not a TicketPayload field — remove it"
+    )
+
+
+# --- Commit 6: redact-on-bundle-export ---
+
+
+_SECRET = "sk-ant-api03-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+
+
+async def test_bundle_redacts_pipeline_jsonl(
+    trace_dir: Path, client: AsyncClient,
+) -> None:
+    """A pipeline event containing a secret must be redacted in the bundle's
+    pipeline.jsonl. Covers the case where a secret lives in a non-content
+    field the consolidation redactor doesn't touch — the bundle pass catches
+    it because pipeline.jsonl is serialized as text and passed through
+    redact() before being tarred.
+    """
+    ticket_id = "REDBUN-1"
+    with patch("tracer.LOGS_DIR", trace_dir):
+        append_trace(
+            ticket_id, "t0", "pipeline", "processing_started",
+            ticket_type="story", source="jira",
+            # Secret stashed in a non-content field. Consolidation redaction
+            # targets `content` fields; the bundle pass is what catches this.
+            debug_payload=f"token={_SECRET}",
+        )
+        resp = await client.get(f"/traces/{ticket_id}/bundle")
+    assert resp.status_code == 200
+
+    buf = io.BytesIO(resp.content)
+    with tarfile.open(fileobj=buf, mode="r:gz") as tar:
+        pipeline = tar.extractfile("pipeline.jsonl")
+        assert pipeline is not None
+        body = pipeline.read().decode()
+
+    assert _SECRET not in body
+    assert "sk-ant-[REDACTED]" in body
+
+
+async def test_bundle_redacts_session_stream(
+    trace_dir: Path, client: AsyncClient,
+) -> None:
+    """The on-disk session-stream file stays raw, but the bundle copy must
+    be redacted — this is the only place the stream actually gets redacted.
+    """
+    stream = trace_dir / "session-stream.jsonl"
+    stream.write_text(
+        json.dumps({"type": "system", "subtype": "init", "mcp_servers": []})
+        + "\n"
+        + json.dumps({"type": "assistant", "text": f"key={_SECRET}"})
+        + "\n",
+    )
+    _seed_trace(trace_dir, "REDBUN-2", stream_path=stream)
+
+    with patch("tracer.LOGS_DIR", trace_dir):
+        resp = await client.get("/traces/REDBUN-2/bundle")
+    assert resp.status_code == 200
+
+    buf = io.BytesIO(resp.content)
+    with tarfile.open(fileobj=buf, mode="r:gz") as tar:
+        stream_member = tar.extractfile("session-stream.jsonl")
+        assert stream_member is not None
+        body = stream_member.read().decode()
+
+    assert _SECRET not in body, "bundled stream must be redacted"
+    assert "sk-ant-[REDACTED]" in body
+    # And the on-disk file is still the raw version — this is the forensic
+    # escape hatch the bundle deliberately preserves.
+    assert _SECRET in stream.read_text(), (
+        "on-disk stream must remain raw for local forensic access"
+    )
+
+
+async def test_bundle_readme_reports_redaction_count(
+    trace_dir: Path, client: AsyncClient,
+) -> None:
+    """When the bundle redacts ≥1 pattern, the readme must say so with a count.
+
+    We seed several secrets across multiple files so the counter increments
+    beyond 1 and we can assert the exact number in the readme text.
+    """
+    ticket_id = "REDBUN-3"
+    with patch("tracer.LOGS_DIR", trace_dir):
+        append_trace(ticket_id, "t0", "artifact", ARTIFACT_CODE_REVIEW,
+                     content=f"# Review\nfound {_SECRET}\n")
+        append_trace(ticket_id, "t0", "artifact", ARTIFACT_QA_MATRIX,
+                     content=f"# QA\nused {_SECRET}\n")
+        resp = await client.get(f"/traces/{ticket_id}/bundle")
+    assert resp.status_code == 200
+
+    buf = io.BytesIO(resp.content)
+    with tarfile.open(fileobj=buf, mode="r:gz") as tar:
+        readme = tar.extractfile("readme.txt")
+        assert readme is not None
+        text = readme.read().decode()
+
+    # Both content fields were already redacted at `append_trace` time? No —
+    # append_trace does not redact; only consolidate_worktree_logs does. So
+    # the trace store entries contain raw secrets, and the bundle pass is
+    # what catches them. Count should be ≥ 2 (one per seeded content field).
+    # The exact count also includes the pipeline.jsonl serialization pass.
+    assert "patterns were redacted" not in text, (
+        "the new readme uses the 'REDACTED (N patterns)' shape, not the "
+        "'N patterns were redacted' shape — update the assertion if you "
+        "change the template"
+    )
+    # The REDACTED block includes '(N patterns)'. Extract the number.
+    import re as _re
+    match = _re.search(r"REDACTED \((\d+) patterns\)", text)
+    assert match is not None, f"no REDACTED block in readme: {text[:200]}"
+    count = int(match.group(1))
+    assert count >= 2, (
+        f"expected ≥2 patterns redacted across two seeded secrets, got {count}"
+    )
+
+
+async def test_bundle_readme_warning_flips_from_not_redacted_to_redacted(
+    trace_dir: Path, client: AsyncClient,
+) -> None:
+    """When the bundle contains secrets, the readme must use the
+    'REDACTED (N patterns)' block, not the zero-count block. This guards
+    against the template regressing back to a static warning that doesn't
+    reflect what actually happened to the bundle.
+    """
+    ticket_id = "REDBUN-4"
+    with patch("tracer.LOGS_DIR", trace_dir):
+        append_trace(ticket_id, "t0", "artifact", ARTIFACT_CODE_REVIEW,
+                     content=f"# Review\n{_SECRET}\n")
+        resp = await client.get(f"/traces/{ticket_id}/bundle")
+    assert resp.status_code == 200
+
+    buf = io.BytesIO(resp.content)
+    with tarfile.open(fileobj=buf, mode="r:gz") as tar:
+        readme = tar.extractfile("readme.txt")
+        assert readme is not None
+        text = readme.read().decode()
+
+    # Positive: the non-zero block mentions "idempotent" and the count.
+    assert "idempotent" in text, (
+        "the non-zero redaction block must mention the idempotency guarantee"
+    )
+    # Negative: the zero-count block's distinguishing phrase must be absent.
+    assert "flagged no token patterns" not in text, (
+        "with seeded secrets the readme must NOT use the clean-bundle block"
+    )
+    # And the count in parentheses must be > 0.
+    import re as _re
+    match = _re.search(r"REDACTED \((\d+) patterns\)", text)
+    assert match is not None
+    assert int(match.group(1)) > 0
+
+
+async def test_bundle_session_log_already_redacted_idempotent(
+    trace_dir: Path, client: AsyncClient,
+) -> None:
+    """If the trace store's session_log content is already redacted (as
+    consolidation leaves it), the bundle's second redaction pass is a no-op:
+    the extracted bundled file equals the stored content byte-for-byte.
+    """
+    ticket_id = "REDBUN-5"
+    # Pre-redacted content — simulates what consolidation leaves behind.
+    already_clean = "[bootstrap] loading secret sk-ant-[REDACTED]\n[run] done\n"
+
+    with patch("tracer.LOGS_DIR", trace_dir):
+        append_trace(ticket_id, "t0", "artifact", ARTIFACT_SESSION_LOG,
+                     content=already_clean)
+        resp = await client.get(f"/traces/{ticket_id}/bundle")
+    assert resp.status_code == 200
+
+    buf = io.BytesIO(resp.content)
+    with tarfile.open(fileobj=buf, mode="r:gz") as tar:
+        member = tar.extractfile("session.log")
+        assert member is not None
+        body = member.read().decode()
+
+    assert body == already_clean, (
+        "redactor is supposed to be idempotent — a second pass on already-"
+        "clean content must return it byte-for-byte"
     )

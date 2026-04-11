@@ -24,6 +24,7 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from shared.env_sanitize import sanitized_env
 
+import tracer
 from adapters.ado_adapter import AdoAdapter
 from adapters.jira_adapter import JiraAdapter
 from autonomy_dashboard import router as autonomy_dashboard_router
@@ -36,8 +37,10 @@ from config import settings
 from diagnostic import run_diagnostic_checklist
 from models import TicketPayload
 from pipeline import Pipeline
+from redaction import redact
 from trace_dashboard import router as trace_router
 from tracer import (
+    _REDACT_IMPORTED_FIELDS,
     ARTIFACT_CODE_REVIEW,
     ARTIFACT_EFFECTIVE_CLAUDE_MD,
     ARTIFACT_QA_MATRIX,
@@ -345,11 +348,13 @@ async def webhook_stats() -> dict[str, object]:
 # `claude -p` investigation against. `/artifact/<type>` serves one file at a
 # time — used by the dashboard Raw Downloads panel.
 #
-# WARNING: the bundle is NOT secret-redacted in this build. Redaction lands
-# in commit 6 (wires `redact_stream` into `consolidate_worktree_logs`). Until
-# then the bundle is for local-only use. A warning notice is baked into every
-# bundle's `readme.txt` so a dev who hands a bundle to a peer knows to redact
-# it first.
+# Every file written into the bundle is passed through ``redact()`` before
+# being tarred. The trace store itself is already redacted at consolidation
+# time by ``consolidate_worktree_logs``, so most files get a belt-and-
+# suspenders second pass (a no-op thanks to the redactor's idempotency
+# guarantee). The one exception is ``session-stream.jsonl`` — stored by
+# reference, redacted for the first time here. The readme.txt reports the
+# total redaction count from the bundle pass.
 
 
 def _validate_ticket_id(ticket_id: str) -> str:
@@ -461,13 +466,7 @@ Files:
   diagnostic.json        Six-item diagnostic checklist (always present)
   ticket.json            Normalized ticket payload (models.TicketPayload shape)
 
-*** WARNING — NOT REDACTED ***
-
-This bundle is NOT secret-redacted in this build. Secret redaction ships in
-commit 6 of the Post-Mortem Observability Plan and will wire into the
-consolidation path so bundles are safe to share. Until then the bundle may
-contain live credentials from the session stream. Treat it as local-only and
-do NOT share it without running a redaction pass first.
+{redaction_block}
 
 How to investigate:
 
@@ -478,6 +477,32 @@ How to investigate:
 """  # noqa: E501 — investigation prompt is a single shell literal for easy copy-paste
 
 
+_REDACTION_BLOCK_REDACTED = """\
+*** REDACTED ({count} patterns) ***
+
+This bundle has been passed through the L1 secret redactor. {count} token
+patterns matching known-credential shapes (API keys, JWTs, PEM private keys,
+bearer headers, etc.) were replaced with [REDACTED] placeholders. The
+redactor is idempotent, so re-running it over this bundle is safe. If a
+pattern update lands after this bundle was built, POST /admin/re-redact on
+the L1 service will rescan the underlying trace store and re-export a clean
+copy.
+
+See services/l1_preprocessing/redaction.py for the full pattern list and the
+entropy-fallback heuristic that catches novel high-entropy tokens."""
+
+
+_REDACTION_BLOCK_CLEAN = """\
+*** REDACTED (0 patterns) ***
+
+The L1 secret redactor ran over this bundle and flagged no token patterns.
+Every file was still scanned — a zero count means the trace genuinely
+contained no recognized credential shapes, not that redaction was skipped.
+If you think a secret leaked through, check the entropy-fallback threshold
+in services/l1_preprocessing/redaction.py and consider adding an explicit
+pattern."""
+
+
 def _build_bundle(ticket_id: str, entries: list[dict[str, Any]]) -> bytes:
     """Build the in-memory gzipped tar bundle for a trace.
 
@@ -485,23 +510,49 @@ def _build_bundle(ticket_id: str, entries: list[dict[str, Any]]) -> bytes:
     few dozen KB, the session stream is the only thing that can be large, and
     even then we're copying a file off disk into a tar — well within what
     fits in memory without worrying about streaming.
+
+    Every file written into the tar is first passed through ``redact()``.
+    For artifact contents pulled from the trace store, this is a belt-and-
+    suspenders pass — the store is already redacted by
+    ``consolidate_worktree_logs`` — and the redactor's idempotency guarantee
+    means the second pass is a no-op on already-clean content. The
+    session-stream file is a special case: it's stored by reference rather
+    than inline in the trace store, so the first real redaction pass on that
+    data happens here.
     """
     buf = io.BytesIO()
     added: list[str] = []
+    total_redacted = 0
+
+    def _redact_bytes(payload: bytes) -> tuple[bytes, int]:
+        """Decode, redact, re-encode. Non-UTF-8 bytes pass through untouched."""
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            return payload, 0
+        redacted_text, n = redact(text)
+        return redacted_text.encode("utf-8"), n
+
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
 
         def _add_bytes(name: str, payload: bytes) -> None:
+            nonlocal total_redacted
+            redacted_payload, n = _redact_bytes(payload)
+            total_redacted += n
             info = tarfile.TarInfo(name=name)
-            info.size = len(payload)
+            info.size = len(redacted_payload)
             info.mtime = int(time.time())
-            tar.addfile(info, io.BytesIO(payload))
+            tar.addfile(info, io.BytesIO(redacted_payload))
             added.append(name)
 
         # pipeline.jsonl — full trace store state serialized one entry per line
         pipeline_lines = [json.dumps(entry) for entry in entries]
         _add_bytes("pipeline.jsonl", ("\n".join(pipeline_lines) + "\n").encode())
 
-        # session-stream.jsonl — copied byte-for-byte from disk if we have it
+        # session-stream.jsonl — copied byte-for-byte from disk if we have it.
+        # This is the ONLY place the stream gets redacted: consolidation
+        # leaves the on-disk file alone so it remains available as a raw
+        # forensic escape hatch for dev-local access.
         stream_entry = find_artifact(entries, ARTIFACT_SESSION_STREAM)
         if stream_entry:
             stream_path_str = str(stream_entry.get("artifact_path", ""))
@@ -559,14 +610,33 @@ def _build_bundle(ticket_id: str, entries: list[dict[str, Any]]) -> bytes:
         ticket_payload = _extract_ticket_payload(ticket_id, entries)
         _add_bytes("ticket.json", json.dumps(ticket_payload, indent=2).encode())
 
-        # readme.txt (always last so the investigator sees it alongside files)
+        # readme.txt (always last so the investigator sees it alongside files).
+        # NOT redacted — it's purely generated content, and it reports the
+        # redaction count from the preceding files. Sent via raw tar addfile
+        # to bypass _add_bytes which would double-count the redaction pass.
+        redaction_block = (
+            _REDACTION_BLOCK_REDACTED.format(count=total_redacted)
+            if total_redacted > 0
+            else _REDACTION_BLOCK_CLEAN
+        )
         readme = _BUNDLE_README.format(
             ticket_id=ticket_id,
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            redaction_block=redaction_block,
         )
-        _add_bytes("readme.txt", readme.encode())
+        readme_bytes = readme.encode()
+        info = tarfile.TarInfo(name="readme.txt")
+        info.size = len(readme_bytes)
+        info.mtime = int(time.time())
+        tar.addfile(info, io.BytesIO(readme_bytes))
+        added.append("readme.txt")
 
-    logger.info("trace_bundle_built", ticket_id=ticket_id, files=added)
+    logger.info(
+        "trace_bundle_built",
+        ticket_id=ticket_id,
+        files=added,
+        redaction_count=total_redacted,
+    )
     return buf.getvalue()
 
 
@@ -616,9 +686,17 @@ async def trace_artifact(ticket_id: str, artifact_type: str) -> Response:
     """Return a single raw artifact file from a trace.
 
     session_log and effective_claude_md are served from the trace store's
-    inlined ``content`` field. session_stream is served from disk via the
-    ``artifact_path`` stored on the reference entry — 404 if the file was
-    cleaned up (e.g. worktree already purged and not archived).
+    inlined ``content`` field (already redacted at consolidation time).
+    session_stream is served from disk via the ``artifact_path`` stored on
+    the reference entry — 404 if the file was cleaned up (e.g. worktree
+    already purged and not archived).
+
+    FORENSIC ESCAPE HATCH: unlike the ``/bundle`` endpoint, this endpoint
+    serves ``session_stream`` bytes directly from disk without running them
+    through ``redact()``. That's deliberate — the raw stream is preserved on
+    the operator's local filesystem as a last-resort debugging source. If
+    you're routing the response off-box, use ``/bundle`` instead so the
+    stream gets redacted on the way out.
     """
     _validate_ticket_id(ticket_id)
     mapping = _ARTIFACT_DOWNLOAD_MAP.get(artifact_type)
@@ -660,6 +738,154 @@ async def trace_artifact(ticket_id: str, artifact_type: str) -> Response:
     if content is None:
         raise HTTPException(status_code=404, detail=f"Artifact '{artifact_type}' has no content")
     return PlainTextResponse(content=str(content), media_type=media_type)
+
+
+# --- Admin: re-redact all existing trace entries ---
+#
+# When a redaction pattern update lands, existing traces don't automatically
+# benefit — the redactor ran against them at consolidation time with the old
+# pattern set. This endpoint rescans every trace file in the trace store and
+# re-runs ``redact()`` over every known-risky field on every entry.
+#
+# Because the redactor is idempotent, running this when patterns haven't
+# changed is a no-op — ``additional_patterns_found`` should be 0. A non-zero
+# count on an unchanged pattern set indicates an idempotency bug.
+@app.post(
+    "/admin/re-redact",
+    status_code=200,
+    dependencies=[Depends(_require_api_key)],
+)
+async def admin_re_redact() -> dict[str, int]:
+    """Re-run the redactor over every trace entry in the store.
+
+    Cleans the same field set that ``consolidate_worktree_logs`` redacts on
+    import, so a pattern update can catch secrets that were already written
+    into non-``content`` fields on earlier runs:
+
+    * Top-level string fields in ``_REDACT_IMPORTED_FIELDS``: ``content``,
+      ``data``, ``error``, ``message``, ``output``, ``stderr``, ``stdout``,
+      ``debug_payload``, ``tool_result``, ``details``, ``evidence``.
+    * ``tool_index`` entries: the ``index.first_tool_error.message`` field
+      (which captures up to 500 chars of raw tool-error content and can
+      easily hold a live credential from a shell command).
+    * Corrupt/unparseable lines: run through ``redact()`` as a raw string
+      and written back redacted, so a partial-write during a crash that
+      left a token on disk gets cleaned up on the next admin pass.
+
+    Fields NOT covered: nested dicts/lists inside risky fields, and any
+    top-level field name not in ``_REDACT_IMPORTED_FIELDS``. Nested leaks
+    are rare in practice; if that assumption stops holding, extend the
+    walk here and in ``tracer.consolidate_worktree_logs``.
+
+    Returns a summary of the scan:
+
+    * ``traces_processed`` — number of trace files walked.
+    * ``entries_redacted`` — number of entries whose content changed.
+    * ``additional_patterns_found`` — total *new* redaction hits on this pass.
+      Expected to be 0 if patterns haven't changed since the original
+      consolidation. Non-zero indicates either a pattern update or an
+      idempotency violation in the redactor.
+
+    Concurrency: this endpoint rewrites trace files in place without file
+    locking. Run during quiet periods — a concurrent ``append_trace`` that
+    interleaves with the rewrite can race and lose the appended entry.
+    """
+    logs_dir = tracer.LOGS_DIR
+    if not logs_dir.exists():
+        return {
+            "traces_processed": 0,
+            "entries_redacted": 0,
+            "additional_patterns_found": 0,
+        }
+
+    traces_processed = 0
+    entries_redacted = 0
+    additional_patterns = 0
+
+    for trace_file in sorted(logs_dir.glob("*.jsonl")):
+        traces_processed += 1
+        try:
+            raw = trace_file.read_text()
+        except OSError:
+            logger.exception("re_redact_read_failed", trace_file=str(trace_file))
+            continue
+
+        out_lines: list[str] = []
+        for line in raw.splitlines():
+            if not line.strip():
+                out_lines.append(line)
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                # Corrupt/partial-write line (e.g. crash mid-append). A
+                # partial write may contain a live token, so run the raw
+                # string through redact() before writing it back rather
+                # than passing it through verbatim.
+                redacted_line, n = redact(line)
+                if n:
+                    additional_patterns += n
+                    entries_redacted += 1
+                out_lines.append(redacted_line)
+                continue
+
+            changed = False
+            for field_name in _REDACT_IMPORTED_FIELDS:
+                value = entry.get(field_name)
+                if isinstance(value, str) and value:
+                    redacted_value, n = redact(value)
+                    if n:
+                        additional_patterns += n
+                        entry[field_name] = redacted_value
+                        changed = True
+
+            # tool_index entries store the first tool-error message inside
+            # a nested dict. Walk it explicitly — the generic top-level
+            # loop above won't reach it.
+            index = entry.get("index")
+            if isinstance(index, dict):
+                first_err = index.get("first_tool_error")
+                if isinstance(first_err, dict):
+                    msg = first_err.get("message")
+                    if isinstance(msg, str) and msg:
+                        redacted_msg, n = redact(msg)
+                        if n:
+                            additional_patterns += n
+                            first_err["message"] = redacted_msg
+                            changed = True
+
+            if changed:
+                entries_redacted += 1
+            out_lines.append(json.dumps(entry))
+
+        new_text = "\n".join(out_lines)
+        if raw.endswith("\n") and not new_text.endswith("\n"):
+            new_text += "\n"
+        try:
+            trace_file.write_text(new_text)
+        except OSError:
+            logger.exception("re_redact_write_failed", trace_file=str(trace_file))
+
+    if additional_patterns:
+        logger.warning(
+            "re_redact_found_new_patterns",
+            additional_patterns_found=additional_patterns,
+            hint=(
+                "Either patterns were updated since last consolidation, or "
+                "the redactor failed its idempotency guarantee. Investigate."
+            ),
+        )
+    logger.info(
+        "re_redact_complete",
+        traces_processed=traces_processed,
+        entries_redacted=entries_redacted,
+        additional_patterns_found=additional_patterns,
+    )
+    return {
+        "traces_processed": traces_processed,
+        "entries_redacted": entries_redacted,
+        "additional_patterns_found": additional_patterns,
+    }
 
 
 async def _validate_and_parse_webhook(

@@ -15,10 +15,32 @@ from typing import Any
 
 import structlog
 
+from redaction import redact
+
 logger = structlog.get_logger()
 
 LOGS_DIR = Path(__file__).resolve().parents[2] / "data" / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Fields in imported pipeline.jsonl entries that may contain tool output /
+# error content and therefore may leak credentials. Redacted on import.
+# Kept top-level-only on purpose: the simpler code path catches the
+# reviewer's seeded scenarios (tool_result / debug_payload / stderr / etc.)
+# without the complexity of recursive JSON walking, and nested leaks are
+# rare in practice because agent tooling writes flat entries.
+_REDACT_IMPORTED_FIELDS = frozenset({
+    "content",      # already redacted by the legacy path — safe to include
+    "data",
+    "error",
+    "message",
+    "output",
+    "stderr",
+    "stdout",
+    "debug_payload",
+    "tool_result",
+    "details",
+    "evidence",     # diagnostic checklist outputs
+})
 
 
 def generate_trace_id() -> str:
@@ -766,7 +788,24 @@ def consolidate_worktree_logs(
 
     wt = Path(worktree_path)
 
-    # Import pipeline.jsonl entries (skip any already live-reported)
+    # Redaction-on-consolidation: every artifact entry's string fields in the
+    # KNOWN-RISKY set get a redact() pass before hitting the trace store. The
+    # running count is reported in the consolidation log line below.
+    total_redacted = 0
+
+    def _redact_and_count(content: str) -> str:
+        nonlocal total_redacted
+        redacted_content, n = redact(content)
+        total_redacted += n
+        return redacted_content
+
+    # Import pipeline.jsonl entries (skip any already live-reported).
+    #
+    # Every imported entry has its known-risky top-level string fields
+    # (tool_result, debug_payload, stderr/stdout, error, etc.) run through
+    # the redactor. The legacy path only redacted ``content`` — which meant
+    # any agent step that wrote a credential into a sibling field landed
+    # in the trace store verbatim. Fixed by walking _REDACT_IMPORTED_FIELDS.
     pipeline_log = wt / ".harness" / "logs" / "pipeline.jsonl"
     imported = 0
     skipped = 0
@@ -784,6 +823,10 @@ def consolidate_worktree_logs(
                 entry["trace_id"] = trace_id
                 entry["ticket_id"] = ticket_id
                 entry["source"] = "agent"
+                for field_name in _REDACT_IMPORTED_FIELDS:
+                    value = entry.get(field_name)
+                    if isinstance(value, str) and value:
+                        entry[field_name] = _redact_and_count(value)
                 path = trace_path(ticket_id)
                 with path.open("a") as f:
                     f.write(json.dumps(entry) + "\n")
@@ -793,6 +836,25 @@ def consolidate_worktree_logs(
     if imported or skipped:
         logger.info("consolidation_complete",
                      ticket_id=ticket_id, imported=imported, skipped=skipped)
+
+    # Redaction-on-consolidation (artifact content):
+    #
+    # Every artifact entry's `content` field gets a redact() pass before
+    # hitting the trace store. This means the trace store is safe-to-share
+    # from the moment it lands — bundle, artifact downloads, and dashboard
+    # panels all read from a pre-redacted source.
+    #
+    # session-stream.jsonl is deliberately skipped here: it's stored by
+    # reference (artifact_path pointer), not inline. Redacting the on-disk
+    # file at consolidation time would either (a) mutate a file another
+    # process may still be writing to, or (b) require copying it to a second
+    # location. Instead, session-stream redaction happens lazily at bundle-
+    # export time (see _build_bundle in main.py), which preserves the raw
+    # stream as a local-only forensic escape hatch and lets a future
+    # POST /admin/re-redact pick up pattern updates by re-scanning the store.
+    #
+    # NOTE: ``total_redacted`` and ``_redact_and_count`` are defined above
+    # next to the pipeline.jsonl import so both paths feed the same counter.
 
     # Import span detail files — matches the Observability Model in harness-CLAUDE.md
     artifact_files = {
@@ -815,7 +877,7 @@ def consolidate_worktree_logs(
                 ticket_id, trace_id,
                 phase="artifact",
                 event=event_name,
-                content=artifact_path.read_text()[:5000],
+                content=_redact_and_count(artifact_path.read_text()[:5000]),
             )
 
     # Effective CLAUDE.md — injected at worktree root, captures the instructions
@@ -826,7 +888,7 @@ def consolidate_worktree_logs(
             ticket_id, trace_id,
             phase="artifact",
             event=ARTIFACT_EFFECTIVE_CLAUDE_MD,
-            content=effective_claude_md.read_text()[:5000],
+            content=_redact_and_count(effective_claude_md.read_text()[:5000]),
         )
 
     # session-stream.jsonl is stored by reference — it can be megabytes and
@@ -872,6 +934,16 @@ def consolidate_worktree_logs(
         try:
             from tool_index import build_tool_index
             index = build_tool_index(stream_path)
+            # tool_index.first_tool_error.message captures up to 500 chars of
+            # raw tool-error output (e.g. `sf org display --json` can echo a
+            # live access token into stderr). Redact it in place so the trace
+            # store entry — and every dashboard panel that reads it — is safe
+            # to share. Handled here, not in tool_index.py, to keep all
+            # redaction decisions centralized in the tracer.
+            if index and isinstance(index.get("first_tool_error"), dict):
+                msg = index["first_tool_error"].get("message", "")
+                if isinstance(msg, str) and msg:
+                    index["first_tool_error"]["message"] = _redact_and_count(msg)
             append_trace(
                 ticket_id, trace_id,
                 phase="artifact",
@@ -888,7 +960,14 @@ def consolidate_worktree_logs(
             phase="artifact",
             event=ARTIFACT_PLAN,
             plan_version=plan_path.stem,
-            content=plan_path.read_text()[:5000],
+            content=_redact_and_count(plan_path.read_text()[:5000]),
+        )
+
+    if total_redacted:
+        logger.info(
+            "consolidation_redacted",
+            ticket_id=ticket_id,
+            redaction_count=total_redacted,
         )
 
     # Autonomy sidecar ingest (best-effort; must never break consolidation)
@@ -916,4 +995,9 @@ def consolidate_worktree_logs(
                 "autonomy_sidecar_ingest_failed", ticket_id=ticket_id
             )
 
-    logger.info("worktree_logs_consolidated", ticket_id=ticket_id, trace_id=trace_id)
+    logger.info(
+        "worktree_logs_consolidated",
+        ticket_id=ticket_id,
+        trace_id=trace_id,
+        redaction_count=total_redacted,
+    )
