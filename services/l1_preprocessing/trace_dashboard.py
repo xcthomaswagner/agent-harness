@@ -502,6 +502,30 @@ def _render_detail(ticket_id: str) -> str:
         f'border-radius:8px;margin-bottom:20px">{"".join(summary_items)}</div>'
     )
 
+    # Copy-investigation-command disclosure — native <details>, zero JS. Reveals
+    # a ready-to-paste shell snippet the dev can select/copy to download the
+    # bundle and launch a local claude investigation.
+    investigate_cmd = (
+        f"mkdir -p /tmp/trace-{ticket_id} && \\\n"
+        f"curl -sSf http://localhost:8000/traces/{ticket_id}/bundle | "
+        f"tar xz -C /tmp/trace-{ticket_id} && \\\n"
+        f"cd /tmp/trace-{ticket_id} && \\\n"
+        f"claude -p \"I'm investigating a failed agent run. Read all the files "
+        f"in this directory. Start by reading diagnostic.json (if it exists) "
+        f"and tool-index.json, then tell me what the first deviation point was. "
+        f"Cite specific line numbers for every claim.\""
+    )
+    investigate_box = (
+        '<details style="margin-bottom:20px;padding:10px 14px;background:#F7F9FB;'
+        'border:1px solid #E2E8F0;border-radius:8px">'
+        '<summary style="cursor:pointer;font-weight:600;font-size:12px;color:#334155">'
+        'Investigate this trace locally (copy command)</summary>'
+        '<pre style="margin-top:10px;padding:10px 12px;background:#0F172A;color:#E2E8F0;'
+        'border-radius:6px;font-size:11.5px;line-height:1.55;white-space:pre-wrap;'
+        'word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">'
+        f'{_e(investigate_cmd)}</pre></details>'
+    )
+
     # Phase duration bar
     dur_bar = ""
     if durations:
@@ -641,7 +665,7 @@ def _render_detail(ticket_id: str) -> str:
 <title>Trace &mdash; {_e(ticket_id)}</title>
 <style>{_LANGFUSE_STYLES}</style>
 </head><body><div class="page">
-{breadcrumb}{title}{_diag_checklist_html(entries)}{summary_bar}{dur_bar}{failure_box}
+{breadcrumb}{title}{_diag_checklist_html(entries)}{summary_bar}{investigate_box}{dur_bar}{failure_box}
 {session_html}
 {l1_html}{l2_html}{l3_html}{raw_html}
 </div></body></html>"""

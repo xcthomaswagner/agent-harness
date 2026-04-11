@@ -5,16 +5,20 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import io
 import json
 import re
 import subprocess
 import sys
+import tarfile
+import time
 from pathlib import Path
 from typing import Any
 
 import httpx
 import structlog
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -29,10 +33,22 @@ from autonomy_jira_bug import normalize_jira_bug
 from autonomy_store import ensure_schema, open_connection, resolve_db_path
 from client_profile import find_profile_by_ado_project
 from config import settings
+from diagnostic import run_diagnostic_checklist
 from models import TicketPayload
 from pipeline import Pipeline
 from trace_dashboard import router as trace_router
-from tracer import append_trace, consolidate_worktree_logs, generate_trace_id
+from tracer import (
+    ARTIFACT_CODE_REVIEW,
+    ARTIFACT_EFFECTIVE_CLAUDE_MD,
+    ARTIFACT_QA_MATRIX,
+    ARTIFACT_SESSION_LOG,
+    ARTIFACT_SESSION_STREAM,
+    ARTIFACT_TOOL_INDEX,
+    append_trace,
+    consolidate_worktree_logs,
+    generate_trace_id,
+    read_trace,
+)
 from unified_dashboard import router as unified_router
 
 logger = structlog.get_logger()
@@ -319,6 +335,338 @@ async def webhook_stats() -> dict[str, object]:
         "active_tickets": len(_active_tickets),
         "tracked_trigger_states": len(_last_trigger_state),
     }
+
+
+# --- Trace bundle + individual artifact endpoints ---
+#
+# These power the post-mortem investigation workflow. `/bundle` packages the
+# full trace context into a single gzipped tar for a developer to run a local
+# `claude -p` investigation against. `/artifact/<type>` serves one file at a
+# time — used by the dashboard Raw Downloads panel.
+#
+# WARNING: the bundle is NOT secret-redacted in this build. Redaction lands
+# in commit 6 (wires `redact_stream` into `consolidate_worktree_logs`). Until
+# then the bundle is for local-only use. A warning notice is baked into every
+# bundle's `readme.txt` so a dev who hands a bundle to a peer knows to redact
+# it first.
+
+
+def _validate_ticket_id(ticket_id: str) -> str:
+    """Guard the ticket_id path parameter against traversal / injection.
+
+    Must match ``[A-Za-z0-9_-]+`` — no dots, no slashes, no null bytes.
+    Returns the ticket_id on success or raises HTTPException(400).
+    """
+    if not ticket_id or not re.match(r"^[A-Za-z0-9_-]+$", ticket_id):
+        raise HTTPException(status_code=400, detail="Invalid ticket_id")
+    return ticket_id
+
+
+def _find_artifact(
+    entries: list[dict[str, Any]], event_name: str,
+) -> dict[str, Any] | None:
+    """Return the last artifact entry matching ``event_name`` or None."""
+    for entry in reversed(entries):
+        if entry.get("phase") == "artifact" and entry.get("event") == event_name:
+            return entry
+    return None
+
+
+def _extract_ticket_payload(
+    ticket_id: str, entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Derive a ticket.json payload for the bundle.
+
+    Preference order:
+    1. `<client_repo.parent>/worktrees/<branch>/.harness/ticket.json` if we can
+       figure out the branch from trace entries and the file still exists.
+    2. A minimal synthetic payload with the ticket_id and any metadata we can
+       glean from the first webhook_received / processing_started entry.
+    """
+    branch = ""
+    for e in entries:
+        b = e.get("branch", "")
+        if isinstance(b, str) and b:
+            branch = b
+            break
+
+    if branch and settings.default_client_repo:
+        candidate = (
+            Path(settings.default_client_repo).parent
+            / "worktrees" / branch / ".harness" / "ticket.json"
+        )
+        try:
+            if candidate.exists():
+                return json.loads(candidate.read_text())
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    # Fallback: synthesize from the first webhook / pipeline / analyst entry
+    # so the bundle always contains *some* ticket.json the investigator can
+    # anchor on. Field names here must match `models.TicketPayload`
+    # (checked against models.py, not guessed): `id`, `title`, `ticket_type`,
+    # `source`, `description`, `priority`, `acceptance_criteria`. The
+    # post-mortem-analyst skill and downstream consumers read `title` and
+    # `description` directly — using `ticket_title` would silently break them.
+    synthetic: dict[str, Any] = {
+        "id": ticket_id,
+        # ticket_id kept as a non-TicketPayload hint so old bundle consumers
+        # that keyed off it still work; do not rely on it going forward.
+        "ticket_id": ticket_id,
+    }
+    payload_fields = (
+        "title",
+        "ticket_type",
+        "source",
+        "description",
+        "priority",
+        "acceptance_criteria",
+        "labels",
+    )
+    for e in entries:
+        event = e.get("event", "")
+        if (
+            "webhook_received" in event
+            or "processing_started" in event
+            or "analyst_completed" in event
+        ):
+            for key in payload_fields:
+                val = e.get(key)
+                if val:
+                    synthetic[key] = val
+            # Also scavenge a nested "ticket" / "enriched_ticket" object if
+            # the entry wrapped the payload — the analyst_completed event
+            # typically serializes the full EnrichedTicket under one of
+            # these keys.
+            for wrapper_key in ("ticket", "enriched_ticket", "payload"):
+                wrapped = e.get(wrapper_key)
+                if isinstance(wrapped, dict):
+                    for key in payload_fields:
+                        if key in wrapped and key not in synthetic:
+                            synthetic[key] = wrapped[key]
+            if any(k in synthetic for k in payload_fields):
+                break
+    return synthetic
+
+
+_BUNDLE_README = """\
+Trace Bundle for ticket {ticket_id}
+Generated: {timestamp}
+
+This archive contains the full trace context for an agent run — use it as a
+self-contained directory to run `claude -p` against when post-morteming a
+failed or surprising run.
+
+Files:
+  pipeline.jsonl         Full trace JSONL from the L1 trace store (all layers)
+  session-stream.jsonl   Raw Claude Code stream (if captured)
+  session.log            Narrative session log (preview, up to 5000 chars)
+  effective-CLAUDE.md    CLAUDE.md the agent was operating under
+  qa-matrix.md           QA validator report (if present)
+  code-review.md         Code reviewer report (if present)
+  tool-index.json        Declarative tool-call index from the stream (if present)
+  diagnostic.json        Six-item diagnostic checklist (always present)
+  ticket.json            Normalized ticket payload (models.TicketPayload shape)
+
+*** WARNING — NOT REDACTED ***
+
+This bundle is NOT secret-redacted in this build. Secret redaction ships in
+commit 6 of the Post-Mortem Observability Plan and will wire into the
+consolidation path so bundles are safe to share. Until then the bundle may
+contain live credentials from the session stream. Treat it as local-only and
+do NOT share it without running a redaction pass first.
+
+How to investigate:
+
+  mkdir -p /tmp/trace-{ticket_id}
+  curl -sSf http://localhost:8000/traces/{ticket_id}/bundle | tar xz -C /tmp/trace-{ticket_id}
+  cd /tmp/trace-{ticket_id}
+  claude -p "Read all the files in this directory. Start by reading diagnostic.json (if it exists) and tool-index.json, then tell me what the first deviation point was. Cite specific line numbers for every claim."
+"""  # noqa: E501 — investigation prompt is a single shell literal for easy copy-paste
+
+
+def _build_bundle(ticket_id: str, entries: list[dict[str, Any]]) -> bytes:
+    """Build the in-memory gzipped tar bundle for a trace.
+
+    Kept small and simple: for almost all traces the JSONL trace store is a
+    few dozen KB, the session stream is the only thing that can be large, and
+    even then we're copying a file off disk into a tar — well within what
+    fits in memory without worrying about streaming.
+    """
+    buf = io.BytesIO()
+    added: list[str] = []
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+
+        def _add_bytes(name: str, payload: bytes) -> None:
+            info = tarfile.TarInfo(name=name)
+            info.size = len(payload)
+            info.mtime = int(time.time())
+            tar.addfile(info, io.BytesIO(payload))
+            added.append(name)
+
+        # pipeline.jsonl — full trace store state serialized one entry per line
+        pipeline_lines = [json.dumps(entry) for entry in entries]
+        _add_bytes("pipeline.jsonl", ("\n".join(pipeline_lines) + "\n").encode())
+
+        # session-stream.jsonl — copied byte-for-byte from disk if we have it
+        stream_entry = _find_artifact(entries, ARTIFACT_SESSION_STREAM)
+        if stream_entry:
+            stream_path_str = str(stream_entry.get("artifact_path", ""))
+            if stream_path_str:
+                stream_path = Path(stream_path_str)
+                try:
+                    if stream_path.exists():
+                        _add_bytes("session-stream.jsonl", stream_path.read_bytes())
+                except OSError:
+                    pass
+
+        # session.log — 5000-char preview is the best we have in the trace store
+        log_entry = _find_artifact(entries, ARTIFACT_SESSION_LOG)
+        if log_entry and log_entry.get("content"):
+            _add_bytes("session.log", str(log_entry["content"]).encode())
+
+        # effective-CLAUDE.md — instructions the agent was actually running under
+        claude_md_entry = _find_artifact(entries, ARTIFACT_EFFECTIVE_CLAUDE_MD)
+        if claude_md_entry and claude_md_entry.get("content"):
+            _add_bytes("effective-CLAUDE.md", str(claude_md_entry["content"]).encode())
+
+        # qa-matrix.md
+        qa_entry = _find_artifact(entries, ARTIFACT_QA_MATRIX)
+        if qa_entry and qa_entry.get("content"):
+            _add_bytes("qa-matrix.md", str(qa_entry["content"]).encode())
+
+        # code-review.md
+        review_entry = _find_artifact(entries, ARTIFACT_CODE_REVIEW)
+        if review_entry and review_entry.get("content"):
+            _add_bytes("code-review.md", str(review_entry["content"]).encode())
+
+        # diagnostic.json — computed inline at bundle time. Commit 3's
+        # `run_diagnostic_checklist` is a pure analyzer (no persistence), so
+        # it's safe to call from here without touching the trace store. This
+        # keeps commit 3 reusable for both the dashboard render AND the
+        # bundle export.
+        try:
+            checks = run_diagnostic_checklist(entries)
+            _add_bytes("diagnostic.json", json.dumps(checks, indent=2).encode())
+        except Exception:
+            logger.exception("diagnostic_bundle_failed", ticket_id=ticket_id)
+            # Don't fail the bundle if diagnostic computation crashes —
+            # continue without it so the investigator still gets the other
+            # artifacts.
+
+        # tool-index.json — declarative tool-call summary
+        tool_index_entry = _find_artifact(entries, ARTIFACT_TOOL_INDEX)
+        if tool_index_entry and "index" in tool_index_entry:
+            _add_bytes(
+                "tool-index.json",
+                json.dumps(tool_index_entry["index"], indent=2).encode(),
+            )
+
+        # ticket.json
+        ticket_payload = _extract_ticket_payload(ticket_id, entries)
+        _add_bytes("ticket.json", json.dumps(ticket_payload, indent=2).encode())
+
+        # readme.txt (always last so the investigator sees it alongside files)
+        readme = _BUNDLE_README.format(
+            ticket_id=ticket_id,
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        )
+        _add_bytes("readme.txt", readme.encode())
+
+    logger.info("trace_bundle_built", ticket_id=ticket_id, files=added)
+    return buf.getvalue()
+
+
+# Route-ordering note: this endpoint is registered AFTER `trace_router` is
+# included (``app.include_router(trace_router)`` above, near the top of the
+# file). It works regardless of declaration order because
+# `/traces/{id}` and `/traces/{id}/bundle` differ in segment count and
+# FastAPI/Starlette matches by segment count before falling back to dynamic
+# path parameters. Do NOT add a catch-all like ``/{rest:path}`` to
+# trace_router or this route will be silently shadowed.
+@app.get("/traces/{ticket_id}/bundle")
+async def trace_bundle(ticket_id: str) -> Response:
+    """Return a gzipped tar of the full trace context for ``ticket_id``.
+
+    See ``_BUNDLE_README`` above for the file listing and the redaction
+    warning. The bundle is built entirely in-memory — fine for today because
+    the largest payload is session-stream.jsonl and traces big enough to
+    cause memory pressure are rare.
+    """
+    _validate_ticket_id(ticket_id)
+    entries = read_trace(ticket_id)
+    if not entries:
+        raise HTTPException(status_code=404, detail=f"No trace for ticket '{ticket_id}'")
+
+    payload = _build_bundle(ticket_id, entries)
+    timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    filename = f"trace-{ticket_id}-{timestamp}.tar.gz"
+    return Response(
+        content=payload,
+        media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# Map the public artifact name (what shows up in the URL) to the internal
+# artifact event name and the media type we serve. Kept narrow on purpose —
+# only the three artifacts the dashboard "Raw Downloads" panel needs today.
+_ARTIFACT_DOWNLOAD_MAP: dict[str, tuple[str, str]] = {
+    "session_log": (ARTIFACT_SESSION_LOG, "text/plain; charset=utf-8"),
+    "session_stream": (ARTIFACT_SESSION_STREAM, "application/json"),
+    "effective_claude_md": (ARTIFACT_EFFECTIVE_CLAUDE_MD, "text/markdown; charset=utf-8"),
+}
+
+
+@app.get("/traces/{ticket_id}/artifact/{artifact_type}")
+async def trace_artifact(ticket_id: str, artifact_type: str) -> Response:
+    """Return a single raw artifact file from a trace.
+
+    session_log and effective_claude_md are served from the trace store's
+    inlined ``content`` field. session_stream is served from disk via the
+    ``artifact_path`` stored on the reference entry — 404 if the file was
+    cleaned up (e.g. worktree already purged and not archived).
+    """
+    _validate_ticket_id(ticket_id)
+    mapping = _ARTIFACT_DOWNLOAD_MAP.get(artifact_type)
+    if mapping is None:
+        raise HTTPException(status_code=404, detail=f"Unknown artifact type: {artifact_type}")
+
+    event_name, media_type = mapping
+    entries = read_trace(ticket_id)
+    if not entries:
+        raise HTTPException(status_code=404, detail=f"No trace for ticket '{ticket_id}'")
+
+    entry = _find_artifact(entries, event_name)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Artifact '{artifact_type}' not in trace")
+
+    if artifact_type == "session_stream":
+        stream_path_str = str(entry.get("artifact_path", ""))
+        if not stream_path_str:
+            raise HTTPException(status_code=404, detail="session_stream has no artifact_path")
+        stream_path = Path(stream_path_str)
+        if not stream_path.exists():
+            raise HTTPException(status_code=404, detail="session_stream file missing on disk")
+        try:
+            body = stream_path.read_bytes()
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"read failed: {exc}") from exc
+        # Force a download rather than letting the browser try to render a
+        # multi-MB JSONL blob as a syntax-highlighted JSON document in a new
+        # tab. The dashboard Raw Downloads panel expects a file save.
+        return Response(
+            content=body,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": 'attachment; filename="session-stream.jsonl"',
+            },
+        )
+
+    content = entry.get("content")
+    if content is None:
+        raise HTTPException(status_code=404, detail=f"Artifact '{artifact_type}' has no content")
+    return PlainTextResponse(content=str(content), media_type=media_type)
 
 
 async def _validate_and_parse_webhook(
