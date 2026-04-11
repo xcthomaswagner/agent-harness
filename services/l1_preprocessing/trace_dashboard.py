@@ -74,6 +74,20 @@ _STATUS_BADGE: dict[str, str] = {
     "Received": "badge-secondary",
 }
 
+# Statuses where the pipeline has finished running. When a trace is NOT in one
+# of these, the detail page auto-refreshes so users watching a live run see new
+# events without needing to reload the tab.
+_TERMINAL_STATUSES: frozenset[str] = frozenset({
+    "Complete",
+    "PR Created",
+    "Merged",
+    "Escalated",
+    "Failed",
+    "Timed Out",
+    "Agent Done (no PR)",
+    "Cleaned Up",
+})
+
 # Phase colors for duration bar and span icons
 _PHASE_COLORS: dict[str, str] = {
     "ticket_read": "#64748B", "planning": "#9333EA", "plan_review": "#9333EA",
@@ -607,7 +621,18 @@ def _render_detail(ticket_id: str) -> str:
         )
     raw_html += '</div></div>'
 
+    # Auto-refresh while the pipeline is still running so users watching a
+    # live run see new events without manually reloading. Stops refreshing
+    # once the run reaches a terminal state (Complete, PR Created, Failed,
+    # etc.) to avoid hammering L1 indefinitely on long-finished traces.
+    refresh_meta = (
+        '<meta http-equiv="refresh" content="5">'
+        if status not in _TERMINAL_STATUSES
+        else ""
+    )
+
     return f"""<!DOCTYPE html><html><head>
+{refresh_meta}
 <title>Trace &mdash; {_e(ticket_id)}</title>
 <style>{_LANGFUSE_STYLES}</style>
 </head><body><div class="page">

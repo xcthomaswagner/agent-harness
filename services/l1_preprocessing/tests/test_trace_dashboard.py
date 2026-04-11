@@ -242,6 +242,54 @@ class TestTraceDetailEndpoint:
         assert resp.status_code == 200
         assert "No trace found" in resp.text
 
+    async def test_auto_refresh_in_progress_trace(self) -> None:
+        """In-progress traces must emit a meta-refresh so the tab picks up new
+        events without manual reload. Regression test for the XCSF30-88424
+        post-mortem: the detail page rendered a stale snapshot while the
+        pipeline was still running."""
+        entries = [
+            {"trace_id": "x", "timestamp": "2026-01-01T10:00:00Z",
+             "phase": "webhook", "event": "ado_webhook_received",
+             "source": "ado"},
+            {"trace_id": "x", "timestamp": "2026-01-01T10:00:05Z",
+             "phase": "pipeline", "event": "processing_started"},
+            {"trace_id": "x", "timestamp": "2026-01-01T10:01:00Z",
+             "phase": "qa_validation", "event": "QA complete",
+             "source": "agent"},
+        ]
+        with patch("trace_dashboard.read_trace", return_value=entries):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.get("/traces/INPROGRESS-1")
+        assert resp.status_code == 200
+        # Status derives to "QA Done" (not terminal) so refresh meta should be present
+        assert '<meta http-equiv="refresh" content="5">' in resp.text
+
+    async def test_no_auto_refresh_on_completed_trace(self) -> None:
+        """Terminal traces must NOT emit meta-refresh so we don't hammer L1
+        with reloads of long-finished runs."""
+        entries = [
+            {"trace_id": "x", "timestamp": "2026-01-01T10:00:00Z",
+             "phase": "webhook", "event": "jira_webhook_received",
+             "source": "jira"},
+            {"trace_id": "x", "timestamp": "2026-01-01T10:05:00Z",
+             "phase": "complete", "event": "Pipeline complete",
+             "source": "agent", "pr_url": "https://github.com/test/pr/1",
+             "review_verdict": "APPROVED", "qa_result": "PASS",
+             "pipeline_mode": "simple", "units": 1},
+        ]
+        with patch("trace_dashboard.read_trace", return_value=entries):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.get("/traces/DONE-1")
+        assert resp.status_code == 200
+        # Status is "Complete" (terminal) so NO refresh meta should be emitted
+        assert 'http-equiv="refresh"' not in resp.text
+
     async def test_xss_in_event(self) -> None:
         entries = [
             {"trace_id": "x", "timestamp": "2026-01-01",
