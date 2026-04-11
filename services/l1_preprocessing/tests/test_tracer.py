@@ -373,6 +373,238 @@ class TestConsolidateWorktreeLogs:
         assert "tool_index" not in event_names
 
 
+class TestConsolidateRedaction:
+    """Redact-on-consolidation: commit 6 wires ``redact()`` into every
+    ``content`` field consolidated by ``consolidate_worktree_logs``. Secrets
+    live in the worktree's raw logs but must be gone by the time the trace
+    store sees them.
+    """
+
+    # An Anthropic key shape the redactor's line pass will catch.
+    SECRET = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+    def test_consolidate_redacts_session_log_content(
+        self, trace_dir: Path, tmp_path: Path,
+    ) -> None:
+        wt = tmp_path / "worktree"
+        logs = wt / ".harness" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "session.log").write_text(
+            f"[bootstrap] loading secret {self.SECRET}\n[run] done\n",
+        )
+
+        with patch("tracer.LOGS_DIR", trace_dir):
+            consolidate_worktree_logs("R-1", "trace-r1", str(wt))
+            entries = read_trace("R-1")
+
+        session_entry = next(
+            e for e in entries if e.get("event") == "session_log_artifact"
+        )
+        content = str(session_entry["content"])
+        assert self.SECRET not in content, (
+            "raw secret must not survive consolidation"
+        )
+        assert "sk-ant-[REDACTED]" in content
+
+    def test_consolidate_redacts_effective_claude_md(
+        self, trace_dir: Path, tmp_path: Path,
+    ) -> None:
+        wt = tmp_path / "worktree"
+        (wt / ".harness" / "logs").mkdir(parents=True)
+        (wt / "CLAUDE.md").write_text(
+            f"# Effective instructions\n\nAPI_KEY={self.SECRET}\n",
+        )
+
+        with patch("tracer.LOGS_DIR", trace_dir):
+            consolidate_worktree_logs("R-2", "trace-r2", str(wt))
+            entries = read_trace("R-2")
+
+        claude_entry = next(
+            e for e in entries if e.get("event") == "effective_claude_md_artifact"
+        )
+        content = str(claude_entry["content"])
+        assert self.SECRET not in content
+        assert "sk-ant-[REDACTED]" in content
+
+    def test_consolidate_redacts_markdown_artifacts(
+        self, trace_dir: Path, tmp_path: Path,
+    ) -> None:
+        wt = tmp_path / "worktree"
+        logs = wt / ".harness" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "qa-matrix.md").write_text(
+            f"# QA\nused token {self.SECRET}\n",
+        )
+        (logs / "code-review.md").write_text(
+            f"# Review\nfound token {self.SECRET}\n",
+        )
+
+        with patch("tracer.LOGS_DIR", trace_dir):
+            consolidate_worktree_logs("R-3", "trace-r3", str(wt))
+            entries = read_trace("R-3")
+
+        by_event = {e.get("event"): e for e in entries}
+        for event_name in ("qa_matrix_artifact", "code_review_artifact"):
+            content = str(by_event[event_name]["content"])
+            assert self.SECRET not in content, (
+                f"{event_name} must be redacted at consolidation time"
+            )
+            assert "sk-ant-[REDACTED]" in content
+
+    def test_consolidate_skips_stream_file_redaction(
+        self, trace_dir: Path, tmp_path: Path,
+    ) -> None:
+        """The session-stream file on disk is NOT touched by consolidation.
+
+        Stream redaction happens lazily at bundle-export time — the raw file
+        stays on disk as a forensic escape hatch.
+        """
+        wt = tmp_path / "worktrees" / "ai-R-4"
+        logs = wt / ".harness" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "pipeline.jsonl").write_text(
+            json.dumps({"phase": "impl", "event": "done"}) + "\n",
+        )
+        stream_file = logs / "session-stream.jsonl"
+        raw_bytes = (
+            json.dumps({"type": "system", "subtype": "init", "mcp_servers": []})
+            + "\n"
+            + json.dumps({"type": "assistant", "text": f"key={self.SECRET}"})
+            + "\n"
+        ).encode()
+        stream_file.write_bytes(raw_bytes)
+
+        before = stream_file.read_bytes()
+        with patch("tracer.LOGS_DIR", trace_dir):
+            consolidate_worktree_logs("R-4", "trace-r4", str(wt))
+        after = stream_file.read_bytes()
+
+        assert before == after, (
+            "consolidation must leave session-stream.jsonl byte-for-byte "
+            "identical — redaction is deferred to bundle export"
+        )
+        # The secret still lives in the raw stream on disk, by design.
+        assert self.SECRET.encode() in after
+
+    def test_consolidate_redacts_tool_index_first_tool_error_message(
+        self, trace_dir: Path, tmp_path: Path,
+    ) -> None:
+        """Regression: tool_index.first_tool_error.message is redacted at rest.
+
+        ``tool_index._extract_error_message`` captures up to 500 chars of
+        raw tool-error output. A Bash call like ``sf org display --json``
+        can print a live access token into stderr, which then lands in
+        ``first_tool_error.message``. Before the fix the tracer wrote this
+        straight into the trace store via ``append_trace(..., index=...)``,
+        so any dashboard panel or non-bundle reader would see the raw key.
+        """
+        wt = tmp_path / "worktrees" / "ai-R-5"
+        logs = wt / ".harness" / "logs"
+        logs.mkdir(parents=True)
+
+        # Minimal stream that drives build_tool_index into producing a
+        # tool_use block followed by an is_error=true tool_result with a
+        # secret in its text content.
+        stream_events = [
+            {"type": "system", "subtype": "init", "mcp_servers": []},
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_err_1",
+                            "name": "Bash",
+                            "input": {"command": "sf org display --json"},
+                        },
+                    ],
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_err_1",
+                            "is_error": True,
+                            "content": (
+                                f"sf: error: access token {self.SECRET} "
+                                f"has expired, please reauthenticate"
+                            ),
+                        },
+                    ],
+                },
+            },
+        ]
+        (logs / "session-stream.jsonl").write_text(
+            "\n".join(json.dumps(e) for e in stream_events) + "\n",
+        )
+
+        with patch("tracer.LOGS_DIR", trace_dir):
+            consolidate_worktree_logs("R-5", "trace-r5", str(wt))
+            entries = read_trace("R-5")
+
+        tool_index_entry = next(
+            e for e in entries if e.get("event") == "tool_index"
+        )
+        first_err = tool_index_entry["index"]["first_tool_error"]
+        assert first_err is not None, (
+            "test setup bug — error-producing tool_result did not "
+            "produce a first_tool_error in the index"
+        )
+        msg = first_err["message"]
+        assert self.SECRET not in msg, (
+            "tool_index.first_tool_error.message must be redacted before "
+            "hitting the trace store"
+        )
+        assert "[REDACTED]" in msg
+
+    def test_consolidate_redacts_non_content_pipeline_fields(
+        self, trace_dir: Path, tmp_path: Path,
+    ) -> None:
+        """Regression: imported pipeline.jsonl entries have their known-risky
+        non-``content`` fields redacted, not just ``content``.
+
+        Before the fix, only ``content`` was redacted on import. An agent
+        step that wrote a credential into ``debug_payload``, ``error``,
+        ``stderr``, etc. would land in the trace store verbatim and be
+        readable by dashboard panels. This test seeds both ``content`` AND
+        ``debug_payload`` AND ``error`` and verifies all three are clean.
+        """
+        wt = tmp_path / "worktree"
+        logs = wt / ".harness" / "logs"
+        logs.mkdir(parents=True)
+        pipeline_entry = {
+            "phase": "impl",
+            "event": "tool_failed",
+            "content": f"narrative log line mentioning {self.SECRET}",
+            "debug_payload": f"token={self.SECRET}",
+            "error": f"auth failed with key {self.SECRET}",
+        }
+        (logs / "pipeline.jsonl").write_text(
+            json.dumps(pipeline_entry) + "\n",
+        )
+
+        with patch("tracer.LOGS_DIR", trace_dir):
+            consolidate_worktree_logs("R-6", "trace-r6", str(wt))
+            entries = read_trace("R-6")
+
+        imported = next(
+            e for e in entries
+            if e.get("source") == "agent" and e.get("event") == "tool_failed"
+        )
+        # All three must be redacted — not just content (the legacy path).
+        for field in ("content", "debug_payload", "error"):
+            value = imported[field]
+            assert self.SECRET not in value, (
+                f"{field} must be redacted on pipeline.jsonl import"
+            )
+            assert "[REDACTED]" in value, (
+                f"{field} must show a redaction marker"
+            )
+
+
 class TestComputePhaseDurations:
     """Tests for compute_phase_durations — per-phase timing from agent entries."""
 
