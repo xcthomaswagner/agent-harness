@@ -8,10 +8,12 @@ import hmac
 import io
 import json
 import re
+import secrets
 import subprocess
 import sys
 import tarfile
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -668,6 +670,149 @@ async def trace_bundle(ticket_id: str) -> Response:
         content=payload,
         media_type="application/gzip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# --- Discuss-with-Claude (Tier 1 post-mortem investigation handoff) ---
+#
+# The dashboard's "Investigate this trace locally" disclosure renders a copy-
+# paste shell snippet that downloads the bundle and launches a local
+# ``claude -p`` session. This endpoint returns the same snippet as JSON, plus
+# a short-lived opaque session token and the bundle URL, so a future dashboard
+# button (or a CLI wrapper) can hand the developer everything needed to start
+# an investigation in one call.
+#
+# Base URL is hard-coded to ``http://localhost:8000`` to match the dashboard's
+# existing investigate_cmd template — the whole feature is Tier 1, single-dev,
+# local-only. Don't be clever about deriving it from the request host; that
+# breaks when ngrok forwards public traffic to loopback.
+
+_DISCUSS_BASE_URL = "http://localhost:8000"
+_DISCUSS_SESSION_TTL = timedelta(hours=1)
+_DISCUSS_AUDIT_FILENAME = "discuss-audit.jsonl"
+
+_INVESTIGATE_COMMAND_TEMPLATE = (
+    "mkdir -p /tmp/trace-{ticket_id} && \\\n"
+    "curl -sSf {base}/traces/{ticket_id}/bundle | "
+    "tar xz -C /tmp/trace-{ticket_id} && \\\n"
+    "cd /tmp/trace-{ticket_id} && \\\n"
+    "claude -p \"I'm investigating a failed agent run. Read all the files "
+    "in this directory. Start by reading diagnostic.json (if it exists) "
+    "and tool-index.json, then tell me what the first deviation point was. "
+    "Cite specific line numbers for every claim.\""
+)
+
+
+def _build_investigate_command(ticket_id: str, base_url: str = _DISCUSS_BASE_URL) -> str:
+    """Render the copy-paste shell snippet for a local post-mortem session.
+
+    This is the same command the trace-dashboard investigate disclosure
+    renders — kept as a canonical template so the endpoint and the dashboard
+    cannot drift. A follow-up commit can swap ``trace_dashboard.py`` to
+    import this helper; today the dashboard still builds its own copy.
+    """
+    return _INVESTIGATE_COMMAND_TEMPLATE.format(ticket_id=ticket_id, base=base_url)
+
+
+def _append_discuss_audit(
+    ticket_id: str,
+    session_token: str,
+    source_ip: str,
+    user_agent: str,
+) -> None:
+    """Append one JSON line to ``<LOGS_DIR>/discuss-audit.jsonl``.
+
+    This is a plain append-only file, NOT a per-ticket trace store entry —
+    it serves as the cross-ticket "who investigated what and when" record.
+    Created on first use. One line per endpoint invocation. Never rotated
+    or truncated from here — operator can rotate manually if it grows.
+    """
+    entry = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "ticket_id": ticket_id,
+        "session_token": session_token,
+        "source_ip": source_ip,
+        "user_agent": user_agent,
+    }
+    audit_path = tracer.LOGS_DIR / _DISCUSS_AUDIT_FILENAME
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    with audit_path.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+class DiscussResponse(BaseModel):
+    """Response body for ``POST /traces/{ticket_id}/discuss``."""
+
+    ticket_id: str
+    session_token: str
+    bundle_url: str
+    investigate_command: str
+    expires_at: str
+
+
+@app.post(
+    "/traces/{ticket_id}/discuss",
+    response_model=DiscussResponse,
+    dependencies=[Depends(_require_api_key)],
+)
+async def discuss_trace(ticket_id: str, request: Request) -> DiscussResponse:
+    """Mint a short-lived investigation handoff for a trace.
+
+    Returns a JSON body containing:
+
+    * ``session_token`` — an opaque random string. **Write-only**: the
+      token appears in this response and in the audit log, and is NOT
+      validated on any subsequent request. A future commit may add
+      validation (e.g. a registry or signed token) but for Tier 1 the
+      token is purely a correlation ID in the audit log.
+    * ``bundle_url`` — the URL a developer or UI can hit to download the
+      trace bundle (pre-existing ``/traces/<id>/bundle`` endpoint).
+    * ``investigate_command`` — the copy-paste shell snippet that the
+      dashboard investigate disclosure already renders, returned as a
+      string so a future UI button can launch it programmatically.
+    * ``expires_at`` — ISO-8601 UTC timestamp one hour from now. Advisory
+      only (nothing enforces it — see write-only note above).
+
+    Every invocation writes one line to
+    ``<LOGS_DIR>/discuss-audit.jsonl`` with timestamp, ticket_id, token,
+    source IP, and user-agent. This is append-only and intentionally
+    separate from the per-ticket trace store — it's the cross-trace
+    "who investigated what" record, useful even on a solo harness for
+    remembering what you looked at across sessions.
+
+    **Out of scope for Tier 1:** token validation, a token registry,
+    rate limiting, token revocation or blacklisting. The endpoint is
+    protected by the existing ``X-API-Key`` gate and that's the whole
+    security model.
+    """
+    _validate_ticket_id(ticket_id)
+    entries = read_trace(ticket_id)
+    if not entries:
+        raise HTTPException(status_code=404, detail=f"No trace for ticket '{ticket_id}'")
+
+    session_token = secrets.token_urlsafe(24)
+    expires_at = datetime.now(UTC) + _DISCUSS_SESSION_TTL
+
+    source_ip = request.client.host if request.client else ""
+    user_agent = request.headers.get("user-agent", "")
+    _append_discuss_audit(
+        ticket_id=ticket_id,
+        session_token=session_token,
+        source_ip=source_ip,
+        user_agent=user_agent,
+    )
+    logger.info(
+        "discuss_session_minted",
+        ticket_id=ticket_id,
+        source_ip=source_ip,
+    )
+
+    return DiscussResponse(
+        ticket_id=ticket_id,
+        session_token=session_token,
+        bundle_url=f"{_DISCUSS_BASE_URL}/traces/{ticket_id}/bundle",
+        investigate_command=_build_investigate_command(ticket_id),
+        expires_at=expires_at.isoformat(),
     )
 
 
