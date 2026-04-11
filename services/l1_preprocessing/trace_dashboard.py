@@ -526,6 +526,37 @@ def _render_detail(ticket_id: str) -> str:
         f'{_e(investigate_cmd)}</pre></details>'
     )
 
+    # Audited "Discuss with Claude" disclosure — the /traces/<id>/discuss
+    # endpoint (commit 7) writes to discuss-audit.jsonl before returning a
+    # session token and the investigate command. The investigate_box above
+    # is the cheap no-auth path for local hacking; this one is the audited
+    # path and drives the capture_discuss_output.py helper (commit 9) that
+    # parses the skill's three output sections. Both boxes use <details> —
+    # zero JS — and the discuss_box sits directly below the investigate_box
+    # so the audited workflow is obvious but not intrusive.
+    discuss_cmd = (
+        "# Step 1: request a session token (writes to discuss-audit.jsonl)\n"
+        f"curl -sSf -X POST http://localhost:8000/traces/{ticket_id}/discuss \\\n"
+        "  -H 'X-API-Key: ...' | jq -r .investigate_command > /tmp/investigate.sh\n"
+        "\n"
+        "# Step 2: run the investigation\n"
+        "bash /tmp/investigate.sh\n"
+        "\n"
+        "# Step 3: when Claude's output has the three sections\n"
+        "# (## Root cause, ## Proposed fix, ## Memory entry):\n"
+        "python scripts/capture_discuss_output.py --transcript /tmp/transcript.md"
+    )
+    discuss_box = (
+        '<details style="margin-bottom:20px;padding:10px 14px;background:#F7F9FB;'
+        'border:1px solid #E2E8F0;border-radius:8px">'
+        '<summary style="cursor:pointer;font-weight:600;font-size:12px;color:#334155">'
+        '\U0001f50d Open in Claude for investigation</summary>'
+        '<pre style="margin-top:10px;padding:10px 12px;background:#0F172A;color:#E2E8F0;'
+        'border-radius:6px;font-size:11.5px;line-height:1.55;white-space:pre-wrap;'
+        'word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">'
+        f'{_e(discuss_cmd)}</pre></details>'
+    )
+
     # Phase duration bar
     dur_bar = ""
     if durations:
@@ -665,7 +696,7 @@ def _render_detail(ticket_id: str) -> str:
 <title>Trace &mdash; {_e(ticket_id)}</title>
 <style>{_LANGFUSE_STYLES}</style>
 </head><body><div class="page">
-{breadcrumb}{title}{_diag_checklist_html(entries)}{summary_bar}{investigate_box}{dur_bar}{failure_box}
+{breadcrumb}{title}{_diag_checklist_html(entries)}{summary_bar}{investigate_box}{discuss_box}{dur_bar}{failure_box}
 {session_html}
 {l1_html}{l2_html}{l3_html}{raw_html}
 </div></body></html>"""
