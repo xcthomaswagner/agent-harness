@@ -46,6 +46,7 @@ from tracer import (
     ARTIFACT_TOOL_INDEX,
     append_trace,
     consolidate_worktree_logs,
+    find_artifact,
     generate_trace_id,
     read_trace,
 )
@@ -362,14 +363,6 @@ def _validate_ticket_id(ticket_id: str) -> str:
     return ticket_id
 
 
-def _find_artifact(
-    entries: list[dict[str, Any]], event_name: str,
-) -> dict[str, Any] | None:
-    """Return the last artifact entry matching ``event_name`` or None."""
-    for entry in reversed(entries):
-        if entry.get("phase") == "artifact" and entry.get("event") == event_name:
-            return entry
-    return None
 
 
 def _extract_ticket_payload(
@@ -509,7 +502,7 @@ def _build_bundle(ticket_id: str, entries: list[dict[str, Any]]) -> bytes:
         _add_bytes("pipeline.jsonl", ("\n".join(pipeline_lines) + "\n").encode())
 
         # session-stream.jsonl — copied byte-for-byte from disk if we have it
-        stream_entry = _find_artifact(entries, ARTIFACT_SESSION_STREAM)
+        stream_entry = find_artifact(entries, ARTIFACT_SESSION_STREAM)
         if stream_entry:
             stream_path_str = str(stream_entry.get("artifact_path", ""))
             if stream_path_str:
@@ -521,22 +514,22 @@ def _build_bundle(ticket_id: str, entries: list[dict[str, Any]]) -> bytes:
                     pass
 
         # session.log — 5000-char preview is the best we have in the trace store
-        log_entry = _find_artifact(entries, ARTIFACT_SESSION_LOG)
+        log_entry = find_artifact(entries, ARTIFACT_SESSION_LOG)
         if log_entry and log_entry.get("content"):
             _add_bytes("session.log", str(log_entry["content"]).encode())
 
         # effective-CLAUDE.md — instructions the agent was actually running under
-        claude_md_entry = _find_artifact(entries, ARTIFACT_EFFECTIVE_CLAUDE_MD)
+        claude_md_entry = find_artifact(entries, ARTIFACT_EFFECTIVE_CLAUDE_MD)
         if claude_md_entry and claude_md_entry.get("content"):
             _add_bytes("effective-CLAUDE.md", str(claude_md_entry["content"]).encode())
 
         # qa-matrix.md
-        qa_entry = _find_artifact(entries, ARTIFACT_QA_MATRIX)
+        qa_entry = find_artifact(entries, ARTIFACT_QA_MATRIX)
         if qa_entry and qa_entry.get("content"):
             _add_bytes("qa-matrix.md", str(qa_entry["content"]).encode())
 
         # code-review.md
-        review_entry = _find_artifact(entries, ARTIFACT_CODE_REVIEW)
+        review_entry = find_artifact(entries, ARTIFACT_CODE_REVIEW)
         if review_entry and review_entry.get("content"):
             _add_bytes("code-review.md", str(review_entry["content"]).encode())
 
@@ -555,7 +548,7 @@ def _build_bundle(ticket_id: str, entries: list[dict[str, Any]]) -> bytes:
             # artifacts.
 
         # tool-index.json — declarative tool-call summary
-        tool_index_entry = _find_artifact(entries, ARTIFACT_TOOL_INDEX)
+        tool_index_entry = find_artifact(entries, ARTIFACT_TOOL_INDEX)
         if tool_index_entry and "index" in tool_index_entry:
             _add_bytes(
                 "tool-index.json",
@@ -637,7 +630,7 @@ async def trace_artifact(ticket_id: str, artifact_type: str) -> Response:
     if not entries:
         raise HTTPException(status_code=404, detail=f"No trace for ticket '{ticket_id}'")
 
-    entry = _find_artifact(entries, event_name)
+    entry = find_artifact(entries, event_name)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"Artifact '{artifact_type}' not in trace")
 

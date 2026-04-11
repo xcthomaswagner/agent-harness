@@ -44,6 +44,7 @@ from tracer import (
     ARTIFACT_SESSION_LOG,
     ARTIFACT_SESSION_STREAM,
     ARTIFACT_TOOL_INDEX,
+    find_artifact,
 )
 
 # --- Styling constants (inline; no external CSS dependency) ---
@@ -82,12 +83,9 @@ def _tool_color(tool_name: str) -> str:
     return _TOOL_CATEGORY_COLORS["neutral"]
 
 
-def _find_artifact(entries: list[dict], event_name: str) -> dict | None:
-    """Return the first entry matching the given artifact event name, or None."""
-    for entry in entries:
-        if entry.get("event") == event_name:
-            return entry
-    return None
+# find_artifact is imported from tracer.py — it walks in reverse by default,
+# which is what we want: on re-triggered traces (multi-run) the dashboard
+# should render the latest artifact state, not the first-run version.
 
 
 def _ticket_id_from_entries(entries: list[dict]) -> str:
@@ -123,7 +121,7 @@ def _render_tool_usage_panel(entries: list[dict]) -> str:
     informative: it tells the dev the trace predates commit 1 or skipped
     consolidation.
     """
-    artifact = _find_artifact(entries, ARTIFACT_TOOL_INDEX)
+    artifact = find_artifact(entries, ARTIFACT_TOOL_INDEX)
 
     if artifact is None:
         body = (
@@ -134,43 +132,27 @@ def _render_tool_usage_panel(entries: list[dict]) -> str:
         return _panel_wrapper(header, body, open_by_default=True)
 
     # tool_index may live in 'content' (JSON string) or 'index' (dict).
-    index: dict[str, Any] = {}
-    raw = artifact.get("index") or artifact.get("content") or artifact.get("data")
-    if isinstance(raw, dict):
-        index = raw
-    elif isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                index = parsed
-        except (ValueError, TypeError):
-            index = {}
+    # Shape is authoritative — produced by tool_index.build_tool_index which
+    # writes `{"index": {"tool_counts": dict, "tool_errors": dict,
+    # "tool_call_count": int, "assistant_turns": int, "mcp_servers_unused":
+    # list, "first_tool_error": dict | None, ...}}`. Don't invent fallback
+    # shapes; the producer is a single function and there's no legacy variant.
+    index = artifact.get("index") or {}
+    if not isinstance(index, dict):
+        index = {}
 
     total_calls = int(index.get("tool_call_count", 0) or 0)
     total_turns = int(index.get("assistant_turns", 0) or 0)
 
-    # Accept either a dict {tool: count} or a list of {name, count, errors}
-    counts_raw = index.get("tool_counts") or index.get("counts") or {}
-    errors_raw = index.get("tool_errors") or index.get("errors") or {}
+    counts_raw = index.get("tool_counts") or {}
+    errors_raw = index.get("tool_errors") or {}
     tool_rows: list[tuple[str, int, int]] = []
-
     if isinstance(counts_raw, dict):
         for name, count in counts_raw.items():
             err = 0
             if isinstance(errors_raw, dict):
                 err = int(errors_raw.get(name, 0) or 0)
             tool_rows.append((str(name), int(count or 0), err))
-    elif isinstance(counts_raw, list):
-        for item in counts_raw:
-            if not isinstance(item, dict):
-                continue
-            tool_rows.append(
-                (
-                    str(item.get("name", "")),
-                    int(item.get("count", 0) or 0),
-                    int(item.get("errors", 0) or 0),
-                )
-            )
 
     tool_rows.sort(key=lambda r: r[1], reverse=True)
 
@@ -236,7 +218,7 @@ def _render_tool_usage_panel(entries: list[dict]) -> str:
 
 def _render_agent_instructions_panel(entries: list[dict]) -> str:
     """Render the effective CLAUDE.md panel. Returns '' if artifact absent."""
-    artifact = _find_artifact(entries, ARTIFACT_EFFECTIVE_CLAUDE_MD)
+    artifact = find_artifact(entries, ARTIFACT_EFFECTIVE_CLAUDE_MD)
     if artifact is None:
         return ""
     content = str(artifact.get("content", ""))
@@ -258,7 +240,7 @@ def _render_agent_instructions_panel(entries: list[dict]) -> str:
 
 def _render_reasoning_narrative_panel(entries: list[dict]) -> str:
     """Render the session.log narrative. Returns '' if artifact absent."""
-    artifact = _find_artifact(entries, ARTIFACT_SESSION_LOG)
+    artifact = find_artifact(entries, ARTIFACT_SESSION_LOG)
     if artifact is None:
         return ""
     content = str(artifact.get("content", ""))
@@ -406,7 +388,7 @@ def _render_timeline_row(event: dict) -> str:
 
 def _render_timeline_panel(entries: list[dict]) -> str:
     """Render the Tool Calls Timeline panel. Returns '' if artifact absent."""
-    artifact = _find_artifact(entries, ARTIFACT_SESSION_STREAM)
+    artifact = find_artifact(entries, ARTIFACT_SESSION_STREAM)
     if artifact is None:
         return ""
 
@@ -469,7 +451,7 @@ def _render_timeline_panel(entries: list[dict]) -> str:
 def _has_any_session_artifact(entries: list[dict]) -> bool:
     """Check if the trace has any of the three downloadable artifacts."""
     return any(
-        _find_artifact(entries, name) is not None
+        find_artifact(entries, name) is not None
         for name in (
             ARTIFACT_SESSION_LOG,
             ARTIFACT_SESSION_STREAM,

@@ -465,6 +465,31 @@ _PHASE_ICON_TYPE: dict[str, str] = {
 }
 
 
+def find_artifact(
+    entries: list[dict[str, Any]],
+    event_name: str,
+    *,
+    latest: bool = True,
+) -> dict[str, Any] | None:
+    """Return the artifact entry for ``event_name`` or None.
+
+    Walks `entries` looking for a row where `phase == "artifact"` and
+    `event == event_name`. On re-triggered traces (multiple runs for the
+    same ticket) there can be more than one match; `latest=True` (default)
+    returns the most recent by scanning in reverse, which is what every
+    current caller wants — dashboards render the latest state, diagnostic
+    consumes the latest tool_index, the bundle exports the latest artifacts.
+
+    Set `latest=False` to get the first match (first-run artifact) if you
+    specifically need historical state.
+    """
+    iterator = reversed(entries) if latest else iter(entries)
+    for entry in iterator:
+        if entry.get("phase") == "artifact" and entry.get("event") == event_name:
+            return entry
+    return None
+
+
 def build_span_tree(entries: list[dict[str, Any]]) -> dict[str, Any]:
     """Group flat trace entries into an L1/L2/L3 span tree with artifact linking.
 

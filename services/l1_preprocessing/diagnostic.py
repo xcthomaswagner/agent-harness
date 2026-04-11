@@ -20,7 +20,7 @@ import html
 import re
 from typing import Any
 
-from tracer import ARTIFACT_TOOL_INDEX
+from tracer import ARTIFACT_TOOL_INDEX, find_artifact
 
 _CHECK_ORDER = [
     "platform_detected",
@@ -63,12 +63,17 @@ def _result(
 
 
 def _find_tool_index(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
-    for e in entries:
-        if e.get("event") == ARTIFACT_TOOL_INDEX:
-            idx = e.get("index")
-            if isinstance(idx, dict):
-                return idx
-    return None
+    """Return the latest tool_index dict from the trace entries, or None.
+
+    Thin wrapper around tracer.find_artifact that unwraps the `index` field
+    and validates its shape. Using find_artifact ensures re-triggered traces
+    surface the latest run's index, not a stale one from a prior run.
+    """
+    entry = find_artifact(entries, ARTIFACT_TOOL_INDEX)
+    if entry is None:
+        return None
+    idx = entry.get("index")
+    return idx if isinstance(idx, dict) else None
 
 
 def _find_platform_marker(entries: list[dict[str, Any]]) -> str | None:
