@@ -11,6 +11,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -24,6 +27,24 @@ SUPPLEMENT_MAP = {
     "CODE_REVIEW_SUPPLEMENT.md": "code-review",
     "QA_SUPPLEMENT.md": "qa-validation",
 }
+
+# Matches ${VAR} and ${VAR:-default} for env expansion in MCP configs
+_ENV_VAR_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
+
+
+def expand_env_vars(value):
+    """Recursively expand ${VAR} and ${VAR:-default} in strings within a JSON-like structure."""
+    if isinstance(value, str):
+        def _sub(match: re.Match[str]) -> str:
+            var_name = match.group(1)
+            default = match.group(2) or ""
+            return os.environ.get(var_name, default)
+        return _ENV_VAR_RE.sub(_sub, value)
+    if isinstance(value, dict):
+        return {k: expand_env_vars(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [expand_env_vars(v) for v in value]
+    return value
 
 
 def inject(target_dir: Path, platform_profile: str = "") -> None:
@@ -81,6 +102,30 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
             print(f"Available profiles: {', '.join(available)}")
             sys.exit(1)
 
+        # Copy profile-local skills into .claude/skills/
+        profile_skills_dir = profile_dir / "skills"
+        if profile_skills_dir.is_dir():
+            for profile_skill in sorted(profile_skills_dir.iterdir()):
+                if not profile_skill.is_dir():
+                    continue
+                skill_name = profile_skill.name
+                target_skill = skills_dest / skill_name
+
+                # Same collision handling as base skills
+                if target_skill.exists():
+                    marker = target_skill / ".harness-injected"
+                    if marker.exists():
+                        shutil.rmtree(target_skill)
+                    else:
+                        print(f"[inject] WARNING: Client skill '{skill_name}' exists — prefixing with 'harness-'")
+                        target_skill = skills_dest / f"harness-{skill_name}"
+                        if target_skill.exists():
+                            shutil.rmtree(target_skill)
+
+                shutil.copytree(profile_skill, target_skill, dirs_exist_ok=True)
+                (target_skill / ".harness-injected").touch()
+                print(f"[inject] Profile skill: {skill_name}")
+
         # Append supplements to relevant skills
         for supplement in profile_dir.glob("*_SUPPLEMENT.md"):
             target_skill_name = SUPPLEMENT_MAP.get(supplement.name)
@@ -136,11 +181,27 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
             f.write(harness_claude.read_text())
         print("[inject] CLAUDE.md created (harness only, no client conventions)")
 
-    # --- Step 5: Generate .mcp.json ---
+    # --- Step 5: Generate .mcp.json (base + optional platform profile MCP merge) ---
     mcp_template = RUNTIME_DIR / "harness-mcp.json"
     if mcp_template.exists():
-        shutil.copy2(mcp_template, target_dir / ".mcp.json")
-        print("[inject] MCP config copied")
+        base_mcp = json.loads(mcp_template.read_text())
+        base_servers = base_mcp.setdefault("mcpServers", {})
+
+        if platform_profile:
+            profile_mcp_path = RUNTIME_DIR / "platform-profiles" / platform_profile / "harness-mcp.json"
+            if profile_mcp_path.exists():
+                profile_mcp = json.loads(profile_mcp_path.read_text())
+                profile_servers = profile_mcp.get("mcpServers", {})
+                # Profile keys override base on collision
+                for server_name, server_cfg in profile_servers.items():
+                    base_servers[server_name] = server_cfg
+                    print(f"[inject] MCP server from profile: {server_name}")
+
+        # Expand ${VAR} and ${VAR:-default} placeholders
+        merged_mcp = expand_env_vars(base_mcp)
+
+        (target_dir / ".mcp.json").write_text(json.dumps(merged_mcp, indent=2) + "\n")
+        print("[inject] MCP config written")
 
     # --- Step 6: Create harness directories ---
     for subdir in ("logs", "messages", "plans"):

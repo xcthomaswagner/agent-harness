@@ -1,5 +1,21 @@
 # Salesforce Implementation Supplement
 
+## Use the Salesforce Dev Loop
+
+**Before you start implementing:** if the client repo contains `sfdx-project.json` at the root, follow the `/salesforce-dev-loop` skill for the compile/test/deploy cycle instead of the generic `npm test` flow from the base `implement` skill.
+
+The dev-loop skill covers:
+- Scratch org provisioning and reuse (`SCRATCH_ORG_LIFECYCLE.md`)
+- Deploy validation as the compile check (`DEPLOY_VALIDATE.md`)
+- Apex test execution and coverage gates (`APEX_TEST_STRATEGY.md`)
+- Metadata deployment ordering for Agentforce and other dependent metadata (`METADATA_DEPLOYMENT_ORDER.md`)
+
+You have access to the `salesforce` MCP server (100+ structured tools: `sf_deploy`, `sf_apex_test`, `sf_query`, `sf_scratch_create`, `sf_agent_*`, `sf_lwc_*`, etc.). Prefer these over shelling out to the `sf` CLI — they return parsed JSON and are more reliable. The MCP runs in harness mode with a production guard that blocks writes against production orgs.
+
+The rest of this supplement covers the **what to write** (Apex patterns, LWC structure, Agentforce metadata, B2B, OMS). The dev-loop skill covers the **how to verify it works**. Use both together.
+
+---
+
 ## Apex
 
 ### Class Patterns

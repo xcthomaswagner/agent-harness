@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-import shutil
+import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -82,9 +83,129 @@ def test_invalid_target() -> None:
     assert result.returncode != 0
 
 
+def test_salesforce_mcp_merged() -> None:
+    """Injecting with --platform-profile salesforce must merge the SF MCP server
+    into .mcp.json alongside the base servers, expand ${SALESFORCE_MCP_PATH}
+    from the environment, and set SF_HARNESS_MODE=true."""
+    with tempfile.TemporaryDirectory() as tmp:
+        client = Path(tmp) / "sf-client"
+        client.mkdir()
+
+        env = os.environ.copy()
+        env["SALESFORCE_MCP_PATH"] = "/opt/test-sf-mcp"
+
+        cmd = [
+            sys.executable,
+            str(SCRIPT),
+            "--target-dir", str(client),
+            "--platform-profile", "salesforce",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        assert result.returncode == 0, result.stderr
+
+        mcp = json.loads((client / ".mcp.json").read_text())
+        servers = mcp["mcpServers"]
+
+        # Base server preserved
+        assert "playwright" in servers
+        # Profile server merged in
+        assert "salesforce" in servers
+
+        sf = servers["salesforce"]
+        assert sf["command"] == "node"
+        # ${SALESFORCE_MCP_PATH} expanded from env
+        assert sf["args"] == ["/opt/test-sf-mcp/dist/index.js"]
+        # Production guard enabled
+        assert sf["env"]["SF_HARNESS_MODE"] == "true"
+
+
+def test_mcp_env_var_default_fallback() -> None:
+    """When SALESFORCE_MCP_PATH is not set, the profile's default path is used."""
+    with tempfile.TemporaryDirectory() as tmp:
+        client = Path(tmp) / "sf-default"
+        client.mkdir()
+
+        env = os.environ.copy()
+        env.pop("SALESFORCE_MCP_PATH", None)
+
+        cmd = [
+            sys.executable,
+            str(SCRIPT),
+            "--target-dir", str(client),
+            "--platform-profile", "salesforce",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        assert result.returncode == 0, result.stderr
+
+        mcp = json.loads((client / ".mcp.json").read_text())
+        sf_args = mcp["mcpServers"]["salesforce"]["args"]
+        # Default resolves to the literal path from the profile
+        assert sf_args == [
+            "/Users/thomaswagner/Desktop/Projects.nosync/salesforce-mcp-server/dist/index.js"
+        ]
+
+
+def test_salesforce_profile_skills_copied() -> None:
+    """Injecting with --platform-profile salesforce must copy profile-local skills
+    (e.g. salesforce-dev-loop) into .claude/skills/ alongside the base skills."""
+    with tempfile.TemporaryDirectory() as tmp:
+        client = Path(tmp) / "sf-skills"
+        client.mkdir()
+
+        result = run_inject(str(client), platform_profile="salesforce")
+        assert result.returncode == 0, result.stderr
+
+        # Profile-local skill injected
+        dev_loop = client / ".claude" / "skills" / "salesforce-dev-loop"
+        assert dev_loop.is_dir()
+        assert (dev_loop / "SKILL.md").exists()
+        assert (dev_loop / "SCRATCH_ORG_LIFECYCLE.md").exists()
+        assert (dev_loop / "DEPLOY_VALIDATE.md").exists()
+        assert (dev_loop / "APEX_TEST_STRATEGY.md").exists()
+        assert (dev_loop / "METADATA_DEPLOYMENT_ORDER.md").exists()
+
+        # Base skills still present
+        assert (client / ".claude" / "skills" / "implement").is_dir()
+        assert (client / ".claude" / "skills" / "ticket-analyst").is_dir()
+
+        # Marker present for clean re-injection
+        assert (dev_loop / ".harness-injected").exists()
+
+
+def test_non_salesforce_profile_skill_not_leaked() -> None:
+    """Without --platform-profile, profile-local skills must NOT be copied."""
+    with tempfile.TemporaryDirectory() as tmp:
+        client = Path(tmp) / "no-profile-skill"
+        client.mkdir()
+
+        result = run_inject(str(client))
+        assert result.returncode == 0
+
+        assert not (client / ".claude" / "skills" / "salesforce-dev-loop").exists()
+
+
+def test_non_salesforce_profile_unaffected() -> None:
+    """Injecting without a platform profile must NOT add the SF MCP server."""
+    with tempfile.TemporaryDirectory() as tmp:
+        client = Path(tmp) / "no-profile"
+        client.mkdir()
+
+        result = run_inject(str(client))
+        assert result.returncode == 0
+
+        mcp = json.loads((client / ".mcp.json").read_text())
+        assert "playwright" in mcp["mcpServers"]
+        assert "salesforce" not in mcp["mcpServers"]
+
+
 if __name__ == "__main__":
     test_basic_injection()
     test_no_client_claude_md()
     test_skill_collision()
     test_invalid_target()
+    test_salesforce_mcp_merged()
+    test_mcp_env_var_default_fallback()
+    test_salesforce_profile_skills_copied()
+    test_non_salesforce_profile_skill_not_leaked()
+    test_non_salesforce_profile_unaffected()
     print("All tests passed")

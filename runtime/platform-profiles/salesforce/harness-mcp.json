@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "salesforce": {
+      "command": "node",
+      "args": ["${SALESFORCE_MCP_PATH:-/Users/thomaswagner/Desktop/Projects.nosync/salesforce-mcp-server}/dist/index.js"],
+      "env": {
+        "SF_HARNESS_MODE": "true"
+      }
+    }
+  }
+}
