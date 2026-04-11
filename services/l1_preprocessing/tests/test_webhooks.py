@@ -279,6 +279,23 @@ async def test_ado_webhook_tag_removed_then_readded_retriggers() -> None:
             assert r3.json()["status"] == "accepted"
 
 
+def _seed_ticket(ticket_id: str):
+    """Seed a ticket as mid-flight (tag observed, claim held) and return a
+    TicketPayload matching what the ADO adapter would normalize. Shared by
+    the _process_ticket direct regression tests so each one doesn't repeat
+    the four-line setup for _last_trigger_state + _active_tickets + payload
+    construction.
+    """
+    from models import TicketPayload
+
+    main._last_trigger_state[ticket_id] = True
+    main._active_tickets.add(ticket_id)
+    return TicketPayload(
+        source="ado", id=ticket_id, ticket_type="story",
+        title="t", description="d", acceptance_criteria=["a"],
+    )
+
+
 async def test_process_ticket_clears_trigger_state_on_exception() -> None:
     """Regression: if _process_ticket raises, the trigger-state must be
     cleared so a subsequent webhook for the same ticket can re-trigger.
@@ -288,17 +305,7 @@ async def test_process_ticket_clears_trigger_state_on_exception() -> None:
     is silently dropped as "not a new edge" — permanently wedging the ticket
     until the tag is removed-and-readded or the service restarts.
     """
-    from models import TicketPayload
-
-    # Seed: simulate that a prior webhook observed the tag present. Then a
-    # failing pipeline should clear that state.
-    main._last_trigger_state["FAIL-1"] = True
-    main._active_tickets.add("FAIL-1")
-
-    ticket = TicketPayload(
-        source="ado", id="FAIL-1", ticket_type="story",
-        title="t", description="d", acceptance_criteria=["a"],
-    )
+    ticket = _seed_ticket("FAIL-1")
 
     failing_pipeline = AsyncMock()
     failing_pipeline.process = AsyncMock(side_effect=RuntimeError("pipeline boom"))
@@ -317,15 +324,7 @@ async def test_process_ticket_clears_trigger_state_on_no_spawn() -> None:
     decided the ticket needs clarification), trigger-state must be cleared
     so the user can re-trigger after addressing the clarification request.
     """
-    from models import TicketPayload
-
-    main._last_trigger_state["NOSPAWN-1"] = True
-    main._active_tickets.add("NOSPAWN-1")
-
-    ticket = TicketPayload(
-        source="ado", id="NOSPAWN-1", ticket_type="story",
-        title="t", description="d", acceptance_criteria=["a"],
-    )
+    ticket = _seed_ticket("NOSPAWN-1")
 
     # Pipeline returns without spawn_triggered (analyst flagged as
     # needs-clarification, or enrichment failed, or any non-L2 path).
@@ -347,15 +346,7 @@ async def test_process_ticket_keeps_trigger_state_on_successful_spawn() -> None:
     trigger state (agent-complete's _delayed_release owns cleanup). Clearing
     early would allow cascading webhooks to re-dispatch during the agent run.
     """
-    from models import TicketPayload
-
-    main._last_trigger_state["SPAWN-1"] = True
-    main._active_tickets.add("SPAWN-1")
-
-    ticket = TicketPayload(
-        source="ado", id="SPAWN-1", ticket_type="story",
-        title="t", description="d", acceptance_criteria=["a"],
-    )
+    ticket = _seed_ticket("SPAWN-1")
 
     spawn_pipeline = AsyncMock()
     spawn_pipeline.process = AsyncMock(
@@ -522,10 +513,10 @@ async def test_webhook_stats_counters() -> None:
             body = stats.json()
 
     counters = body["counters"]
-    assert counters["ado_accepted_edge"] == 1
-    assert counters["ado_skipped_not_edge"] == 1
-    assert counters["ado_skipped_no_tag"] == 1
-    assert body["release_delay_sec"] == main._AGENT_COMPLETE_RELEASE_DELAY_SEC
+    assert counters[main.COUNTER_ACCEPTED_EDGE] == 1
+    assert counters[main.COUNTER_SKIPPED_NOT_EDGE] == 1
+    assert counters[main.COUNTER_SKIPPED_NO_TAG] == 1
+    assert body["release_delay_sec"] == main.settings.agent_complete_release_delay_sec
 
 
 async def test_agent_complete_clears_trigger_state_after_delay() -> None:
@@ -533,7 +524,7 @@ async def test_agent_complete_clears_trigger_state_after_delay() -> None:
     clear both _active_tickets and _last_trigger_state once the cooldown
     window expires. This path was previously untested because the default
     60-second delay makes tests impractical — now configurable via
-    _AGENT_COMPLETE_RELEASE_DELAY_SEC which we monkeypatch to 0.
+    settings.agent_complete_release_delay_sec which we monkeypatch to 0.
     """
     import asyncio
 
@@ -550,8 +541,12 @@ async def test_agent_complete_clears_trigger_state_after_delay() -> None:
         "branch": "ai/SCRUM-9",
     }
 
+    # Snapshot background tasks BEFORE the POST so we can identify the new
+    # _delayed_release task created by agent_complete.
+    before = set(main._BACKGROUND_TASKS)
+
     with (
-        patch.object(main, "_AGENT_COMPLETE_RELEASE_DELAY_SEC", 0),
+        patch.object(main.settings, "agent_complete_release_delay_sec", 0),
         patch.object(main, "_get_jira_adapter") as mock_get,
     ):
         mock_adapter = AsyncMock()
@@ -561,10 +556,13 @@ async def test_agent_complete_clears_trigger_state_after_delay() -> None:
             response = await client.post("/api/agent-complete", json=completion)
         assert response.status_code == 200
 
-        # The delayed-release is a fire-and-forget task. Yield control a few
-        # times so it can run to completion.
-        for _ in range(5):
-            await asyncio.sleep(0)
+        # Grab the delayed-release task that agent_complete just created and
+        # await it directly instead of guessing the right number of event-loop
+        # yields. This keeps the test deterministic if _delayed_release grows
+        # new await points in the future.
+        new_tasks = main._BACKGROUND_TASKS - before
+        assert new_tasks, "agent_complete should have scheduled a delayed_release task"
+        await asyncio.gather(*new_tasks)
 
     assert "SCRUM-9" not in main._active_tickets, \
         "ticket should be released from _active_tickets after delay"

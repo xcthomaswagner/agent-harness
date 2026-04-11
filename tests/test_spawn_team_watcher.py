@@ -41,6 +41,28 @@ def _load_spawn_team_module():
     return mod
 
 
+class _FakeUrlopenResponse:
+    """Minimal stand-in for urllib.request.urlopen's context manager result."""
+
+    def __enter__(self) -> "_FakeUrlopenResponse":
+        return self
+
+    def __exit__(self, *a: object) -> None:
+        pass
+
+    def read(self) -> bytes:
+        return b""
+
+
+def _capturing_urlopen(posted: list[dict]):
+    """Build a urlopen replacement that appends each POSTed payload's parsed
+    JSON body to the given list. Caller owns the list."""
+    def _fake(req, timeout: int = 3) -> _FakeUrlopenResponse:
+        posted.append(json.loads(req.data))
+        return _FakeUrlopenResponse()
+    return _fake
+
+
 def test_trace_watcher_buffers_partial_lines(tmp_path: Path) -> None:
     """A line written in two chunks (partial → remainder) must be posted
     exactly once with the reassembled payload, not dropped or double-parsed."""
@@ -59,24 +81,11 @@ def test_trace_watcher_buffers_partial_lines(tmp_path: Path) -> None:
     }))
 
     posted: list[dict] = []
-
-    class _FakeResponse:
-        def __enter__(self) -> "_FakeResponse":
-            return self
-
-        def __exit__(self, *a: object) -> None:
-            pass
-
-        def read(self) -> bytes:
-            return b""
-
-    def _fake_urlopen(req, timeout: int = 3) -> _FakeResponse:
-        posted.append(json.loads(req.data))
-        return _FakeResponse()
-
     stop = threading.Event()
 
-    with patch.object(spawn_team.urllib.request, "urlopen", side_effect=_fake_urlopen):
+    with patch.object(
+        spawn_team.urllib.request, "urlopen", side_effect=_capturing_urlopen(posted)
+    ):
         thread = threading.Thread(
             target=spawn_team._trace_watcher,
             args=(jsonl, config, stop),
@@ -141,24 +150,11 @@ def test_trace_watcher_drains_on_shutdown(tmp_path: Path) -> None:
     }))
 
     posted: list[dict] = []
-
-    class _FakeResponse:
-        def __enter__(self) -> "_FakeResponse":
-            return self
-
-        def __exit__(self, *a: object) -> None:
-            pass
-
-        def read(self) -> bytes:
-            return b""
-
-    def _fake_urlopen(req, timeout: int = 3) -> _FakeResponse:
-        posted.append(json.loads(req.data))
-        return _FakeResponse()
-
     stop = threading.Event()
 
-    with patch.object(spawn_team.urllib.request, "urlopen", side_effect=_fake_urlopen):
+    with patch.object(
+        spawn_team.urllib.request, "urlopen", side_effect=_capturing_urlopen(posted)
+    ):
         thread = threading.Thread(
             target=spawn_team._trace_watcher,
             args=(jsonl, config, stop),

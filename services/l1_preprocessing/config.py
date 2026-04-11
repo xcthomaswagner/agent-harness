@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     # Queue (optional — falls back to in-process background tasks if empty)
     redis_url: str = ""  # e.g., redis://localhost:6379/0
 
+    # Seconds to keep a ticket claimed after /api/agent-complete fires. The
+    # window absorbs self-triggered ADO webhooks from our own comment-post
+    # and status-transition write-backs so they don't cascade into re-runs.
+    # Edge-detection state is cleared on the same schedule.
+    agent_complete_release_delay_sec: int = 60
+
     # Autonomy metrics
     l1_internal_api_token: str = ""
     autonomy_admin_token: str = ""  # Phase 3 — admin write endpoints (env plumbing only in Phase 1)
