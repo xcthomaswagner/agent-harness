@@ -108,15 +108,35 @@ async def _validate_config() -> None:
     if not settings.jira_base_url and not settings.ado_org_url:
         logger.warning("no_ticket_source_configured", hint="Set JIRA_BASE_URL or ADO_ORG_URL")
 
-    # Check reference documentation URLs in background (non-blocking)
-    import asyncio
-
+    # Check reference documentation URLs in background (non-blocking).
+    # Use _spawn_background_task so the task auto-removes itself from
+    # the tracking set when it finishes.
     from url_checker import check_reference_urls
 
-    _background_tasks.add(asyncio.create_task(check_reference_urls()))
+    _spawn_background_task(check_reference_urls())
 
-# Hold references to background tasks so they aren't garbage-collected
-_background_tasks: set[object] = set()
+# Hold references to background tasks so they aren't garbage-collected.
+# Tasks are removed from the set via ``_spawn_background_task`` below —
+# without the done-callback the set grows unbounded for every
+# fire-and-forget ``asyncio.create_task`` ever issued.
+_background_tasks: set[asyncio.Task[Any]] = set()
+
+
+def _spawn_background_task(coro: Any) -> asyncio.Task[Any]:
+    """Fire-and-forget a coroutine with safe lifecycle management.
+
+    Previously each caller did
+    ``_background_tasks.add(asyncio.create_task(coro))`` without a
+    matching ``add_done_callback(_background_tasks.discard)``, which
+    turned the set into a permanent leak — every task ever spawned
+    stayed referenced (and its result/exc_info retained) for the
+    process lifetime. This helper wraps both halves: the task is
+    held strongly until it completes, then auto-discarded.
+    """
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 _jira_adapter: JiraAdapter | None = None
 _ado_adapter: AdoAdapter | None = None
@@ -151,7 +171,6 @@ def _get_pipeline() -> Pipeline:
 
 _active_tickets: set[str] = set()
 _active_tickets_lock = __import__("threading").Lock()
-_BACKGROUND_TASKS: set[asyncio.Task[None]] = set()  # prevent GC of fire-and-forget tasks
 
 # Per-ticket edge-detection memory for the trigger tag. See
 # _check_trigger_edge below for semantics, and
@@ -281,6 +300,51 @@ def _enqueue_or_background(
 
     background_tasks.add_task(_process_ticket, ticket, trace_id)
     return "background"
+
+
+def _dispatch_ticket(
+    ticket: TicketPayload,
+    background_tasks: BackgroundTasks,
+    *,
+    source: str,
+    event: str,
+    trace_id: str | None = None,
+) -> dict[str, str]:
+    """Shared tail for every ticket-ingest endpoint.
+
+    Handles the boilerplate that ``jira_webhook`` / ``ado_webhook`` /
+    ``manual_process_ticket`` used to copy-paste: mint a trace id,
+    emit the breadcrumb log line, append a ``webhook`` trace entry
+    so the dashboard lists the run, hand off to
+    ``_enqueue_or_background``, and return the ``accepted`` /
+    ``skipped`` response dict. Previously ``manual_process_ticket``
+    silently omitted the ``append_trace`` breadcrumb, so tickets
+    dispatched via the manual endpoint were harder to find in the
+    trace list; the helper fixes that drift by construction.
+    """
+    tid = trace_id or generate_trace_id()
+    logger.info(
+        event, ticket_id=ticket.id, ticket_type=ticket.ticket_type
+    )
+    append_trace(
+        ticket.id, tid, "webhook", event,
+        ticket_type=ticket.ticket_type, source=source,
+        ticket_title=ticket.title,
+    )
+    dispatch = _enqueue_or_background(
+        ticket, background_tasks, trace_id=tid
+    )
+    if dispatch == "duplicate":
+        return {
+            "status": "skipped",
+            "ticket_id": ticket.id,
+            "reason": "already processing",
+        }
+    return {
+        "status": "accepted",
+        "ticket_id": ticket.id,
+        "dispatch": dispatch,
+    }
 
 
 async def _process_ticket(ticket: TicketPayload, trace_id: str = "") -> None:
@@ -1203,17 +1267,12 @@ async def jira_webhook(
     """Receive a Jira automation webhook and enqueue for processing."""
     payload = await _validate_and_parse_webhook(request, x_hub_signature)
     ticket = _get_jira_adapter().normalize(payload)
-
-    trace_id = generate_trace_id()
-    logger.info("jira_webhook_received", ticket_id=ticket.id, ticket_type=ticket.ticket_type)
-    append_trace(ticket.id, trace_id, "webhook", "jira_webhook_received",
-                 ticket_type=ticket.ticket_type, source="jira",
-                 ticket_title=ticket.title)
-
-    dispatch = _enqueue_or_background(ticket, background_tasks, trace_id=trace_id)
-    if dispatch == "duplicate":
-        return {"status": "skipped", "ticket_id": ticket.id, "reason": "already processing"}
-    return {"status": "accepted", "ticket_id": ticket.id, "dispatch": dispatch}
+    return _dispatch_ticket(
+        ticket,
+        background_tasks,
+        source="jira",
+        event="jira_webhook_received",
+    )
 
 
 @app.post("/webhooks/jira-bug", status_code=202)
@@ -1341,17 +1400,13 @@ async def ado_webhook(
             "reason": "trigger tag already present on previous webhook (not a new edge)",
         }
 
-    trace_id = generate_trace_id()
-    logger.info("ado_webhook_received", ticket_id=ticket.id, ticket_type=ticket.ticket_type)
-    append_trace(ticket.id, trace_id, "webhook", "ado_webhook_received",
-                 ticket_type=ticket.ticket_type, source="ado",
-                 ticket_title=ticket.title)
     _bump_webhook_counter(COUNTER_ACCEPTED_EDGE)
-
-    dispatch = _enqueue_or_background(ticket, background_tasks, trace_id=trace_id)
-    if dispatch == "duplicate":
-        return {"status": "skipped", "ticket_id": ticket.id, "reason": "already processing"}
-    return {"status": "accepted", "ticket_id": ticket.id, "dispatch": dispatch}
+    return _dispatch_ticket(
+        ticket,
+        background_tasks,
+        source="ado",
+        event="ado_webhook_received",
+    )
 
 
 @app.post("/api/process-ticket", status_code=202, dependencies=[Depends(_require_api_key)])
@@ -1362,12 +1417,17 @@ async def manual_process_ticket(
     """Manual trigger — accepts a TicketPayload directly (bypasses webhook).
 
     Essential for testing the pipeline without Jira/ADO webhooks configured.
+    Previously this endpoint skipped the ``append_trace`` webhook
+    breadcrumb, so manually-submitted tickets were harder to find in
+    the trace dashboard. The shared ``_dispatch_ticket`` helper fixes
+    that drift by construction.
     """
-    logger.info(
-        "manual_ticket_submitted", ticket_id=ticket.id, ticket_type=ticket.ticket_type
+    return _dispatch_ticket(
+        ticket,
+        background_tasks,
+        source="manual",
+        event="manual_ticket_submitted",
     )
-    dispatch = _enqueue_or_background(ticket, background_tasks)
-    return {"status": "accepted", "ticket_id": ticket.id, "dispatch": dispatch}
 
 
 _TICKET_ID_PATTERN = re.compile(r"^[A-Za-z0-9]+-[0-9]+$")
@@ -1378,6 +1438,42 @@ _TICKET_ID_PATTERN = re.compile(r"^[A-Za-z0-9]+-[0-9]+$")
 # braces so a bad branch fails fast at input validation.
 _BRANCH_PATTERN = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9/_.-]*$")
 _VALID_PHASES = {"qa", "e2e", "review"}
+
+
+def _resolve_worktree_dir(client_repo: str, branch: str) -> Path:
+    """Validate ``branch`` and return the resolved worktree directory.
+
+    Shared by ``/api/retest`` and ``/api/agent-complete`` — both
+    construct ``<client_repo>/../worktrees/<branch>`` from a
+    request-supplied branch name and must defend against ``..`` and
+    sibling-prefix traversal (e.g. ``worktrees-evil``). Raises
+    ``HTTPException(400)`` on invalid regex, empty branch, or a path
+    that resolves outside the worktrees parent directory.
+
+    Callers should still verify ``result.exists()`` themselves since
+    the semantics of "worktree doesn't exist yet" vs "branch is
+    invalid" differ across the two endpoints.
+    """
+    if not branch or not _BRANCH_PATTERN.match(branch):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid branch name (alphanumeric, slashes, dots, hyphens only)",
+        )
+
+    worktrees_parent = (Path(client_repo).parent / "worktrees").resolve()
+    worktree_resolved = (worktrees_parent / branch).resolve()
+    # Path containment guard — use Path.relative_to which checks path
+    # components, not string prefixes. A sibling directory like
+    # ``worktrees-evil`` would pass a naive startswith check because
+    # its resolved path literally starts with ``/.../worktrees``.
+    try:
+        worktree_resolved.relative_to(worktrees_parent)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Branch resolves outside worktree directory",
+        ) from None
+    return worktree_resolved
 
 
 class RetestPayload(BaseModel):
@@ -1413,30 +1509,11 @@ async def retest(payload: RetestPayload, background_tasks: BackgroundTasks) -> d
         )
 
     branch = payload.branch or f"ai/{payload.ticket_id}"
-    if not _BRANCH_PATTERN.match(branch):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid branch name (alphanumeric, slashes, dots, hyphens only)",
-        )
-
     client_repo = settings.default_client_repo
     if not client_repo:
         return {"status": "error", "detail": "No default_client_repo configured"}
 
-    worktrees_parent = (Path(client_repo).parent / "worktrees").resolve()
-    worktree_resolved = (worktrees_parent / branch).resolve()
-    # Path containment guard — use Path.is_relative_to instead of string
-    # startswith, which previously let a sibling-prefix directory like
-    # ``worktrees-evil`` pass because its resolved path literally starts
-    # with the string ``/.../worktrees``. is_relative_to checks path
-    # components, not character prefixes.
-    try:
-        worktree_resolved.relative_to(worktrees_parent)
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail="Branch resolves outside worktree directory",
-        ) from None
+    worktree_resolved = _resolve_worktree_dir(client_repo, branch)
     if not worktree_resolved.exists():
         return {
             "status": "error",
@@ -1622,7 +1699,30 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
     """Called by the spawn script when the agent finishes.
 
     Updates the Jira/ADO ticket with the PR link and transitions to Done.
+
+    Validates both ``ticket_id`` and ``branch`` because both flow into
+    filesystem paths: ``ticket_id`` becomes ``LOGS_DIR/{ticket_id}.jsonl``
+    via ``append_trace`` and ``branch`` becomes the worktree path that
+    ``consolidate_worktree_logs`` reads from. Without validation, a
+    caller with a leaked API key could plant ``.jsonl`` files outside
+    ``LOGS_DIR`` or point consolidation at an arbitrary git repo. The
+    ``/api/retest`` endpoint validates both the same way; keeping the
+    two endpoints symmetrical closes the defense-in-depth gap.
     """
+    if not _TICKET_ID_PATTERN.match(payload.ticket_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid ticket_id format (expected: PROJ-123)",
+        )
+    # Validate branch via the shared helper. Fall back to ``ai/<ticket_id>``
+    # if the caller omitted a branch (matches the retest convention and
+    # the spawn_team.py default).
+    branch = payload.branch or f"ai/{payload.ticket_id}"
+    client_repo = settings.default_client_repo
+    worktree_resolved: Path | None = None
+    if client_repo:
+        worktree_resolved = _resolve_worktree_dir(client_repo, branch)
+
     log = logger.bind(ticket_id=payload.ticket_id, status=payload.status)
     log.info("agent_completion_received", pr_url=payload.pr_url)
 
@@ -1637,16 +1737,20 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
         _release_ticket(ticket_id)
         _clear_trigger_state(ticket_id)
 
-    _BACKGROUND_TASKS.add(asyncio.ensure_future(_delayed_release(payload.ticket_id)))
+    _spawn_background_task(_delayed_release(payload.ticket_id))
 
     # Trace: record completion — reuse the trace_id from the spawn chain
     # so live-reported entries and completion entries share the same trace_id
     trace_id = payload.trace_id or generate_trace_id()
     append_trace(payload.ticket_id, trace_id, "completion", "agent_finished",
-                 status=payload.status, pr_url=payload.pr_url, branch=payload.branch)
+                 status=payload.status, pr_url=payload.pr_url, branch=branch)
 
     # Consolidate worktree artifacts into the persistent trace
-    worktree_path = f"{settings.default_client_repo}/../worktrees/{payload.branch}"
+    worktree_path = (
+        str(worktree_resolved)
+        if worktree_resolved is not None
+        else f"{settings.default_client_repo}/../worktrees/{branch}"
+    )
     try:
         repo = payload.repo_full_name or _derive_repo_full_name(worktree_path)
         sha = payload.head_sha or _derive_head_sha(worktree_path)

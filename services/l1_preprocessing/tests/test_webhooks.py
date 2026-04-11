@@ -543,7 +543,7 @@ async def test_agent_complete_clears_trigger_state_after_delay() -> None:
 
     # Snapshot background tasks BEFORE the POST so we can identify the new
     # _delayed_release task created by agent_complete.
-    before = set(main._BACKGROUND_TASKS)
+    before = set(main._background_tasks)
 
     with (
         patch.object(main.settings, "agent_complete_release_delay_sec", 0),
@@ -560,7 +560,7 @@ async def test_agent_complete_clears_trigger_state_after_delay() -> None:
         # await it directly instead of guessing the right number of event-loop
         # yields. This keeps the test deterministic if _delayed_release grows
         # new await points in the future.
-        new_tasks = main._BACKGROUND_TASKS - before
+        new_tasks = main._background_tasks - before
         assert new_tasks, "agent_complete should have scheduled a delayed_release task"
         await asyncio.gather(*new_tasks)
 
@@ -568,6 +568,81 @@ async def test_agent_complete_clears_trigger_state_after_delay() -> None:
         "ticket should be released from _active_tickets after delay"
     assert "SCRUM-9" not in main._last_trigger_state, \
         "trigger state should be cleared after delay so future re-tag retriggers"
+
+    # Bug regression: the spawned delayed-release task must have
+    # auto-removed itself from _background_tasks when it finished.
+    # Previously the add() call had no matching done-callback, so the
+    # set grew unbounded for every /api/agent-complete webhook.
+    assert len(main._background_tasks) == len(before), (
+        "_background_tasks must not grow after a spawned task finishes"
+    )
+
+
+# --- /api/agent-complete ticket_id + branch validation ---
+#
+# Bug regression: /api/retest validates ticket_id and branch because
+# both feed filesystem paths, but /api/agent-complete — which takes
+# the same fields and passes them to append_trace (ticket_id) and
+# consolidate_worktree_logs (branch) — used to accept anything. With
+# a leaked API key, a caller could plant .jsonl files outside
+# LOGS_DIR via ``ticket_id="../../tmp/pwn"`` and point consolidation
+# at an arbitrary git repo via ``branch="../../../../some/other"``.
+# Fixed by adding the same _TICKET_ID_PATTERN check and the shared
+# _resolve_worktree_dir helper.
+
+
+async def test_agent_complete_rejects_path_traversal_ticket_id(
+    tmp_path: Path,
+) -> None:
+    """A ticket_id that would escape LOGS_DIR must be rejected 400."""
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    canary = tmp_path / "pwn.jsonl"
+    canary.write_text("original")
+
+    with patch("tracer.LOGS_DIR", logs_dir):
+        async with await _make_client() as client:
+            resp = await client.post(
+                "/api/agent-complete",
+                json={
+                    "ticket_id": "../../pwn",
+                    "status": "complete",
+                    "branch": "ai/something",
+                    "pr_url": "",
+                },
+            )
+    assert resp.status_code == 400
+    # Canary outside logs_dir untouched.
+    assert canary.read_text() == "original"
+    assert list(logs_dir.iterdir()) == []
+
+
+async def test_agent_complete_rejects_path_traversal_branch(
+    tmp_path: Path,
+) -> None:
+    """A branch containing ``..`` must be rejected 400 — same contract
+    as /api/retest — so consolidate_worktree_logs can't be pointed at
+    a directory outside the worktrees tree."""
+    fake_client = tmp_path / "client-repo"
+    fake_client.mkdir()
+    (fake_client / ".git").mkdir()
+
+    with patch("main.settings") as mock_settings:
+        mock_settings.api_key = ""
+        mock_settings.default_client_repo = str(fake_client)
+        mock_settings.agent_complete_release_delay_sec = 0
+        async with await _make_client() as client:
+            resp = await client.post(
+                "/api/agent-complete",
+                json={
+                    "ticket_id": "PROJ-1",
+                    "status": "complete",
+                    "branch": "../../../../tmp/escape",
+                    "pr_url": "",
+                },
+            )
+    assert resp.status_code == 400
+    assert "branch" in resp.json()["detail"].lower()
 
 
 # --- Jira Webhook: malformed payloads ---

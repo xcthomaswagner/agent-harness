@@ -43,6 +43,40 @@ def _chunks(items: list[Any], size: int | None = None) -> Iterator[list[Any]]:
         yield items[i : i + effective]
 
 
+def _chunked_in_query(
+    conn: sqlite3.Connection,
+    sql_template: str,
+    ids: list[int],
+    extra_params: list[Any] | tuple[Any, ...] = (),
+) -> list[sqlite3.Row]:
+    """Execute ``sql_template`` once per chunk of ``ids`` and collect rows.
+
+    SQLite's default ``SQLITE_MAX_VARIABLE_NUMBER`` is 999, so any
+    ``IN (...)`` lookup over more than ~900 IDs has to be chunked.
+    Callers used to hand-roll this pattern — build
+    ``",".join("?" * len(chunk))``, splice into the SQL, extend a
+    collector — and every new metric that needed it copy-pasted the
+    same 4-5 lines. Six instances of this shape existed in
+    ``compute_profile_metrics`` / ``compute_ticket_type_breakdown``
+    / ``compute_daily_trend`` before extraction.
+
+    ``sql_template`` must contain a single ``{placeholders}`` slot
+    where the ``?`` list should go. ``extra_params`` are appended to
+    each chunk's parameter list so queries with trailing bound
+    parameters (e.g. a confidence threshold) still work.
+    """
+    out: list[sqlite3.Row] = []
+    for chunk in _chunks(ids):
+        placeholders = ",".join("?" * len(chunk))
+        out.extend(
+            conn.execute(
+                sql_template.format(placeholders=placeholders),
+                [*chunk, *extra_params],
+            ).fetchall()
+        )
+    return out
+
+
 # Tier-4 "suggested" matches don't count toward the self-review catch
 # rate — they need manual promotion first. Tier-1..3 matches have
 # confidence >= 0.8 by construction.
@@ -127,57 +161,48 @@ def compute_profile_metrics(
         ai_issue_count = 0
         prs_with_ai = 0
     else:
-        # Valid human-review issues in window (chunked IN)
-        human_rows: list[sqlite3.Row] = []
-        for chunk in _chunks(pr_run_ids):
-            placeholders = ",".join("?" * len(chunk))
-            human_rows.extend(
-                conn.execute(
-                    f"SELECT id FROM review_issues WHERE pr_run_id IN ({placeholders}) "
-                    f"AND source = 'human_review' AND is_valid = 1",
-                    chunk,
-                ).fetchall()
-            )
+        # Valid human-review issues in window.
+        human_rows = _chunked_in_query(
+            conn,
+            "SELECT id FROM review_issues WHERE pr_run_id IN ({placeholders}) "
+            "AND source = 'human_review' AND is_valid = 1",
+            pr_run_ids,
+        )
         human_issue_count = len(human_rows)
 
         if human_rows:
             human_ids = [int(h["id"]) for h in human_rows]
-            matched_set: set[int] = set()
-            for chunk in _chunks(human_ids):
-                hph = ",".join("?" * len(chunk))
-                matched = conn.execute(
-                    f"SELECT DISTINCT human_issue_id FROM issue_matches "
-                    f"WHERE human_issue_id IN ({hph}) AND confidence >= ? "
-                    f"AND matched_by != 'suggested'",
-                    [*chunk, _CATCH_RATE_CONFIDENCE_THRESHOLD],
-                ).fetchall()
-                for m in matched:
-                    matched_set.add(int(m["human_issue_id"]))
-            matched_human_issue_count = len(matched_set)
+            matched_rows = _chunked_in_query(
+                conn,
+                "SELECT DISTINCT human_issue_id FROM issue_matches "
+                "WHERE human_issue_id IN ({placeholders}) AND confidence >= ? "
+                "AND matched_by != 'suggested'",
+                human_ids,
+                extra_params=[_CATCH_RATE_CONFIDENCE_THRESHOLD],
+            )
+            matched_human_issue_count = len(
+                {int(m["human_issue_id"]) for m in matched_rows}
+            )
         else:
             matched_human_issue_count = 0
 
-        # Sidecar coverage (distinct pr_runs with any valid AI/QA issue)
-        ai_pr_set: set[int] = set()
-        ai_issue_count = 0
-        for chunk in _chunks(pr_run_ids):
-            placeholders = ",".join("?" * len(chunk))
-            ai_pr_rows = conn.execute(
-                f"SELECT DISTINCT pr_run_id FROM review_issues "
-                f"WHERE pr_run_id IN ({placeholders}) "
-                f"AND source IN ('ai_review', 'qa') AND is_valid = 1",
-                chunk,
-            ).fetchall()
-            for r_ in ai_pr_rows:
-                ai_pr_set.add(int(r_["pr_run_id"]))
-            ai_issue_count_row = conn.execute(
-                f"SELECT COUNT(*) AS n FROM review_issues "
-                f"WHERE pr_run_id IN ({placeholders}) "
-                f"AND source IN ('ai_review', 'qa') AND is_valid = 1",
-                chunk,
-            ).fetchone()
-            if ai_issue_count_row:
-                ai_issue_count += int(ai_issue_count_row["n"])
+        # Sidecar coverage (distinct pr_runs with any valid AI/QA issue).
+        ai_pr_rows = _chunked_in_query(
+            conn,
+            "SELECT DISTINCT pr_run_id FROM review_issues "
+            "WHERE pr_run_id IN ({placeholders}) "
+            "AND source IN ('ai_review', 'qa') AND is_valid = 1",
+            pr_run_ids,
+        )
+        ai_pr_set = {int(r_["pr_run_id"]) for r_ in ai_pr_rows}
+        ai_count_rows = _chunked_in_query(
+            conn,
+            "SELECT COUNT(*) AS n FROM review_issues "
+            "WHERE pr_run_id IN ({placeholders}) "
+            "AND source IN ('ai_review', 'qa') AND is_valid = 1",
+            pr_run_ids,
+        )
+        ai_issue_count = sum(int(r_["n"]) for r_ in ai_count_rows)
         prs_with_ai = len(ai_pr_set)
 
     unmatched_human_issue_count = human_issue_count - matched_human_issue_count
@@ -324,31 +349,26 @@ def compute_ticket_type_breakdown(
 
         pr_ids = [int(g["id"]) for g in group]
         if pr_ids:
-            humans: list[sqlite3.Row] = []
-            for chunk in _chunks(pr_ids):
-                ph = ",".join("?" * len(chunk))
-                humans.extend(
-                    conn.execute(
-                        f"SELECT id FROM review_issues WHERE pr_run_id IN ({ph}) "
-                        f"AND source = 'human_review' AND is_valid = 1",
-                        chunk,
-                    ).fetchall()
-                )
+            humans = _chunked_in_query(
+                conn,
+                "SELECT id FROM review_issues WHERE pr_run_id IN ({placeholders}) "
+                "AND source = 'human_review' AND is_valid = 1",
+                pr_ids,
+            )
             h_count = len(humans)
             if humans:
                 h_ids = [int(h["id"]) for h in humans]
-                matched_set: set[int] = set()
-                for chunk in _chunks(h_ids):
-                    hph = ",".join("?" * len(chunk))
-                    matched = conn.execute(
-                        f"SELECT DISTINCT human_issue_id FROM issue_matches "
-                        f"WHERE human_issue_id IN ({hph}) AND confidence >= ? "
-                        f"AND matched_by != 'suggested'",
-                        [*chunk, _CATCH_RATE_CONFIDENCE_THRESHOLD],
-                    ).fetchall()
-                    for m in matched:
-                        matched_set.add(int(m["human_issue_id"]))
-                matched_count = len(matched_set)
+                matched_rows = _chunked_in_query(
+                    conn,
+                    "SELECT DISTINCT human_issue_id FROM issue_matches "
+                    "WHERE human_issue_id IN ({placeholders}) AND confidence >= ? "
+                    "AND matched_by != 'suggested'",
+                    h_ids,
+                    extra_params=[_CATCH_RATE_CONFIDENCE_THRESHOLD],
+                )
+                matched_count = len(
+                    {int(m["human_issue_id"]) for m in matched_rows}
+                )
             else:
                 matched_count = 0
         else:
@@ -445,17 +465,13 @@ def compute_daily_trend(
         pr_ids = [int(r["id"]) for r in rows]
         by_day_humans: dict[str, list[int]] = {}
         if pr_ids:
-            hrows: list[sqlite3.Row] = []
-            for chunk in _chunks(pr_ids):
-                ph = ",".join("?" * len(chunk))
-                hrows.extend(
-                    conn.execute(
-                        f"SELECT id, created_at FROM review_issues "
-                        f"WHERE pr_run_id IN ({ph}) AND source = 'human_review' "
-                        f"AND is_valid = 1",
-                        chunk,
-                    ).fetchall()
-                )
+            hrows = _chunked_in_query(
+                conn,
+                "SELECT id, created_at FROM review_issues "
+                "WHERE pr_run_id IN ({placeholders}) AND source = 'human_review' "
+                "AND is_valid = 1",
+                pr_ids,
+            )
             for h in hrows:
                 created = h["created_at"] or ""
                 if len(created) < 10:
@@ -469,18 +485,18 @@ def compute_daily_trend(
             if n == 0:
                 buckets.append((d, None, 0))
             else:
-                matched_set: set[int] = set()
-                for chunk in _chunks(day_ids):
-                    hph = ",".join("?" * len(chunk))
-                    matched = conn.execute(
-                        f"SELECT DISTINCT human_issue_id FROM issue_matches "
-                        f"WHERE human_issue_id IN ({hph}) AND confidence >= ? "
-                        f"AND matched_by != 'suggested'",
-                        [*chunk, _CATCH_RATE_CONFIDENCE_THRESHOLD],
-                    ).fetchall()
-                    for m in matched:
-                        matched_set.add(int(m["human_issue_id"]))
-                buckets.append((d, round(len(matched_set) / n, 3), n))
+                matched_rows = _chunked_in_query(
+                    conn,
+                    "SELECT DISTINCT human_issue_id FROM issue_matches "
+                    "WHERE human_issue_id IN ({placeholders}) AND confidence >= ? "
+                    "AND matched_by != 'suggested'",
+                    day_ids,
+                    extra_params=[_CATCH_RATE_CONFIDENCE_THRESHOLD],
+                )
+                matched_count = len(
+                    {int(m["human_issue_id"]) for m in matched_rows}
+                )
+                buckets.append((d, round(matched_count / n, 3), n))
         return buckets
 
     raise ValueError(f"unknown metric: {metric!r}")
