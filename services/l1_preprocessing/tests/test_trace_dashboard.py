@@ -233,6 +233,41 @@ class TestTraceDetailEndpoint:
         # Raw events section
         assert "Raw Events" in resp.text
 
+    async def test_render_detail_includes_discuss_box(self) -> None:
+        """The detail page renders the audited Discuss-with-Claude disclosure
+        next to the cheap local-investigate disclosure. The box hands the
+        developer the three-step recipe:
+
+        1. POST to /traces/<id>/discuss (commit 7) to mint a session token
+        2. Run the returned investigate command
+        3. Pipe the saved transcript through capture_discuss_output.py
+           (commit 9) to extract the post-mortem-analyst's three sections.
+        """
+        entries = [
+            {"trace_id": "x", "timestamp": "2026-01-01T10:00:00Z",
+             "phase": "webhook", "event": "jira_webhook_received",
+             "source": "jira"},
+            {"trace_id": "x", "timestamp": "2026-01-01T10:05:00Z",
+             "phase": "complete", "event": "Pipeline complete",
+             "source": "agent", "pr_url": "https://github.com/test/pr/1"},
+        ]
+        with patch("trace_dashboard.read_trace", return_value=entries):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.get("/traces/DISCUSS-1")
+        assert resp.status_code == 200
+        # Summary label — emoji is intentional; the task contract calls for
+        # the literal 🔍 character so the dashboard button is visually
+        # distinct from the no-auth investigate_box above it.
+        assert "\U0001f50d Open in Claude for investigation" in resp.text
+        # Command body mentions the capture script by name so the dev can
+        # see the full workflow without leaving the dashboard.
+        assert "capture_discuss_output.py" in resp.text
+        # And the discuss endpoint URL the first step hits.
+        assert "/traces/DISCUSS-1/discuss" in resp.text
+
     async def test_missing_ticket(self) -> None:
         with patch("trace_dashboard.read_trace", return_value=[]):
             transport = ASGITransport(app=app)
