@@ -414,16 +414,34 @@ def _generate_hint(last_event: str, errors: list[dict[str, Any]]) -> str:
 
 # --- Span tree construction ---
 
+# Artifact event name constants — single source of truth used both by the
+# consolidation dispatch below and by downstream consumers (dashboard panels,
+# diagnostic checklist, bundle endpoint). Symbolic references protect against
+# typos and make it easy to grep for where an artifact type is rendered.
+ARTIFACT_CODE_REVIEW = "code_review_artifact"
+ARTIFACT_QA_MATRIX = "qa_matrix_artifact"
+ARTIFACT_JUDGE_VERDICT = "judge_verdict_artifact"
+ARTIFACT_MERGE_REPORT = "merge_report_artifact"
+ARTIFACT_PLAN_REVIEW = "plan_review_artifact"
+ARTIFACT_PLAN = "plan_artifact"
+ARTIFACT_BLOCKED_UNITS = "blocked_units_artifact"
+ARTIFACT_SIMPLIFY = "simplify_artifact"
+ARTIFACT_ESCALATION = "escalation_artifact"
+ARTIFACT_SESSION_LOG = "session_log_artifact"
+ARTIFACT_EFFECTIVE_CLAUDE_MD = "effective_claude_md_artifact"
+ARTIFACT_SESSION_STREAM = "session_stream_artifact"
+ARTIFACT_TOOL_INDEX = "tool_index"
+
 _ARTIFACT_PHASE_MAP: dict[str, str] = {
-    "code_review_artifact": "code_review",
-    "qa_matrix_artifact": "qa_validation",
-    "judge_verdict_artifact": "code_review",
-    "merge_report_artifact": "merge",
-    "plan_review_artifact": "plan_review",
-    "plan_artifact": "planning",
-    "blocked_units_artifact": "implementation",
-    "simplify_artifact": "simplify",
-    "escalation_artifact": "complete",
+    ARTIFACT_CODE_REVIEW: "code_review",
+    ARTIFACT_QA_MATRIX: "qa_validation",
+    ARTIFACT_JUDGE_VERDICT: "code_review",
+    ARTIFACT_MERGE_REPORT: "merge",
+    ARTIFACT_PLAN_REVIEW: "plan_review",
+    ARTIFACT_PLAN: "planning",
+    ARTIFACT_BLOCKED_UNITS: "implementation",
+    ARTIFACT_SIMPLIFY: "simplify",
+    ARTIFACT_ESCALATION: "complete",
 }
 
 # Phase icon types for the span tree UI
@@ -753,15 +771,15 @@ def consolidate_worktree_logs(
 
     # Import span detail files — matches the Observability Model in harness-CLAUDE.md
     artifact_files = {
-        "code-review.md": "code_review_artifact",
-        "qa-matrix.md": "qa_matrix_artifact",
-        "judge-verdict.md": "judge_verdict_artifact",
-        "merge-report.md": "merge_report_artifact",
-        "plan-review.md": "plan_review_artifact",
-        "blocked-units.md": "blocked_units_artifact",
-        "simplify.md": "simplify_artifact",
-        "escalation.md": "escalation_artifact",
-        "session.log": "session_log_artifact",
+        "code-review.md": ARTIFACT_CODE_REVIEW,
+        "qa-matrix.md": ARTIFACT_QA_MATRIX,
+        "judge-verdict.md": ARTIFACT_JUDGE_VERDICT,
+        "merge-report.md": ARTIFACT_MERGE_REPORT,
+        "plan-review.md": ARTIFACT_PLAN_REVIEW,
+        "blocked-units.md": ARTIFACT_BLOCKED_UNITS,
+        "simplify.md": ARTIFACT_SIMPLIFY,
+        "escalation.md": ARTIFACT_ESCALATION,
+        "session.log": ARTIFACT_SESSION_LOG,
     }
 
     logs_dir = wt / ".harness" / "logs"
@@ -782,7 +800,7 @@ def consolidate_worktree_logs(
         append_trace(
             ticket_id, trace_id,
             phase="artifact",
-            event="effective_claude_md_artifact",
+            event=ARTIFACT_EFFECTIVE_CLAUDE_MD,
             content=effective_claude_md.read_text()[:5000],
         )
 
@@ -819,7 +837,7 @@ def consolidate_worktree_logs(
             append_trace(
                 ticket_id, trace_id,
                 phase="artifact",
-                event="session_stream_artifact",
+                event=ARTIFACT_SESSION_STREAM,
                 artifact_path=str(stream_ref_path),
                 size_bytes=size_bytes,
                 line_count=line_count,
@@ -832,7 +850,7 @@ def consolidate_worktree_logs(
             append_trace(
                 ticket_id, trace_id,
                 phase="artifact",
-                event="tool_index",
+                event=ARTIFACT_TOOL_INDEX,
                 index=index,
             )
         except Exception:
@@ -843,7 +861,7 @@ def consolidate_worktree_logs(
         append_trace(
             ticket_id, trace_id,
             phase="artifact",
-            event="plan_artifact",
+            event=ARTIFACT_PLAN,
             plan_version=plan_path.stem,
             content=plan_path.read_text()[:5000],
         )
