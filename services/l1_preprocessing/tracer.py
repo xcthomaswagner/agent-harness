@@ -43,6 +43,54 @@ _REDACT_IMPORTED_FIELDS = frozenset({
 })
 
 
+def redact_entry_in_place(entry: dict[str, Any]) -> int:
+    """Redact every known-risky string pocket in a trace entry in place.
+
+    Walks:
+
+    1. Every top-level string field listed in ``_REDACT_IMPORTED_FIELDS``
+       (content, data, error, message, output, stderr, stdout,
+       debug_payload, tool_result, details, evidence).
+    2. The nested ``entry['index']['first_tool_error']['message']`` pocket,
+       which tool_index artifact entries use to store the first failing
+       tool call's raw output (up to 500 chars). This can contain live
+       access tokens echoed by CLIs like ``sf org display --json``.
+
+    Returns the total number of redact-pattern matches made across all
+    fields. The entry is mutated in place; callers that need to compare
+    before/after can clone ahead of the call.
+
+    This helper is the single source of truth for "what constitutes an
+    entry's redactable surface area." Both the import path
+    (``consolidate_worktree_logs``) and the rescan path
+    (``POST /admin/re-redact`` in ``main.py``) call it so that new
+    risky fields added to ``_REDACT_IMPORTED_FIELDS`` automatically
+    cover both directions without drift.
+    """
+    total = 0
+
+    for field_name in _REDACT_IMPORTED_FIELDS:
+        value = entry.get(field_name)
+        if isinstance(value, str) and value:
+            redacted_value, n = redact(value)
+            if n:
+                entry[field_name] = redacted_value
+                total += n
+
+    index = entry.get("index")
+    if isinstance(index, dict):
+        first_err = index.get("first_tool_error")
+        if isinstance(first_err, dict):
+            msg = first_err.get("message")
+            if isinstance(msg, str) and msg:
+                redacted_msg, n = redact(msg)
+                if n:
+                    first_err["message"] = redacted_msg
+                    total += n
+
+    return total
+
+
 def generate_trace_id() -> str:
     """Generate a unique trace ID for a ticket run."""
     return uuid.uuid4().hex[:12]
@@ -504,12 +552,43 @@ def find_artifact(
 
     Set `latest=False` to get the first match (first-run artifact) if you
     specifically need historical state.
+
+    For hot-path callers that need multiple artifacts from the same
+    entries list in one shot (e.g. the bundle builder and dashboard
+    panels), prefer ``latest_artifacts(entries)`` which does a single
+    O(N) walk once and returns a dict keyed by event name.
     """
     iterator = reversed(entries) if latest else iter(entries)
     for entry in iterator:
         if entry.get("phase") == "artifact" and entry.get("event") == event_name:
             return entry
     return None
+
+
+def latest_artifacts(entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """One-pass index of the latest artifact entry per event name.
+
+    Walks ``entries`` once in reverse and records the first
+    ``phase == "artifact"`` hit seen for each distinct ``event`` value.
+    Callers that need several artifacts from the same list — ``_build_bundle``
+    asks for six, the dashboard panels for five — should call this once
+    upfront and then do O(1) dict lookups instead of paying O(N) per
+    artifact in repeated ``find_artifact`` calls.
+
+    Semantics match ``find_artifact(..., latest=True)``: the entry closest
+    to the end of the list wins. For small traces this is microseconds
+    either way; for multi-thousand-entry traces (common after live-stream
+    and consolidation merge the same run) it turns ~6-9 full-list scans
+    into one.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for entry in reversed(entries):
+        if entry.get("phase") != "artifact":
+            continue
+        event = entry.get("event")
+        if isinstance(event, str) and event and event not in out:
+            out[event] = entry
+    return out
 
 
 def build_span_tree(entries: list[dict[str, Any]]) -> dict[str, Any]:
@@ -823,10 +902,12 @@ def consolidate_worktree_logs(
                 entry["trace_id"] = trace_id
                 entry["ticket_id"] = ticket_id
                 entry["source"] = "agent"
-                for field_name in _REDACT_IMPORTED_FIELDS:
-                    value = entry.get(field_name)
-                    if isinstance(value, str) and value:
-                        entry[field_name] = _redact_and_count(value)
+                # One helper call covers every known-risky string pocket
+                # in the entry, so this path cannot drift from the
+                # /admin/re-redact rescan path. ``total_redacted`` is the
+                # consolidation summary counter (also bumped by
+                # ``_redact_and_count`` below for artifact content).
+                total_redacted += redact_entry_in_place(entry)
                 path = trace_path(ticket_id)
                 with path.open("a") as f:
                     f.write(json.dumps(entry) + "\n")

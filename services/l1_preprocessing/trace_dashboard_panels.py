@@ -44,7 +44,7 @@ from tracer import (
     ARTIFACT_SESSION_LOG,
     ARTIFACT_SESSION_STREAM,
     ARTIFACT_TOOL_INDEX,
-    find_artifact,
+    latest_artifacts,
 )
 
 # --- Styling constants (inline; no external CSS dependency) ---
@@ -83,9 +83,10 @@ def _tool_color(tool_name: str) -> str:
     return _TOOL_CATEGORY_COLORS["neutral"]
 
 
-# find_artifact is imported from tracer.py — it walks in reverse by default,
-# which is what we want: on re-triggered traces (multi-run) the dashboard
-# should render the latest artifact state, not the first-run version.
+# latest_artifacts is imported from tracer.py — it walks in reverse, which
+# is what we want: on re-triggered traces (multi-run) the dashboard should
+# render the latest artifact state, not the first-run version. One pass
+# shared across every panel in this module.
 
 
 def _ticket_id_from_entries(entries: list[dict]) -> str:
@@ -114,14 +115,15 @@ def _panel_wrapper(header_html: str, body_html: str, open_by_default: bool) -> s
 # --- Panel 1: Tool Usage (always visible, top of group) ---
 
 
-def _render_tool_usage_panel(entries: list[dict]) -> str:
+def _render_tool_usage_panel(artifacts: dict[str, dict[str, Any]]) -> str:
     """Render the Tool Usage panel from the tool_index artifact.
 
     The panel is ALWAYS rendered (open-by-default) because its absence is
     informative: it tells the dev the trace predates commit 1 or skipped
-    consolidation.
+    consolidation. ``artifacts`` is the pre-built index from
+    ``latest_artifacts``.
     """
-    artifact = find_artifact(entries, ARTIFACT_TOOL_INDEX)
+    artifact = artifacts.get(ARTIFACT_TOOL_INDEX)
 
     if artifact is None:
         body = (
@@ -216,9 +218,11 @@ def _render_tool_usage_panel(entries: list[dict]) -> str:
 # --- Panel 2: Agent Instructions (injected CLAUDE.md) ---
 
 
-def _render_agent_instructions_panel(entries: list[dict]) -> str:
+def _render_agent_instructions_panel(
+    artifacts: dict[str, dict[str, Any]],
+) -> str:
     """Render the effective CLAUDE.md panel. Returns '' if artifact absent."""
-    artifact = find_artifact(entries, ARTIFACT_EFFECTIVE_CLAUDE_MD)
+    artifact = artifacts.get(ARTIFACT_EFFECTIVE_CLAUDE_MD)
     if artifact is None:
         return ""
     content = str(artifact.get("content", ""))
@@ -238,9 +242,11 @@ def _render_agent_instructions_panel(entries: list[dict]) -> str:
 # --- Panel 3: Reasoning Narrative (session.log) ---
 
 
-def _render_reasoning_narrative_panel(entries: list[dict]) -> str:
+def _render_reasoning_narrative_panel(
+    artifacts: dict[str, dict[str, Any]],
+) -> str:
     """Render the session.log narrative. Returns '' if artifact absent."""
-    artifact = find_artifact(entries, ARTIFACT_SESSION_LOG)
+    artifact = artifacts.get(ARTIFACT_SESSION_LOG)
     if artifact is None:
         return ""
     content = str(artifact.get("content", ""))
@@ -386,9 +392,9 @@ def _render_timeline_row(event: dict) -> str:
     )
 
 
-def _render_timeline_panel(entries: list[dict]) -> str:
+def _render_timeline_panel(artifacts: dict[str, dict[str, Any]]) -> str:
     """Render the Tool Calls Timeline panel. Returns '' if artifact absent."""
-    artifact = find_artifact(entries, ARTIFACT_SESSION_STREAM)
+    artifact = artifacts.get(ARTIFACT_SESSION_STREAM)
     if artifact is None:
         return ""
 
@@ -448,21 +454,25 @@ def _render_timeline_panel(entries: list[dict]) -> str:
 # --- Panel 5: Raw Downloads ---
 
 
-def _has_any_session_artifact(entries: list[dict]) -> bool:
+_DOWNLOADABLE_ARTIFACTS = (
+    ARTIFACT_SESSION_LOG,
+    ARTIFACT_SESSION_STREAM,
+    ARTIFACT_EFFECTIVE_CLAUDE_MD,
+)
+
+
+def _has_any_session_artifact(
+    artifacts: dict[str, dict[str, Any]],
+) -> bool:
     """Check if the trace has any of the three downloadable artifacts."""
-    return any(
-        find_artifact(entries, name) is not None
-        for name in (
-            ARTIFACT_SESSION_LOG,
-            ARTIFACT_SESSION_STREAM,
-            ARTIFACT_EFFECTIVE_CLAUDE_MD,
-        )
-    )
+    return any(name in artifacts for name in _DOWNLOADABLE_ARTIFACTS)
 
 
-def _render_raw_downloads_panel(entries: list[dict]) -> str:
+def _render_raw_downloads_panel(
+    entries: list[dict], artifacts: dict[str, dict[str, Any]]
+) -> str:
     """Render the raw downloads panel with an un-redacted warning."""
-    if not _has_any_session_artifact(entries):
+    if not _has_any_session_artifact(artifacts):
         return ""
     ticket_id = _e(_ticket_id_from_entries(entries))
     header = 'Raw Downloads'
@@ -503,11 +513,16 @@ def render_session_panels(entries: list[dict]) -> str:
     if not entries:
         return ""
 
+    # Build the artifact index once — each panel used to call
+    # ``find_artifact`` (O(N) reverse walk) independently, so a render
+    # of all five panels did 5+ full scans of the entries list. Now
+    # it's a single O(N) walk shared across every panel.
+    artifacts = latest_artifacts(entries)
     parts = [
-        _render_tool_usage_panel(entries),
-        _render_agent_instructions_panel(entries),
-        _render_reasoning_narrative_panel(entries),
-        _render_timeline_panel(entries),
-        _render_raw_downloads_panel(entries),
+        _render_tool_usage_panel(artifacts),
+        _render_agent_instructions_panel(artifacts),
+        _render_reasoning_narrative_panel(artifacts),
+        _render_timeline_panel(artifacts),
+        _render_raw_downloads_panel(entries, artifacts),
     ]
     return "".join(p for p in parts if p)

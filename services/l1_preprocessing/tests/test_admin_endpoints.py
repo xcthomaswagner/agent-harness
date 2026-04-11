@@ -32,6 +32,15 @@ def trace_dir(tmp_path: Path) -> Path:
     return logs
 
 
+def _audit_path(trace_dir: Path) -> Path:
+    """Mirror of ``_discuss_audit_path`` in main.py — the audit log lives
+    in a sibling ``audit/`` directory next to LOGS_DIR, intentionally NOT
+    inside LOGS_DIR, so it cannot be read as a phantom ticket via the
+    trace-bundle / list-traces endpoints.
+    """
+    return trace_dir.parent / "audit" / "discuss-audit.jsonl"
+
+
 @pytest.fixture
 async def client() -> AsyncGenerator[AsyncClient, None]:
     transport = ASGITransport(app=app)
@@ -327,7 +336,7 @@ async def test_discuss_writes_audit_log_line(
         resp = await client.post("/traces/DISC-3/discuss")
 
     assert resp.status_code == 200
-    audit_file = trace_dir / "discuss-audit.jsonl"
+    audit_file = _audit_path(trace_dir)
     assert audit_file.exists()
     lines = audit_file.read_text().splitlines()
     assert len(lines) == 1
@@ -349,7 +358,7 @@ async def test_discuss_audit_log_appends_not_overwrites(
         await client.post("/traces/DISC-4/discuss")
         await client.post("/traces/DISC-4/discuss")
 
-    audit_file = trace_dir / "discuss-audit.jsonl"
+    audit_file = _audit_path(trace_dir)
     lines = audit_file.read_text().splitlines()
     assert len(lines) == 2
     # Distinct tokens across the two lines — another sanity check that
@@ -368,7 +377,7 @@ async def test_discuss_returns_404_for_unknown_trace(
     assert resp.status_code == 404
     # And the audit log must not be created for rejected requests — the
     # audit line represents an actual minted session, not an attempted one.
-    assert not (trace_dir / "discuss-audit.jsonl").exists()
+    assert not (_audit_path(trace_dir)).exists()
 
 
 async def test_discuss_audit_captures_source_ip_and_user_agent(
@@ -386,7 +395,7 @@ async def test_discuss_audit_captures_source_ip_and_user_agent(
 
     assert resp.status_code == 200
     entry = json.loads(
-        (trace_dir / "discuss-audit.jsonl").read_text().splitlines()[0]
+        (_audit_path(trace_dir)).read_text().splitlines()[0]
     )
     assert entry["user_agent"] == "post-mortem-cli/1.2.3"
     # ASGITransport reports a client host — just assert it's a string and
@@ -422,7 +431,7 @@ async def test_discuss_audit_log_handles_concurrent_writes(
 
     assert all(r.status_code == 200 for r in responses)
 
-    audit_file = trace_dir / "discuss-audit.jsonl"
+    audit_file = _audit_path(trace_dir)
     lines = audit_file.read_text().splitlines()
     assert len(lines) == 20
 
@@ -435,3 +444,49 @@ async def test_discuss_audit_log_handles_concurrent_writes(
 
     # Each call must have minted a unique token.
     assert len(tokens) == 20
+
+
+# --- Bug 1 regression: audit log must not live inside LOGS_DIR ------------
+#
+# Before the fix, ``discuss-audit.jsonl`` lived in LOGS_DIR alongside
+# per-ticket trace files. Because ``_validate_ticket_id`` accepts the
+# string ``discuss-audit``, any unauthenticated caller could hit
+# ``/traces/discuss-audit/bundle``, ``/traces/discuss-audit``, or just
+# have the trace list render it as a phantom ticket in the dashboard —
+# leaking cross-ticket session tokens, source IPs, and user agents.
+#
+# Fix: store the audit file in a sibling ``audit/`` directory next to
+# LOGS_DIR. This test proves three things at once:
+#  1. The audit file is NOT inside LOGS_DIR after a successful discuss call.
+#  2. ``read_trace("discuss-audit")`` returns empty (no phantom ticket).
+#  3. The trace-bundle endpoint 404s on the audit "ticket" instead of
+#     successfully serving it.
+
+
+async def test_discuss_audit_not_exposed_as_phantom_ticket(
+    trace_dir: Path, client: AsyncClient,
+) -> None:
+    """The discuss-audit log must not be readable through trace endpoints."""
+    from tracer import read_trace
+
+    with patch("tracer.LOGS_DIR", trace_dir):
+        _seed_minimal_trace("DISC-PHANTOM")
+        resp = await client.post("/traces/DISC-PHANTOM/discuss")
+        assert resp.status_code == 200
+
+        # 1. Audit file is outside LOGS_DIR (the fix).
+        assert not (trace_dir / "discuss-audit.jsonl").exists(), (
+            "audit file must not live inside LOGS_DIR — that would expose "
+            "it as a phantom ticket"
+        )
+        assert _audit_path(trace_dir).exists(), (
+            "audit file should live in the sibling audit/ directory"
+        )
+
+        # 2. read_trace("discuss-audit") must be a no-op — the file is
+        # no longer visible through the trace store abstraction.
+        assert read_trace("discuss-audit") == []
+
+        # 3. /traces/discuss-audit/bundle must 404, not serve a tarball.
+        bundle_resp = await client.get("/traces/discuss-audit/bundle")
+        assert bundle_resp.status_code == 404

@@ -16,9 +16,12 @@ from tracer import (
     consolidate_worktree_logs,
     extract_diagnostic_info,
     extract_escalation_reason,
+    find_artifact,
     generate_trace_id,
+    latest_artifacts,
     list_traces,
     read_trace,
+    redact_entry_in_place,
     trace_path,
 )
 
@@ -1011,3 +1014,106 @@ class TestBuildTraceListRow:
         row = build_trace_list_row(summary, [])
         assert row["duration_color"] == "#DB2626"
         assert row["duration_pct"] == 100
+
+
+class TestLatestArtifacts:
+    """One-pass artifact index used by _build_bundle and panel rendering
+    to avoid N-way find_artifact scans of the entries list."""
+
+    def test_empty_entries_returns_empty_dict(self) -> None:
+        assert latest_artifacts([]) == {}
+
+    def test_returns_latest_per_event(self) -> None:
+        # Re-triggered trace: two session.log artifacts. The second must win.
+        entries: list[dict] = [
+            {"phase": "artifact", "event": "session.log", "content": "run1"},
+            {"phase": "pipeline", "event": "something_else"},
+            {"phase": "artifact", "event": "tool_index", "index": {"x": 1}},
+            {"phase": "artifact", "event": "session.log", "content": "run2"},
+        ]
+        idx = latest_artifacts(entries)
+        assert idx["session.log"]["content"] == "run2"
+        assert idx["tool_index"]["index"] == {"x": 1}
+
+    def test_ignores_non_artifact_phase(self) -> None:
+        entries: list[dict] = [
+            {"phase": "pipeline", "event": "session.log", "content": "wrong"},
+            {"phase": "artifact", "event": "session.log", "content": "right"},
+        ]
+        idx = latest_artifacts(entries)
+        assert idx["session.log"]["content"] == "right"
+
+    def test_matches_find_artifact_semantics(self) -> None:
+        # Every key in the cached index must equal find_artifact(..., latest=True).
+        entries: list[dict] = [
+            {"phase": "artifact", "event": "a", "val": 1},
+            {"phase": "artifact", "event": "b", "val": 2},
+            {"phase": "artifact", "event": "a", "val": 3},
+            {"phase": "artifact", "event": "c", "val": 4},
+        ]
+        idx = latest_artifacts(entries)
+        for event in ("a", "b", "c"):
+            assert idx[event] == find_artifact(entries, event)
+
+    def test_skips_missing_or_non_string_event(self) -> None:
+        entries: list[dict] = [
+            {"phase": "artifact", "event": None, "x": 1},
+            {"phase": "artifact"},
+            {"phase": "artifact", "event": "", "x": 2},
+            {"phase": "artifact", "event": "good", "x": 3},
+        ]
+        idx = latest_artifacts(entries)
+        assert idx == {"good": {"phase": "artifact", "event": "good", "x": 3}}
+
+
+class TestRedactEntryInPlace:
+    """Shared helper used by consolidate_worktree_logs AND admin_re_redact
+    so the import path and the rescan path can't drift on what constitutes
+    an entry's redactable surface area."""
+
+    def test_returns_zero_when_nothing_to_redact(self) -> None:
+        entry: dict = {"event": "clean", "content": "hello"}
+        assert redact_entry_in_place(entry) == 0
+        assert entry == {"event": "clean", "content": "hello"}
+
+    def test_redacts_top_level_known_fields(self) -> None:
+        secret = "sk-ant-api03-" + "A" * 40
+        entry: dict = {
+            "content": f"key={secret}",
+            "stderr": f"another {secret}",
+            "event": "something",
+        }
+        n = redact_entry_in_place(entry)
+        assert n >= 2
+        assert secret not in entry["content"]
+        assert secret not in entry["stderr"]
+
+    def test_redacts_nested_first_tool_error_message(self) -> None:
+        secret = "sk-ant-api03-" + "B" * 40
+        entry: dict = {
+            "event": "tool_index",
+            "index": {
+                "tool_counts": {"Bash": 1},
+                "first_tool_error": {
+                    "tool": "Bash",
+                    "line": 7,
+                    "message": f"sf: token {secret} expired",
+                },
+            },
+        }
+        n = redact_entry_in_place(entry)
+        assert n >= 1
+        assert secret not in entry["index"]["first_tool_error"]["message"]
+        # Sibling tool_counts must not be touched.
+        assert entry["index"]["tool_counts"] == {"Bash": 1}
+
+    def test_does_not_touch_unknown_fields(self) -> None:
+        secret = "sk-ant-api03-" + "C" * 40
+        # `custom_field` is NOT in _REDACT_IMPORTED_FIELDS — it's the
+        # caller's responsibility to add fields to the frozenset. The
+        # helper's contract is "walk the known set," not "find every
+        # string anywhere," so this unknown field must pass through.
+        entry: dict = {"custom_field": secret, "event": "raw"}
+        n = redact_entry_in_place(entry)
+        assert n == 0
+        assert entry["custom_field"] == secret

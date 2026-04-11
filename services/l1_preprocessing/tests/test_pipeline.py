@@ -272,9 +272,133 @@ class TestRouteEnriched:
         assert "--branch-name" in cmd
         assert "ai/PIPE-10" in cmd
 
-        # Verify stderr is captured for error detection
+        # Verify stderr is redirected to a real file handle, not a pipe.
+        # Pipes risked SIGPIPE-killing the spawned team once L1 detached
+        # after the 2-second health check — a temp file has no such
+        # constraint. We can't assert exact equality (the file object is
+        # created per-call), so we assert it's a real file-like with a
+        # fileno, and explicitly that it is NOT subprocess.PIPE.
         assert call_args[1]["stdout"] == subprocess.DEVNULL
-        assert call_args[1]["stderr"] == subprocess.PIPE
+        stderr_arg = call_args[1]["stderr"]
+        assert stderr_arg is not subprocess.PIPE
+        assert hasattr(stderr_arg, "fileno")
+
+    async def test_enriched_spawn_early_failure_reads_stderr_from_tempfile(
+        self,
+        settings: Settings,
+        mock_analyst: AsyncMock,
+        mock_jira: AsyncMock,
+        sample_ticket: TicketPayload,
+        tmp_path: Path,
+    ) -> None:
+        """Bug 2 regression: when spawn exits non-zero within 2s, the
+        error path must read stderr from the backing temp file (not from
+        a PIPE), log the failure, and unlink the temp file afterward."""
+        fake_repo = tmp_path / "client-repo"
+        fake_repo.mkdir()
+        (fake_repo / ".git").mkdir()
+
+        settings.default_client_repo = str(fake_repo)
+        pipe = Pipeline(
+            settings=settings, analyst=mock_analyst, jira_adapter=mock_jira
+        )
+
+        enriched = EnrichedTicket(
+            **sample_ticket.model_dump(),
+            generated_acceptance_criteria=["AC"],
+            size_assessment=SizeAssessment(
+                classification=SizeClassification.SMALL,
+                estimated_units=1,
+                recommended_dev_count=1,
+            ),
+        )
+        mock_analyst.analyze.return_value = enriched
+
+        captured_stderr_path: list[Path] = []
+
+        def fake_popen(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            # Write fake stderr into the provided temp file BEFORE returning
+            # so the early-failure read path sees content.
+            stderr_fh = kwargs["stderr"]
+            stderr_fh.write(b"boom: missing client repo\n")
+            stderr_fh.flush()
+            captured_stderr_path.append(Path(stderr_fh.name))
+            mock_proc = MagicMock()
+            mock_proc.poll.return_value = 2  # Non-zero → early failure path
+            return mock_proc
+
+        with patch("pipeline.subprocess.Popen", side_effect=fake_popen):
+            result = await pipe.process(sample_ticket)
+
+        assert result["spawn_triggered"] is False
+        # Temp file must be cleaned up after the early-failure branch.
+        assert captured_stderr_path, "fake Popen never ran"
+        assert not captured_stderr_path[0].exists(), (
+            "early-failure path must unlink the stderr temp file"
+        )
+
+    async def test_enriched_spawn_reaper_cleans_up_running_process(
+        self,
+        settings: Settings,
+        mock_analyst: AsyncMock,
+        mock_jira: AsyncMock,
+        sample_ticket: TicketPayload,
+        tmp_path: Path,
+    ) -> None:
+        """Bug 2 regression: when the child survives the 2-second health
+        check, the reaper task must await proc.wait and unlink the stderr
+        temp file when the child finally exits — no zombies, no leftover
+        temp files."""
+        import asyncio
+
+        fake_repo = tmp_path / "client-repo"
+        fake_repo.mkdir()
+        (fake_repo / ".git").mkdir()
+
+        settings.default_client_repo = str(fake_repo)
+        pipe = Pipeline(
+            settings=settings, analyst=mock_analyst, jira_adapter=mock_jira
+        )
+
+        enriched = EnrichedTicket(
+            **sample_ticket.model_dump(),
+            generated_acceptance_criteria=["AC"],
+            size_assessment=SizeAssessment(
+                classification=SizeClassification.SMALL,
+                estimated_units=1,
+                recommended_dev_count=1,
+            ),
+        )
+        mock_analyst.analyze.return_value = enriched
+
+        captured_stderr_path: list[Path] = []
+
+        def fake_popen(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            captured_stderr_path.append(Path(kwargs["stderr"].name))
+            mock_proc = MagicMock()
+            mock_proc.poll.return_value = None  # Still running after 2s
+            mock_proc.wait.return_value = 0  # Eventually exits cleanly
+            return mock_proc
+
+        with patch("pipeline.subprocess.Popen", side_effect=fake_popen):
+            result = await pipe.process(sample_ticket)
+
+        assert result["spawn_triggered"] is True
+        assert captured_stderr_path, "fake Popen never ran"
+
+        # The reaper runs asynchronously — give it a moment to complete.
+        # Wait until all pending tasks on the running loop are done so
+        # we can deterministically assert cleanup ran.
+        pending = [
+            t for t in asyncio.all_tasks() if t is not asyncio.current_task()
+        ]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        # Reaper's unlink should have cleaned up the stderr temp file.
+        assert not captured_stderr_path[0].exists(), (
+            "reaper must unlink the stderr temp file after proc.wait returns"
+        )
 
 
 # --- Route: Info Request ---

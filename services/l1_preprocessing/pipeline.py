@@ -8,6 +8,7 @@ This module connects the ticket analyst to the downstream actions:
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
 import sys
 import tempfile
@@ -40,6 +41,12 @@ logger = structlog.get_logger()
 
 HARNESS_ROOT = Path(__file__).resolve().parents[2]
 SPAWN_SCRIPT = HARNESS_ROOT / "scripts" / "spawn_team.py"
+
+# Strong references to spawn reaper tasks. Without this the asyncio task
+# handle returned by ``create_task`` would be the only reference to the
+# coroutine and GC could collect it mid-flight — the docs are explicit
+# about this. Tasks remove themselves from the set when they finish.
+_SPAWN_REAPER_TASKS: set[Any] = set()
 
 
 class Pipeline:
@@ -458,22 +465,53 @@ class Pipeline:
             pipeline_mode=pipeline_mode,
         )
 
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
+        # Redirect stderr to a temp file (not a PIPE): the child keeps
+        # running for the full L2 pipeline lifetime, often several minutes,
+        # and if we hand it a kernel pipe with a ~64KB buffer every stderr
+        # write past that point blocks. Worse, closing the Python-side read
+        # end while the child is alive raises SIGPIPE in the child on its
+        # next stderr write (Popen resets SIGPIPE to SIG_DFL on POSIX), so
+        # previous ``stderr=PIPE`` + ``stderr.close()`` risked killing the
+        # spawned team after the 2-second health check. A temp file avoids
+        # both problems: writes never block, and we can still read stderr
+        # for the early-failure diagnostic path.
+        # Deliberately NOT a context manager: the file handle is handed
+        # to Popen and outlives this function. A ``with`` block would
+        # close it before the child has written anything.
+        stderr_file = tempfile.NamedTemporaryFile(  # noqa: SIM115
+            mode="w+b",
+            prefix=f"spawn-{enriched.id}-",
+            suffix=".err",
+            delete=False,
         )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_file,
+                start_new_session=True,
+            )
+        except Exception:
+            stderr_file.close()
+            with contextlib.suppress(OSError):
+                Path(stderr_file.name).unlink()
+            raise
 
         # Check for immediate spawn failure (exits within 2s = setup error)
         await asyncio.sleep(2)
         exit_code = proc.poll()
         if exit_code is not None and exit_code != 0:
+            # Early failure: read stderr from the temp file, log, record.
             stderr_out = ""
-            if proc.stderr:
-                stderr_out = (proc.stderr.read() or b"").decode(errors="replace")[:1000]
-            if proc.stderr:
-                proc.stderr.close()
+            try:
+                stderr_file.flush()
+                stderr_file.seek(0)
+                stderr_out = stderr_file.read().decode(errors="replace")[:1000]
+            except OSError:
+                pass
+            stderr_file.close()
+            with contextlib.suppress(OSError):
+                Path(stderr_file.name).unlink()
             log.error("l2_spawn_failed", exit_code=exit_code, stderr=stderr_out)
             tid = trace_id or generate_trace_id()
             append_trace(
@@ -484,7 +522,21 @@ class Pipeline:
             )
             return False
 
-        # Process still running — detach stderr pipe and let it run
-        if proc.stderr:
-            proc.stderr.close()
+        # Process still running — detach and schedule a reaper. The reaper
+        # waits for proc in a worker thread so it doesn't block the event
+        # loop, then removes the stderr temp file. Without this the child
+        # would remain a zombie until the L1 service exits.
+        stderr_path = Path(stderr_file.name)
+        stderr_file.close()  # Parent doesn't need its own handle anymore.
+
+        async def _reap_spawn() -> None:
+            try:
+                await asyncio.to_thread(proc.wait)
+            finally:
+                with contextlib.suppress(OSError):
+                    stderr_path.unlink()
+
+        reaper = asyncio.create_task(_reap_spawn())
+        _SPAWN_REAPER_TASKS.add(reaper)
+        reaper.add_done_callback(_SPAWN_REAPER_TASKS.discard)
         return True

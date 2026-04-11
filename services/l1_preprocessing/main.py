@@ -50,7 +50,6 @@ from pipeline import Pipeline
 from redaction import redact
 from trace_dashboard import router as trace_router
 from tracer import (
-    _REDACT_IMPORTED_FIELDS,
     ARTIFACT_CODE_REVIEW,
     ARTIFACT_EFFECTIVE_CLAUDE_MD,
     ARTIFACT_QA_MATRIX,
@@ -61,7 +60,9 @@ from tracer import (
     consolidate_worktree_logs,
     find_artifact,
     generate_trace_id,
+    latest_artifacts,
     read_trace,
+    redact_entry_in_place,
 )
 from unified_dashboard import router as unified_router
 
@@ -543,6 +544,10 @@ def _build_bundle(ticket_id: str, entries: list[dict[str, Any]]) -> bytes:
         redacted_text, n = redact(text)
         return redacted_text.encode("utf-8"), n
 
+    # Build the artifact index once — six lookups below would otherwise
+    # each scan the full entries list in reverse. See tracer.latest_artifacts.
+    artifacts = latest_artifacts(entries)
+
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
 
         def _add_bytes(name: str, payload: bytes) -> None:
@@ -563,7 +568,7 @@ def _build_bundle(ticket_id: str, entries: list[dict[str, Any]]) -> bytes:
         # This is the ONLY place the stream gets redacted: consolidation
         # leaves the on-disk file alone so it remains available as a raw
         # forensic escape hatch for dev-local access.
-        stream_entry = find_artifact(entries, ARTIFACT_SESSION_STREAM)
+        stream_entry = artifacts.get(ARTIFACT_SESSION_STREAM)
         if stream_entry:
             stream_path_str = str(stream_entry.get("artifact_path", ""))
             if stream_path_str:
@@ -575,22 +580,22 @@ def _build_bundle(ticket_id: str, entries: list[dict[str, Any]]) -> bytes:
                     pass
 
         # session.log — 5000-char preview is the best we have in the trace store
-        log_entry = find_artifact(entries, ARTIFACT_SESSION_LOG)
+        log_entry = artifacts.get(ARTIFACT_SESSION_LOG)
         if log_entry and log_entry.get("content"):
             _add_bytes("session.log", str(log_entry["content"]).encode())
 
         # effective-CLAUDE.md — instructions the agent was actually running under
-        claude_md_entry = find_artifact(entries, ARTIFACT_EFFECTIVE_CLAUDE_MD)
+        claude_md_entry = artifacts.get(ARTIFACT_EFFECTIVE_CLAUDE_MD)
         if claude_md_entry and claude_md_entry.get("content"):
             _add_bytes("effective-CLAUDE.md", str(claude_md_entry["content"]).encode())
 
         # qa-matrix.md
-        qa_entry = find_artifact(entries, ARTIFACT_QA_MATRIX)
+        qa_entry = artifacts.get(ARTIFACT_QA_MATRIX)
         if qa_entry and qa_entry.get("content"):
             _add_bytes("qa-matrix.md", str(qa_entry["content"]).encode())
 
         # code-review.md
-        review_entry = find_artifact(entries, ARTIFACT_CODE_REVIEW)
+        review_entry = artifacts.get(ARTIFACT_CODE_REVIEW)
         if review_entry and review_entry.get("content"):
             _add_bytes("code-review.md", str(review_entry["content"]).encode())
 
@@ -609,7 +614,7 @@ def _build_bundle(ticket_id: str, entries: list[dict[str, Any]]) -> bytes:
             # artifacts.
 
         # tool-index.json — declarative tool-call summary
-        tool_index_entry = find_artifact(entries, ARTIFACT_TOOL_INDEX)
+        tool_index_entry = artifacts.get(ARTIFACT_TOOL_INDEX)
         if tool_index_entry and "index" in tool_index_entry:
             _add_bytes(
                 "tool-index.json",
@@ -698,6 +703,23 @@ async def trace_bundle(ticket_id: str) -> Response:
 _DISCUSS_SESSION_TTL = timedelta(hours=1)
 _DISCUSS_AUDIT_FILENAME = "discuss-audit.jsonl"
 
+
+def _discuss_audit_path() -> Path:
+    """Return the on-disk path for ``discuss-audit.jsonl``.
+
+    Kept as a sibling directory next to ``LOGS_DIR`` (``<LOGS_DIR>.parent/
+    audit/``) rather than inside it. If the audit file lived in
+    ``LOGS_DIR`` it would be indistinguishable from a per-ticket trace
+    file: ``_validate_ticket_id`` accepts ``discuss-audit``, so
+    ``GET /traces/discuss-audit/bundle``, ``list_traces``, and the
+    dashboard would all treat the audit log as a phantom ticket and
+    expose its contents (cross-ticket ``session_token`` / ``source_ip`` /
+    ``user_agent`` values) to unauthenticated readers. Returning a
+    function instead of a module-level constant so tests that monkey-patch
+    ``tracer.LOGS_DIR`` see the updated sibling path without extra plumbing.
+    """
+    return tracer.LOGS_DIR.parent / "audit" / _DISCUSS_AUDIT_FILENAME
+
 # Serializes writes to discuss-audit.jsonl across concurrent discuss
 # requests. Two callers interleaving their ``open("a") / write`` pair on
 # the same file would otherwise race — the append-mode open ensures each
@@ -714,7 +736,7 @@ def _write_discuss_audit_line(entry: dict[str, Any]) -> None:
     Called from inside ``asyncio.to_thread`` under ``_discuss_audit_lock``.
     Kept tiny so the thread stays busy for the minimum time.
     """
-    audit_path = tracer.LOGS_DIR / _DISCUSS_AUDIT_FILENAME
+    audit_path = _discuss_audit_path()
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     with audit_path.open("a") as f:
         f.write(json.dumps(entry) + "\n")
@@ -726,12 +748,15 @@ async def _append_discuss_audit(
     source_ip: str,
     user_agent: str,
 ) -> None:
-    """Append one JSON line to ``<LOGS_DIR>/discuss-audit.jsonl``.
+    """Append one JSON line to ``<LOGS_DIR>.parent/audit/discuss-audit.jsonl``.
 
     This is a plain append-only file, NOT a per-ticket trace store entry —
     it serves as the cross-ticket "who investigated what and when" record.
-    Created on first use. One line per endpoint invocation. Never rotated
-    or truncated from here — operator can rotate manually if it grows.
+    Stored in a sibling ``audit/`` directory (not inside ``LOGS_DIR``) so
+    it cannot be read as a phantom ticket through the trace-bundle /
+    list-traces endpoints. Created on first use. One line per endpoint
+    invocation. Never rotated or truncated from here — operator can
+    rotate manually if it grows.
 
     Async so callers don't block the event loop on disk I/O: the actual
     write runs in a worker thread, serialized by ``_discuss_audit_lock``
@@ -782,7 +807,7 @@ async def discuss_trace(ticket_id: str, request: Request) -> DiscussResponse:
       only (nothing enforces it — see write-only note above).
 
     Every invocation writes one line to
-    ``<LOGS_DIR>/discuss-audit.jsonl`` with timestamp, ticket_id, token,
+    ``<LOGS_DIR>.parent/audit/discuss-audit.jsonl`` with timestamp, ticket_id, token,
     source IP, and user-agent. This is append-only and intentionally
     separate from the per-ticket trace store — it's the cross-trace
     "who investigated what" record, useful even on a solo harness for
@@ -984,32 +1009,14 @@ async def admin_re_redact() -> dict[str, int]:
                 out_lines.append(redacted_line)
                 continue
 
-            changed = False
-            for field_name in _REDACT_IMPORTED_FIELDS:
-                value = entry.get(field_name)
-                if isinstance(value, str) and value:
-                    redacted_value, n = redact(value)
-                    if n:
-                        additional_patterns += n
-                        entry[field_name] = redacted_value
-                        changed = True
-
-            # tool_index entries store the first tool-error message inside
-            # a nested dict. Walk it explicitly — the generic top-level
-            # loop above won't reach it.
-            index = entry.get("index")
-            if isinstance(index, dict):
-                first_err = index.get("first_tool_error")
-                if isinstance(first_err, dict):
-                    msg = first_err.get("message")
-                    if isinstance(msg, str) and msg:
-                        redacted_msg, n = redact(msg)
-                        if n:
-                            additional_patterns += n
-                            first_err["message"] = redacted_msg
-                            changed = True
-
-            if changed:
+            # One helper call covers every known-risky string pocket in
+            # the entry (top-level _REDACT_IMPORTED_FIELDS + the nested
+            # index.first_tool_error.message pocket). Single source of
+            # truth shared with tracer.consolidate_worktree_logs, so new
+            # risky fields only need to be added in one place.
+            n = redact_entry_in_place(entry)
+            if n:
+                additional_patterns += n
                 entries_redacted += 1
                 file_changed = True
             out_lines.append(json.dumps(entry))
