@@ -27,13 +27,18 @@ source_control:
   ado_repository_id: "7bacb9f6-54df-4e5e-a87d-7bbb0f5fe2d6"
 
 ci_pipeline:
-  test_command: "npm test"
+  # Left blank for Salesforce work — the salesforce-dev-loop skill owns
+  # verification via sf_deploy (dry-run) and sf_apex_test against a
+  # scratch org provisioned per ticket. The repo also contains a Node
+  # scaffold with its own tests, but the harness runs SF work from the
+  # SFDX project root (sfdx-project.json), not the Node side.
+  test_command: ""
   lint_command: ""
   build_command: ""
   e2e_command: ""
 
 test_framework:
-  unit: "jest"
+  unit: ""
   integration: ""
   e2e: ""
 
