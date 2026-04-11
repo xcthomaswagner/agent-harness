@@ -699,6 +699,7 @@ def consolidate_worktree_logs(
         "blocked-units.md": "blocked_units_artifact",
         "simplify.md": "simplify_artifact",
         "escalation.md": "escalation_artifact",
+        "session.log": "session_log_artifact",
     }
 
     logs_dir = wt / ".harness" / "logs"
@@ -711,6 +712,69 @@ def consolidate_worktree_logs(
                 event=event_name,
                 content=artifact_path.read_text()[:5000],
             )
+
+    # Effective CLAUDE.md — injected at worktree root, captures the instructions
+    # the agent was actually operating under for this run.
+    effective_claude_md = wt / "CLAUDE.md"
+    if effective_claude_md.exists():
+        append_trace(
+            ticket_id, trace_id,
+            phase="artifact",
+            event="effective_claude_md_artifact",
+            content=effective_claude_md.read_text()[:5000],
+        )
+
+    # session-stream.jsonl is stored by reference — it can be megabytes and
+    # is preserved separately in <client_repo.parent>/trace-archive/<ticket>/
+    # by the cleanup step in scripts/spawn_team.py. Worktrees live at
+    # <client_repo.parent>/worktrees/<branch>, so wt.parent.parent is
+    # client_repo.parent (two levels up from the worktree, NOT three).
+    #
+    # Prefer the archive path when it exists (stable — survives worktree
+    # cleanup). For failed/escalated runs the archive may not exist yet
+    # because spawn_team.py only archives on status == "complete", so fall
+    # back to the live worktree path which is still on disk for those runs.
+    # If neither exists, skip the reference entry entirely.
+    stream_path = logs_dir / "session-stream.jsonl"
+    if stream_path.exists():
+        try:
+            size_bytes = stream_path.stat().st_size
+            line_count = sum(1 for _ in stream_path.open())
+        except OSError:
+            size_bytes = 0
+            line_count = 0
+        archive_path = (
+            wt.parent.parent / "trace-archive" / ticket_id / "session-stream.jsonl"
+        )
+        if archive_path.exists():
+            stream_ref_path: Path | None = archive_path
+        elif stream_path.exists():
+            stream_ref_path = stream_path
+        else:
+            stream_ref_path = None
+
+        if stream_ref_path is not None:
+            append_trace(
+                ticket_id, trace_id,
+                phase="artifact",
+                event="session_stream_artifact",
+                artifact_path=str(stream_ref_path),
+                size_bytes=size_bytes,
+                line_count=line_count,
+            )
+
+        # Parse the stream once to build a declarative tool-call summary.
+        try:
+            from tool_index import build_tool_index
+            index = build_tool_index(stream_path)
+            append_trace(
+                ticket_id, trace_id,
+                phase="artifact",
+                event="tool_index",
+                index=index,
+            )
+        except Exception:
+            logger.exception("tool_index_build_failed", ticket_id=ticket_id)
 
     # Import plan if exists
     for plan_path in sorted((wt / ".harness" / "plans").glob("plan-v*.json")):
