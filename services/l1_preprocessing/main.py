@@ -1589,6 +1589,14 @@ async def agent_trace(request: Request) -> dict[str, str]:
     Called by the file-watcher thread in spawn_team.py as the agent
     writes to pipeline.jsonl. Entries appear in the dashboard in real-time.
     No auth required — internal network only (same host as spawn_team.py).
+
+    ``ticket_id`` is validated against the trace-store id pattern BEFORE
+    being passed to ``append_trace``: without validation, a path-like
+    value (``../../tmp/pwn``) would escape ``LOGS_DIR`` and have
+    attacker-controlled JSON appended to an arbitrary ``.jsonl`` file
+    since ``append_trace`` builds ``LOGS_DIR / f"{ticket_id}.jsonl"``.
+    The endpoint is intentionally open to the local file-watcher, so
+    input sanitisation is the sole guardrail.
     """
     body = await request.json()
     ticket_id = str(body.pop("ticket_id", ""))
@@ -1596,8 +1604,12 @@ async def agent_trace(request: Request) -> dict[str, str]:
     phase = str(body.pop("phase", ""))
     event = str(body.pop("event", ""))
     body.pop("timestamp", None)  # append_trace generates its own timestamp
-    if ticket_id and event:
-        append_trace(ticket_id, trace_id, phase, event, source="agent", **body)
+    if not ticket_id or not event:
+        return {"status": "ok"}
+    # Reject path-like ticket_ids (``..``, slashes, absolute paths).
+    # Raises HTTPException(400) before any filesystem access.
+    _validate_ticket_id(ticket_id)
+    append_trace(ticket_id, trace_id, phase, event, source="agent", **body)
     return {"status": "ok"}
 
 

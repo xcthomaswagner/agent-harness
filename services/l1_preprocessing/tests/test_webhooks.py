@@ -950,3 +950,68 @@ async def test_retest_rejects_sibling_prefix_via_relative_to(tmp_path: Path) -> 
     # Must be rejected — the symlink resolves outside worktrees/.
     assert r.status_code == 400
     assert "outside" in r.json()["detail"].lower()
+
+
+# --- /api/agent-trace ticket_id validation ---
+#
+# Bug regression: the endpoint is intentionally open for the local
+# file-watcher in spawn_team.py but it used to pass the
+# request-body-supplied ``ticket_id`` straight to ``append_trace()``,
+# which builds ``LOGS_DIR / f"{ticket_id}.jsonl"``. Without input
+# validation, a body like ``{"ticket_id": "../../tmp/pwn", ...}`` would
+# create ``<LOGS_DIR>/../../tmp/pwn.jsonl`` with attacker-controlled
+# JSON. Fixed by calling ``_validate_ticket_id`` before
+# ``append_trace`` — same regex every other ticket_id-consuming
+# endpoint uses.
+
+
+async def test_agent_trace_rejects_path_traversal_ticket_id(
+    tmp_path: Path,
+) -> None:
+    """A malicious ticket_id with path segments must be rejected with
+    400 and produce no file outside LOGS_DIR."""
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    canary = tmp_path / "pwn.jsonl"
+    canary.write_text("original")
+
+    with patch("tracer.LOGS_DIR", logs_dir):
+        async with await _make_client() as client:
+            resp = await client.post(
+                "/api/agent-trace",
+                json={
+                    "ticket_id": "../pwn",
+                    "trace_id": "t1",
+                    "phase": "x",
+                    "event": "tampered",
+                },
+            )
+    assert resp.status_code == 400
+    # Canary outside LOGS_DIR must not be touched.
+    assert canary.read_text() == "original"
+    # And nothing was written inside LOGS_DIR either.
+    assert list(logs_dir.iterdir()) == []
+
+
+async def test_agent_trace_accepts_valid_ticket_id(tmp_path: Path) -> None:
+    """A legitimate ticket_id still reaches append_trace and lands in
+    LOGS_DIR — the validator must not break the happy path."""
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+
+    with patch("tracer.LOGS_DIR", logs_dir):
+        async with await _make_client() as client:
+            resp = await client.post(
+                "/api/agent-trace",
+                json={
+                    "ticket_id": "PROJ-42",
+                    "trace_id": "t1",
+                    "phase": "pipeline",
+                    "event": "phase_started",
+                },
+            )
+    assert resp.status_code == 200
+    # append_trace wrote exactly one jsonl file.
+    assert (logs_dir / "PROJ-42.jsonl").exists()
+    content = (logs_dir / "PROJ-42.jsonl").read_text().strip()
+    assert '"event": "phase_started"' in content

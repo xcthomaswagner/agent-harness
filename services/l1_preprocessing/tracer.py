@@ -143,6 +143,80 @@ def count_traces() -> int:
     return sum(1 for _ in LOGS_DIR.glob("*.jsonl"))
 
 
+def _extract_trace_metadata(entries: list[dict[str, Any]]) -> dict[str, str]:
+    """Walk ``entries`` once and pull the common metadata fields.
+
+    Returns a dict with keys ``pr_url``, ``review_verdict``,
+    ``qa_result``, ``pipeline_mode``, and ``ticket_title``. The
+    ``review_verdict`` / ``qa_result`` pair is overridden when a
+    ``Pipeline complete`` entry is present (its values are the
+    authoritative end-of-run verdict).
+
+    Previously this loop was duplicated verbatim in ``list_traces``
+    and ``_build_summary`` with subtly different field coverage —
+    ``ticket_title`` lived only in list_traces, so the detail view
+    had no way to surface it. Shared helper now guarantees both
+    views extract the same set.
+    """
+    metadata: dict[str, str] = {
+        "pr_url": "",
+        "review_verdict": "",
+        "qa_result": "",
+        "pipeline_mode": "",
+        "ticket_title": "",
+    }
+    for e in entries:
+        if e.get("ticket_title") and not metadata["ticket_title"]:
+            metadata["ticket_title"] = str(e["ticket_title"])
+        if e.get("pr_url"):
+            metadata["pr_url"] = str(e["pr_url"])
+        if e.get("review_verdict"):
+            metadata["review_verdict"] = str(e["review_verdict"])
+        if e.get("qa_result"):
+            metadata["qa_result"] = str(e["qa_result"])
+        if e.get("pipeline_mode"):
+            metadata["pipeline_mode"] = str(e["pipeline_mode"])
+        if e.get("event") == "Pipeline complete":
+            metadata["review_verdict"] = str(e.get("review_verdict", ""))
+            metadata["qa_result"] = str(e.get("qa_result", ""))
+    return metadata
+
+
+def _compute_run_duration(run_entries: list[dict[str, Any]]) -> str:
+    """Format the first-to-last-timestamp delta across ``run_entries``.
+
+    Returns ``""`` when the list is empty, the timestamps don't parse,
+    or the two timestamps can't be subtracted (mixed naive/aware is
+    common in test fixtures and some legacy entries). Returns
+    ``"Nm Ns"``/``"Ns"`` for durations ≤24h, and the
+    ``">24h (multi-run)"`` marker for anything longer (a single
+    trace that spans >24h almost always means multiple re-runs
+    merged into one trace store file).
+
+    Previously this try/except block was duplicated verbatim in
+    ``list_traces`` and ``_build_summary`` with identical numeric
+    constants and format strings — any tweak (e.g. switching to
+    ``Xh Ym`` for ≥1h durations) had to land in two places. The
+    original sites wrapped the whole subtract in the try, so we do
+    the same here to preserve naive/aware-mixing tolerance.
+    """
+    if not run_entries:
+        return ""
+    try:
+        start_ts = datetime.fromisoformat(run_entries[0].get("timestamp", ""))
+        end_ts = datetime.fromisoformat(run_entries[-1].get("timestamp", ""))
+        total_secs = (end_ts - start_ts).total_seconds()
+    except (ValueError, TypeError):
+        return ""
+    if 0 < total_secs <= 86400:
+        minutes = int(total_secs // 60)
+        seconds = int(total_secs % 60)
+        return f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
+    if total_secs > 86400:
+        return ">24h (multi-run)"
+    return ""
+
+
 def derive_trace_status(
     entries: list[dict[str, Any]],
     events: list[str],
@@ -230,34 +304,14 @@ def list_traces(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
         first = entries[0]
         last = entries[-1]
 
-        # Extract key info
-        pr_url = ""
-        review_verdict = ""
-        qa_result = ""
-        pipeline_mode = ""
-        ticket_title = ""
+        metadata = _extract_trace_metadata(entries)
         total_phases = len({e.get("phase") for e in entries})
         events = [e.get("event", "") for e in entries]
-
-        for e in entries:
-            if e.get("ticket_title") and not ticket_title:
-                ticket_title = str(e["ticket_title"])
-            if e.get("pr_url"):
-                pr_url = str(e["pr_url"])
-            if e.get("review_verdict"):
-                review_verdict = str(e["review_verdict"])
-            if e.get("qa_result"):
-                qa_result = str(e["qa_result"])
-            if e.get("pipeline_mode"):
-                pipeline_mode = str(e["pipeline_mode"])
-            if e.get("event") == "Pipeline complete":
-                review_verdict = str(e.get("review_verdict", ""))
-                qa_result = str(e.get("qa_result", ""))
 
         # Derive status label from the event history. Single source of
         # truth shared with build_span_tree's _build_summary so both
         # views agree on what a trace's status is.
-        status = derive_trace_status(entries, events, pr_url)
+        status = derive_trace_status(entries, events, metadata["pr_url"])
 
         # Compute the run-start index once per trace — threaded into
         # _derive_current_phase here AND down to build_trace_list_row via
@@ -266,39 +320,24 @@ def list_traces(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
         run_start_idx = _find_run_start_idx(entries)
         run_entries = entries[run_start_idx:]
 
-        # --- Compute duration using only entries from the last run ---
-        duration = ""
-        run_started_at = ""
-        try:
-            if run_entries:
-                run_started_at = run_entries[0].get("timestamp", "")
-                start_ts = datetime.fromisoformat(run_started_at)
-                end_ts = datetime.fromisoformat(run_entries[-1].get("timestamp", ""))
-                delta = end_ts - start_ts
-                total_secs = delta.total_seconds()
-                # Cap at 24 hours — anything longer is data from separate runs
-                if 0 < total_secs <= 86400:
-                    minutes = int(total_secs // 60)
-                    seconds = int(total_secs % 60)
-                    duration = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
-                elif total_secs > 86400:
-                    duration = ">24h (multi-run)"
-        except (ValueError, TypeError):
-            pass
+        run_started_at = (
+            run_entries[0].get("timestamp", "") if run_entries else ""
+        )
+        duration = _compute_run_duration(run_entries)
 
         traces.append({
             "ticket_id": ticket_id,
-            "ticket_title": ticket_title,
+            "ticket_title": metadata["ticket_title"],
             "trace_id": first.get("trace_id", ""),
             "started_at": first.get("timestamp", ""),
             "run_started_at": run_started_at or first.get("timestamp", ""),
             "completed_at": last.get("timestamp", ""),
             "duration": duration,
             "status": status,
-            "pr_url": pr_url,
-            "review_verdict": review_verdict,
-            "qa_result": qa_result,
-            "pipeline_mode": pipeline_mode,
+            "pr_url": metadata["pr_url"],
+            "review_verdict": metadata["review_verdict"],
+            "qa_result": metadata["qa_result"],
+            "pipeline_mode": metadata["pipeline_mode"],
             "current_phase": _derive_current_phase(
                 entries, run_start_idx=run_start_idx
             ),
@@ -775,21 +814,18 @@ def _build_summary(
     }
 
     events = [e.get("event", "") for e in run_entries]
-    phases_seen: list[str] = []
+
+    # Pull pr_url/review_verdict/qa_result/pipeline_mode/ticket_title
+    # in one shared walk. Token counts and QA criteria pass/total are
+    # detail-view-only so we do those in a small loop below, but the
+    # common metadata now matches list_traces exactly.
+    metadata = _extract_trace_metadata(run_entries)
+    summary["pr_url"] = metadata["pr_url"]
+    summary["pipeline_mode"] = metadata["pipeline_mode"]
+    summary["review_verdict"] = metadata["review_verdict"]
+    summary["qa_result"] = metadata["qa_result"]
 
     for e in run_entries:
-        if e.get("pr_url"):
-            summary["pr_url"] = str(e["pr_url"])
-        if e.get("pipeline_mode"):
-            summary["pipeline_mode"] = str(e["pipeline_mode"])
-        # Pick up review/QA from any entry, prefer "Pipeline complete" if present
-        if e.get("review_verdict"):
-            summary["review_verdict"] = str(e["review_verdict"])
-        if e.get("qa_result"):
-            summary["qa_result"] = str(e["qa_result"])
-        if e.get("event") == "Pipeline complete":
-            summary["review_verdict"] = str(e.get("review_verdict", ""))
-            summary["qa_result"] = str(e.get("qa_result", ""))
         if e.get("event") == "analyst_completed":
             ti = e.get("tokens_in", 0)
             to_ = e.get("tokens_out", 0)
@@ -801,6 +837,7 @@ def _build_summary(
             summary["qa_passed"] = e.get("criteria_passed", 0)
             summary["qa_total"] = e.get("criteria_total", 0)
 
+    phases_seen: list[str] = []
     for e in l2_phases:
         phase = e.get("phase", "")
         if phase and phase not in phases_seen:
@@ -812,21 +849,7 @@ def _build_summary(
     # list_traces, so the detail view and the list view could disagree
     # on the same trace. Now they can't.
     summary["status"] = derive_trace_status(run_entries, events, summary["pr_url"])
-
-    # Duration
-    if run_entries:
-        try:
-            start_ts = datetime.fromisoformat(run_entries[0].get("timestamp", ""))
-            end_ts = datetime.fromisoformat(run_entries[-1].get("timestamp", ""))
-            total_secs = (end_ts - start_ts).total_seconds()
-            if 0 < total_secs <= 86400:
-                minutes = int(total_secs // 60)
-                seconds = int(total_secs % 60)
-                summary["duration"] = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
-            elif total_secs > 86400:
-                summary["duration"] = ">24h (multi-run)"
-        except (ValueError, TypeError):
-            pass
+    summary["duration"] = _compute_run_duration(run_entries)
 
     return summary
 

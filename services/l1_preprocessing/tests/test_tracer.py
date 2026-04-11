@@ -9,6 +9,8 @@ from unittest.mock import patch
 import pytest
 
 from tracer import (
+    _compute_run_duration,
+    _extract_trace_metadata,
     append_trace,
     build_span_tree,
     build_trace_list_row,
@@ -1308,3 +1310,105 @@ class TestDeriveTraceStatus:
         ]
         events = [e.get("event", "") for e in entries]
         assert derive_trace_status(entries, events, "") == "Merged"
+
+
+class TestExtractTraceMetadata:
+    """Shared metadata extraction used by both list_traces and
+    _build_summary. The two sites used to have duplicated loops with
+    different field coverage — ``ticket_title`` lived only in
+    list_traces, so the detail-view summary had no way to surface it."""
+
+    def test_empty_entries_returns_all_empty_strings(self) -> None:
+        assert _extract_trace_metadata([]) == {
+            "pr_url": "",
+            "review_verdict": "",
+            "qa_result": "",
+            "pipeline_mode": "",
+            "ticket_title": "",
+        }
+
+    def test_extracts_simple_fields(self) -> None:
+        entries = [
+            {"event": "webhook_received", "ticket_title": "My Ticket"},
+            {"event": "pipeline_started", "pipeline_mode": "multi"},
+            {"event": "l2_dispatched", "pr_url": "https://github.com/o/r/pull/1"},
+            {"event": "Review complete", "review_verdict": "APPROVED"},
+            {"event": "QA complete", "qa_result": "PASS"},
+        ]
+        metadata = _extract_trace_metadata(entries)
+        assert metadata["ticket_title"] == "My Ticket"
+        assert metadata["pipeline_mode"] == "multi"
+        assert metadata["pr_url"] == "https://github.com/o/r/pull/1"
+        assert metadata["review_verdict"] == "APPROVED"
+        assert metadata["qa_result"] == "PASS"
+
+    def test_pipeline_complete_overrides_review_and_qa(self) -> None:
+        """The Pipeline complete entry's review_verdict/qa_result are
+        authoritative — its values should win over any earlier entries."""
+        entries = [
+            {"event": "Review complete", "review_verdict": "PASS_WITH_NOTES"},
+            {"event": "QA complete", "qa_result": "FAIL"},
+            {
+                "event": "Pipeline complete",
+                "review_verdict": "APPROVED",
+                "qa_result": "PASS",
+            },
+        ]
+        metadata = _extract_trace_metadata(entries)
+        assert metadata["review_verdict"] == "APPROVED"
+        assert metadata["qa_result"] == "PASS"
+
+    def test_ticket_title_keeps_first_non_empty(self) -> None:
+        """Only the FIRST non-empty ticket_title wins — later overrides
+        (which in practice are artifacts from different runs) should
+        not flip the display name."""
+        entries = [
+            {"event": "a", "ticket_title": "Original"},
+            {"event": "b", "ticket_title": "Later override"},
+        ]
+        metadata = _extract_trace_metadata(entries)
+        assert metadata["ticket_title"] == "Original"
+
+
+class TestComputeRunDuration:
+    """Shared duration formatter used by list_traces and _build_summary."""
+
+    def test_empty_entries_returns_empty(self) -> None:
+        assert _compute_run_duration([]) == ""
+
+    def test_sub_minute_duration(self) -> None:
+        entries = [
+            {"timestamp": "2026-01-01T10:00:00+00:00"},
+            {"timestamp": "2026-01-01T10:00:30+00:00"},
+        ]
+        assert _compute_run_duration(entries) == "30s"
+
+    def test_minute_and_seconds_duration(self) -> None:
+        entries = [
+            {"timestamp": "2026-01-01T10:00:00+00:00"},
+            {"timestamp": "2026-01-01T10:05:15+00:00"},
+        ]
+        assert _compute_run_duration(entries) == "5m 15s"
+
+    def test_over_24h_multi_run_marker(self) -> None:
+        entries = [
+            {"timestamp": "2026-01-01T00:00:00+00:00"},
+            {"timestamp": "2026-01-03T00:00:00+00:00"},
+        ]
+        assert _compute_run_duration(entries) == ">24h (multi-run)"
+
+    def test_malformed_timestamp_returns_empty(self) -> None:
+        entries = [
+            {"timestamp": "not-a-timestamp"},
+            {"timestamp": "2026-01-01T10:00:00+00:00"},
+        ]
+        assert _compute_run_duration(entries) == ""
+
+    def test_negative_delta_returns_empty(self) -> None:
+        """If somehow last entry has a timestamp earlier than the first
+        (out-of-order writes), we must not return a negative duration."""
+        entries = [
+            {"timestamp": "2026-01-01T10:05:00+00:00"},
+            {"timestamp": "2026-01-01T10:00:00+00:00"},
+        ]
+        assert _compute_run_duration(entries) == ""

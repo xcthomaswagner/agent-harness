@@ -31,6 +31,9 @@ from autonomy_store import (
 )
 from client_profile import load_profile
 from config import settings
+from dashboard_common import (
+    LANGFUSE_BASE_CSS,
+)
 from dashboard_common import escape_html as _e
 from dashboard_common import fmt_pct as _fmt_pct
 
@@ -41,29 +44,11 @@ router = APIRouter()
 
 # --- Langfuse Design System (copied from trace_dashboard) ---
 
-_LANGFUSE_STYLES = """
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  font-feature-settings: "rlig" 1, "calt" 1;
-  background: #FFFFFF; color: #0F172A; font-size: 13.2px; line-height: 1.5;
-}
-a { color: #4D45E5; text-decoration: none; }
-a:hover { text-decoration: underline; }
-.page { max-width: 1400px; margin: 0 auto; padding: 24px; }
-h1 { font-size: 20.8px; font-weight: 600; color: #0F172A; }
+# Base CSS (body/typography/badge) comes from dashboard_common;
+# autonomy-specific rules (different card-grid sizing, table styling,
+# selector bar) are appended here.
+_AUTONOMY_LOCAL_CSS = """
 h2 { font-size: 15px; font-weight: 600; color: #0F172A; margin-bottom: 8px; }
-.meta { font-size: 11.2px; color: #64748B; }
-.badge {
-  display: inline-flex; align-items: center; border-radius: 6px;
-  font-weight: 600; font-size: 11.2px; padding: 1px 8px; white-space: nowrap;
-}
-.badge-success { background: #DBFBE7; color: #124D49; }
-.badge-error { background: #FBE6F1; color: #DB2626; }
-.badge-warning { background: #FEFCE8; color: #C79004; }
-.badge-blue { background: #DAEAFD; color: #3B82F5; }
-.badge-secondary { background: #F1F5F9; color: #0F172A; }
 .card {
   border: 1px solid #E2E8F0; border-radius: 8px; padding: 16px;
   background: #FFFFFF; margin-bottom: 12px;
@@ -89,6 +74,8 @@ tbody tr:last-child td { border-bottom: none; }
 .selector a { margin: 0 4px; }
 .selector .sep { color: #CBD5E1; }
 """
+
+_LANGFUSE_STYLES = LANGFUSE_BASE_CSS + _AUTONOMY_LOCAL_CSS
 
 
 _MODE_BADGE: dict[str, str] = {

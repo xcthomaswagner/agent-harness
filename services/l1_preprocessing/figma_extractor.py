@@ -53,6 +53,7 @@ class FigmaExtractor:
         self,
         api_token: str = "",
         client: httpx.AsyncClient | None = None,
+        cdn_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._token = api_token
         self._client = client or httpx.AsyncClient(
@@ -60,6 +61,15 @@ class FigmaExtractor:
             headers={"X-Figma-Token": api_token} if api_token else {},
             timeout=30.0,
         )
+        # Separate client for downloading rendered frame images from
+        # the Figma CDN (figma-alpha-api.s3.*.amazonaws.com). These
+        # URLs are pre-signed and require no auth — but previously the
+        # main ``self._client`` was reused to fetch them, which sent
+        # the ``X-Figma-Token`` default header to AWS on every image
+        # download. The token then ended up in S3 access logs and any
+        # edge/redirect targets outside the operator's trust boundary.
+        # Keeping the CDN client header-free cleanly scopes the token.
+        self._cdn_client = cdn_client or httpx.AsyncClient(timeout=30.0)
 
     async def extract(
         self,
@@ -265,7 +275,9 @@ class FigmaExtractor:
             file_path = dest / f"figma-{safe_name}.png"
 
             try:
-                img_resp = await self._client.get(
+                # Use the no-auth CDN client so X-Figma-Token isn't
+                # leaked to AWS S3 — image URLs are pre-signed.
+                img_resp = await self._cdn_client.get(
                     url, follow_redirects=True
                 )
                 if img_resp.status_code == 200:

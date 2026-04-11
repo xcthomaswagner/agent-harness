@@ -110,3 +110,34 @@ def fmt_pct(value: float | None) -> str:
     if value is None:
         return "\u2014"
     return f"{value * 100:.0f}%"
+
+
+# Base CSS used by every dashboard module. Previously duplicated
+# verbatim in trace_dashboard, unified_dashboard, and autonomy_dashboard
+# — any future palette or typography tweak had to be made in three
+# places at once. Each dashboard concatenates this block with any
+# module-specific styles (card grid sizing, table chrome, etc.) that
+# differ across views.
+LANGFUSE_BASE_CSS = """
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-feature-settings: "rlig" 1, "calt" 1;
+  background: #FFFFFF; color: #0F172A; font-size: 13.2px; line-height: 1.5;
+}
+a { color: #4D45E5; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.page { max-width: 1400px; margin: 0 auto; padding: 24px; }
+h1 { font-size: 20.8px; font-weight: 600; color: #0F172A; }
+.meta { font-size: 11.2px; color: #64748B; }
+.badge {
+  display: inline-flex; align-items: center; border-radius: 6px;
+  font-weight: 600; font-size: 11.2px; padding: 1px 8px; white-space: nowrap;
+}
+.badge-success { background: #DBFBE7; color: #124D49; }
+.badge-error { background: #FBE6F1; color: #DB2626; }
+.badge-warning { background: #FEFCE8; color: #C79004; }
+.badge-blue { background: #DAEAFD; color: #3B82F5; }
+.badge-secondary { background: #F1F5F9; color: #0F172A; }
+"""
