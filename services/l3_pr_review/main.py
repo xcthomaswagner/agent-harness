@@ -538,6 +538,27 @@ async def _forward_review_body_human_issue(
     await _forward_human_issue(human_issue)
 
 
+async def _forward_review_events(
+    event_type: str,
+    payload: dict[str, Any],
+    *,
+    include_body: bool = True,
+) -> None:
+    """Forward both autonomy event and (optionally) review body as a human issue.
+
+    Consolidates the "build autonomy event + forward + forward review
+    body" prelude that was copy-pasted into ``_handle_review_comment``,
+    ``_handle_review_changes_requested``, and ``_handle_review_approved``.
+    ``include_body=False`` is used by issue_comment paths where no
+    ``review`` object is present in the payload.
+    """
+    autonomy_event = _build_autonomy_event(event_type, payload)
+    if autonomy_event:
+        await _forward_autonomy_event(autonomy_event)
+    if include_body:
+        await _forward_review_body_human_issue(event_type, payload)
+
+
 # --- Event handlers ---
 
 
@@ -690,15 +711,11 @@ async def _handle_review_comment(payload: dict[str, Any]) -> None:
     log = logger.bind(pr_number=pr_number, author=comment_author)
     log.info("handling_review_comment")
 
-    # Forward autonomy event to L1
-    autonomy_event = _build_autonomy_event("review_comment", payload)
-    if autonomy_event:
-        await _forward_autonomy_event(autonomy_event)
-
-    # Forward the top-level review body as a human issue, if present.
-    # (issue_comment events have no 'review' key, so this no-ops there.)
-    if review:
-        await _forward_review_body_human_issue("review_comment", payload)
+    # Forward autonomy event + review body (body only when a review
+    # object is present; issue_comment events skip it).
+    await _forward_review_events(
+        "review_comment", payload, include_body=bool(review)
+    )
 
     ticket_id = _ticket_id_from_payload(payload)
     if ticket_id:
@@ -732,13 +749,7 @@ async def _handle_review_changes_requested(payload: dict[str, Any]) -> None:
     log = logger.bind(pr_number=pr_number, reviewer=reviewer)
     log.info("handling_changes_requested")
 
-    # Forward autonomy event to L1
-    autonomy_event = _build_autonomy_event("review_changes_requested", payload)
-    if autonomy_event:
-        await _forward_autonomy_event(autonomy_event)
-
-    # Forward top-level review body as a human issue
-    await _forward_review_body_human_issue("review_changes_requested", payload)
+    await _forward_review_events("review_changes_requested", payload)
 
     ticket_id = _ticket_id_from_payload(payload)
     if ticket_id:
@@ -768,13 +779,7 @@ async def _handle_review_approved(payload: dict[str, Any]) -> None:
     log = logger.bind(pr_number=pr_number, reviewer=reviewer)
     log.info("handling_review_approved")
 
-    # Forward autonomy event to L1
-    autonomy_event = _build_autonomy_event("review_approved", payload)
-    if autonomy_event:
-        await _forward_autonomy_event(autonomy_event)
-
-    # Forward top-level review body as a human issue (only if body non-empty)
-    await _forward_review_body_human_issue("review_approved", payload)
+    await _forward_review_events("review_approved", payload)
 
     # Extract the AI ticket id from the branch. Approvals on non-AI
     # branches (main, develop, a human PR that happens to be on this

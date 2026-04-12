@@ -30,6 +30,7 @@ def _good_pr_state() -> dict[str, Any]:
         "mergeable_state": "clean",
         "head_sha": "abc123",
         "approvals_count": 1,
+        "human_approvals_count": 1,
         "changes_requested_count": 0,
         "checks_passed": True,
         "labels": ["bug"],

@@ -140,6 +140,41 @@ def test_no_approval_blocks() -> None:
     assert reason == REASON_NO_APPROVAL
 
 
+def test_bot_only_approval_blocks() -> None:
+    """Regression: a PR with 1 bot approval and 0 human approvals must
+    fail the has_approval gate. Previously the gate used approvals_count
+    which includes bots, so a Dependabot approval would pass the gate."""
+    ok, reason, _ = evaluate_policy_gates(
+        _ctx(),
+        _pr(approvals_count=1, human_approvals_count=0),
+    )
+    assert ok is False
+    assert reason == REASON_NO_APPROVAL, (
+        "bot-only approvals must NOT satisfy has_approval — "
+        "regression for default-OPEN bot-auto-merge bug"
+    )
+
+
+def test_human_approval_passes_even_with_bot_approval() -> None:
+    """1 human + 1 bot approval still satisfies the gate."""
+    ok, reason, _ = evaluate_policy_gates(
+        _ctx(),
+        _pr(approvals_count=2, human_approvals_count=1),
+    )
+    assert ok is True
+    assert reason == REASON_OK
+
+
+def test_ado_compat_fallback_uses_approvals_count() -> None:
+    """When human_approvals_count is missing (ADO path), fall back to
+    approvals_count so ADO PRs don't fail-CLOSED regress."""
+    pr_state = _pr(approvals_count=1)
+    pr_state.pop("human_approvals_count", None)  # ensure not present
+    ok, reason, _ = evaluate_policy_gates(_ctx(), pr_state)
+    assert ok is True
+    assert reason == REASON_OK
+
+
 def test_changes_requested_blocks() -> None:
     ok, reason, _ = evaluate_policy_gates(
         _ctx(), _pr(changes_requested_count=1)

@@ -10,6 +10,46 @@ import structlog
 logger = structlog.get_logger()
 
 
+def _is_bot_reviewer(user: dict[str, Any] | None) -> bool:
+    """Return True if ``user`` looks like an automated GitHub reviewer.
+
+    GitHub Apps install with ``type == "Bot"`` and their integration
+    login typically ends in ``[bot]`` (e.g. ``dependabot[bot]``,
+    ``github-actions[bot]``, ``copilot[bot]``). We treat anything
+    matching either signal — plus the harness's own bot account —
+    as a non-human reviewer whose APPROVED state must NOT satisfy
+    the ``has_approval`` gate on auto-merge.
+
+    Rationale: the gate is meant to require a human in the loop.
+    Prior to this defense, a Dependabot auto-approve (or Copilot, or
+    a security scanner with ``pull-requests: write``) landing an
+    APPROVED review on an AI-authored branch would pass every gate
+    and trigger merge_pr with zero human review — the worst
+    default-OPEN hazard in the auto-merge pipeline.
+    """
+    if not user:
+        return False
+    if user.get("type") == "Bot":
+        return True
+    login = (user.get("login") or "").lower()
+    if not login:
+        return False
+    if login.endswith("[bot]"):
+        return True
+    # Harness's own bot account + optional denylist for third-party
+    # service accounts that don't carry the [bot] suffix.
+    denylist_env = os.getenv("L3_APPROVAL_BOT_DENYLIST", "")
+    denylist = {
+        name.strip().lower()
+        for name in denylist_env.split(",")
+        if name.strip()
+    }
+    harness_bot = os.getenv("BOT_GITHUB_USERNAME", "").strip().lower()
+    if harness_bot:
+        denylist.add(harness_bot)
+    return login in denylist
+
+
 async def _paginate(
     c: httpx.AsyncClient,
     url: str,
@@ -107,11 +147,19 @@ async def get_pr_state(
         # a rejection shouldn't silently clear just because a new
         # commit landed. The reviewer re-APPROVING on the new commit
         # is the only thing that should unblock.
+        #
+        # We ALSO track human vs bot reviewers separately so the
+        # ``has_approval`` gate can require at least one human
+        # approval. Without that separation, a Dependabot/Copilot/
+        # security-bot APPROVED review would satisfy the gate on its
+        # own and auto-merge would execute with zero human review.
         latest_by_user: dict[str, str] = {}
+        user_is_bot: dict[str, bool] = {}
         for r in reviews:
             if r.get("state") == "COMMENTED":
                 continue  # Comments don't count as approval/change request
-            user = (r.get("user") or {}).get("login", "")
+            reviewer = r.get("user") or {}
+            user = reviewer.get("login", "")
             state = r.get("state", "")
             if not (user and state):
                 continue
@@ -119,7 +167,13 @@ async def get_pr_state(
                 # Stale approval against an older commit — drop.
                 continue
             latest_by_user[user] = state
+            user_is_bot[user] = _is_bot_reviewer(reviewer)
         approvals = sum(1 for s in latest_by_user.values() if s == "APPROVED")
+        human_approvals = sum(
+            1
+            for user, s in latest_by_user.items()
+            if s == "APPROVED" and not user_is_bot.get(user, False)
+        )
         changes_req = sum(
             1 for s in latest_by_user.values() if s == "CHANGES_REQUESTED"
         )
@@ -155,7 +209,11 @@ async def get_pr_state(
             "mergeable": pr.get("mergeable"),
             "mergeable_state": pr.get("mergeable_state", ""),
             "head_sha": head_sha,
+            # ``approvals_count`` = all approvals (bots + humans),
+            # kept for backward-compat logs and audit payloads.
+            # ``human_approvals_count`` = the gate-relevant number.
             "approvals_count": approvals,
+            "human_approvals_count": human_approvals,
             "changes_requested_count": changes_req,
             "checks_passed": checks_passed,
             "labels": [label.get("name", "") for label in (pr.get("labels") or [])],

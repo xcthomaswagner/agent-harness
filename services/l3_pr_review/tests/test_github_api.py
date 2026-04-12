@@ -328,6 +328,146 @@ async def test_get_pr_state_paginates_check_suites_across_pages() -> None:
     )
 
 
+# --- Bot reviewer filtering (human_approvals_count) ---
+#
+# Bug: get_pr_state used to collapse reviews per user with no filter
+# for GitHub Apps / bots. A Dependabot / Copilot / Snyk approval on
+# an AI-authored PR passed the has_approval gate, causing auto-merge
+# to execute with zero human review. Fix: track latest_by_user_bot
+# map, expose human_approvals_count separately, and have the gate
+# use the human count.
+
+
+async def test_get_pr_state_human_approvals_excludes_bot_type() -> None:
+    """GitHub App reviewers (type=Bot) must not count as human approvals."""
+    pr_json = {
+        "user": {"login": "xcagentrockwell"},
+        "merged": False,
+        "mergeable": True,
+        "mergeable_state": "clean",
+        "head": {"sha": "abc"},
+        "labels": [],
+    }
+    reviews_json = [
+        {
+            "user": {"login": "dependabot[bot]", "type": "Bot"},
+            "state": "APPROVED",
+            "commit_id": "abc",
+        },
+    ]
+    suites_json = {
+        "check_suites": [{"status": "completed", "conclusion": "success"}]
+    }
+    client = _mk_client(
+        [
+            _mk_response(200, pr_json),
+            _mk_response(200, reviews_json),
+            _mk_response(200, suites_json),
+        ]
+    )
+    state = await get_pr_state("acme/repo", 1, github_token="tok", client=client)
+    assert state is not None
+    # approvals_count still 1 for backward-compat logging
+    assert state["approvals_count"] == 1
+    # human_approvals_count is 0 — the new field the gate uses
+    assert state["human_approvals_count"] == 0, (
+        "dependabot approval must not count as a human approval — "
+        "regression for default-OPEN bot-approval auto-merge bug"
+    )
+
+
+async def test_get_pr_state_human_approvals_excludes_bot_suffix_login() -> None:
+    """Login ending with [bot] is filtered even without type=Bot."""
+    pr_json = {
+        "user": {"login": "xcagentrockwell"},
+        "merged": False,
+        "mergeable": True,
+        "mergeable_state": "clean",
+        "head": {"sha": "abc"},
+        "labels": [],
+    }
+    reviews_json = [
+        {
+            "user": {"login": "snyk-bot[bot]"},
+            "state": "APPROVED",
+            "commit_id": "abc",
+        },
+    ]
+    client = _mk_client(
+        [
+            _mk_response(200, pr_json),
+            _mk_response(200, reviews_json),
+            _mk_response(200, {"check_suites": []}),
+        ]
+    )
+    state = await get_pr_state("acme/repo", 1, github_token="tok", client=client)
+    assert state is not None
+    assert state["human_approvals_count"] == 0
+
+
+async def test_get_pr_state_human_approvals_counts_real_humans() -> None:
+    """A human reviewer with no bot signals is counted."""
+    pr_json = {
+        "user": {"login": "xcagentrockwell"},
+        "merged": False,
+        "mergeable": True,
+        "mergeable_state": "clean",
+        "head": {"sha": "abc"},
+        "labels": [],
+    }
+    reviews_json = [
+        {
+            "user": {"login": "alice"},
+            "state": "APPROVED",
+            "commit_id": "abc",
+        },
+        {
+            "user": {"login": "dependabot[bot]", "type": "Bot"},
+            "state": "APPROVED",
+            "commit_id": "abc",
+        },
+    ]
+    client = _mk_client(
+        [
+            _mk_response(200, pr_json),
+            _mk_response(200, reviews_json),
+            _mk_response(200, {"check_suites": []}),
+        ]
+    )
+    state = await get_pr_state("acme/repo", 1, github_token="tok", client=client)
+    assert state is not None
+    assert state["approvals_count"] == 2  # alice + dependabot
+    assert state["human_approvals_count"] == 1  # alice only
+
+
+async def test_get_pr_state_human_approvals_respects_env_denylist(
+    monkeypatch,
+) -> None:
+    """L3_APPROVAL_BOT_DENYLIST env var filters additional service accounts."""
+    monkeypatch.setenv("L3_APPROVAL_BOT_DENYLIST", "renovate,custom-bot")
+    pr_json = {
+        "user": {"login": "xcagentrockwell"},
+        "merged": False,
+        "mergeable": True,
+        "mergeable_state": "clean",
+        "head": {"sha": "abc"},
+        "labels": [],
+    }
+    reviews_json = [
+        {"user": {"login": "renovate"}, "state": "APPROVED", "commit_id": "abc"},
+    ]
+    client = _mk_client(
+        [
+            _mk_response(200, pr_json),
+            _mk_response(200, reviews_json),
+            _mk_response(200, {"check_suites": []}),
+        ]
+    )
+    state = await get_pr_state("acme/repo", 1, github_token="tok", client=client)
+    assert state is not None
+    assert state["human_approvals_count"] == 0
+
+
 # --- get_pr_state stale approval regression ---
 #
 # Bug: get_pr_state counted APPROVED reviews without checking their
