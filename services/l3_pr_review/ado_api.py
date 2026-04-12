@@ -25,6 +25,58 @@ def _ado_auth_headers(pat: str) -> dict[str, str]:
     }
 
 
+# ADO reviewer name/descriptor markers that identify non-human
+# reviewers (groups, service principals, build identities). When any
+# of these appear in uniqueName, descriptor, or displayName the
+# reviewer is NOT counted toward ``human_approvals_count`` — the
+# gate that auto-merge relies on for human-in-the-loop safety.
+# ADO has no type=Bot flag like GitHub, so we match on the
+# conventional service-account prefixes/substrings instead.
+_ADO_SERVICE_MARKERS: tuple[str, ...] = (
+    "svc.",
+    "build\\",
+    "agent pool",
+    "project collection build",
+    "[bot]",
+)
+
+
+def _is_ado_human_reviewer(reviewer: dict[str, Any]) -> bool:
+    """Return True if the ADO reviewer looks like a human user.
+
+    Filters out groups (``isContainer``) and service-principal /
+    build identities whose uniqueName/descriptor/displayName match
+    the conventional ADO service-account markers. Also filters the
+    harness's own bot account if BOT_GITHUB_USERNAME is set (the
+    same env var used on the GitHub side — assumes the ADO
+    displayName for the harness identity follows the same
+    convention or is added explicitly via L3_APPROVAL_BOT_DENYLIST).
+
+    Prior to this defense, ADO branch policies' auto-added service
+    reviewers could cast vote=10 and satisfy the ``has_approval``
+    gate on their own, default-OPENing auto-merge on AI PRs.
+    """
+    if reviewer.get("isContainer"):
+        return False
+    unique = (reviewer.get("uniqueName") or "").lower()
+    descriptor = (reviewer.get("descriptor") or "").lower()
+    display = (reviewer.get("displayName") or "").lower()
+    for marker in _ADO_SERVICE_MARKERS:
+        if marker in unique or marker in descriptor or marker in display:
+            return False
+    # Denylist from env: both the harness bot + any org-specific
+    # service accounts administrators want to exclude.
+    denylist: set[str] = {
+        name.strip().lower()
+        for name in os.getenv("L3_APPROVAL_BOT_DENYLIST", "").split(",")
+        if name.strip()
+    }
+    harness_bot = (os.getenv("BOT_GITHUB_USERNAME") or "").strip().lower()
+    if harness_bot:
+        denylist.add(harness_bot)
+    return not any(name and name in denylist for name in (unique, display))
+
+
 async def get_ado_pr_state(
     org_url: str,
     project: str,
@@ -61,10 +113,20 @@ async def get_ado_pr_state(
             return None
         pr = resp.json()
 
-        # Normalize reviewer votes
+        # Normalize reviewer votes. ``human_approvals_count`` is the
+        # gate-relevant field — ``approvals_count`` is kept for
+        # backward-compat audit logging but must NOT be used by
+        # policy gates, because ADO auto-adds service-principal and
+        # build-identity reviewers that would otherwise bypass the
+        # has_approval gate.
         reviewers: list[dict[str, Any]] = pr.get("reviewers", [])
         approvals = sum(
             1 for r in reviewers if r.get("vote", 0) in (10, 5)
+        )
+        human_approvals = sum(
+            1
+            for r in reviewers
+            if r.get("vote", 0) in (10, 5) and _is_ado_human_reviewer(r)
         )
         changes_requested = sum(
             1 for r in reviewers if r.get("vote", 0) in (-10, -5)
@@ -81,6 +143,7 @@ async def get_ado_pr_state(
             "merged": status == "completed",
             "head_sha": last_merge_source.get("commitId", ""),
             "approvals_count": approvals,
+            "human_approvals_count": human_approvals,
             "changes_requested_count": changes_requested,
             "title": pr.get("title", ""),
             "status": status,

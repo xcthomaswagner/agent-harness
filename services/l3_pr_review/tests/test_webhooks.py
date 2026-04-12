@@ -1547,3 +1547,126 @@ async def test_admin_status_accepts_correct_token(
             headers={"X-Internal-Api-Token": "s3cr3t"},
         )
     assert resp.status_code == 200
+
+
+# --- Harness-self-review bot-loop regression ---
+#
+# Bug: _is_bot_user used to check only type=="Bot" or [bot] suffix,
+# missing the harness's own account (xcagentrockwell — normal User
+# type, no suffix). _forward_review_body_human_issue used the
+# weaker _is_bot_user without the body-marker fallback, so when the
+# harness posted a review via `gh pr review`, the review body was
+# forwarded to L1 as a human issue and L1 re-spawned work to "fix"
+# the bot's self-critique. Unbounded spawn loop + $ burn.
+#
+# Fix: _is_bot_actor canonical helper checks type/[bot]/BOT_USERNAME
+# /BOT_COMMENT_MARKER in body. All call sites now use it.
+
+
+class TestBotActorDetection:
+    def test_bot_actor_catches_harness_login(self, monkeypatch) -> None:
+        """xcagentrockwell (type=User, no [bot] suffix) must be detected."""
+        monkeypatch.setattr(l3_main, "BOT_USERNAME", "xcagentrockwell")
+        assert l3_main._is_bot_actor(
+            {"login": "xcagentrockwell", "type": "User"},
+        )
+
+    def test_bot_actor_catches_comment_marker_in_body(self) -> None:
+        """A review body containing <!-- xcagent --> must be detected
+        even if the user looks human and BOT_USERNAME is unset."""
+        assert l3_main._is_bot_actor(
+            {"login": "random-user", "type": "User"},
+            body="## Review\n\nLooks good.\n\n<!-- xcagent -->",
+        )
+
+    def test_bot_actor_catches_bracket_bot_suffix(self) -> None:
+        assert l3_main._is_bot_actor(
+            {"login": "dependabot[bot]", "type": "User"},
+        )
+
+    def test_bot_actor_catches_type_bot(self) -> None:
+        assert l3_main._is_bot_actor({"login": "gh-bot", "type": "Bot"})
+
+    def test_bot_actor_lets_real_humans_through(self, monkeypatch) -> None:
+        monkeypatch.setattr(l3_main, "BOT_USERNAME", "xcagentrockwell")
+        assert not l3_main._is_bot_actor(
+            {"login": "alice", "type": "User"},
+            body="## Review\n\nPlease fix X.",
+        )
+
+    def test_bot_actor_handles_none_user(self) -> None:
+        assert not l3_main._is_bot_actor(None)
+        assert not l3_main._is_bot_actor({})
+
+    async def test_forward_review_body_skips_harness_self_review(
+        self, monkeypatch
+    ) -> None:
+        """Regression: harness's own review body must NOT be forwarded
+        to L1 as a human issue (bot loop prevention)."""
+        monkeypatch.setattr(l3_main, "BOT_USERNAME", "xcagentrockwell")
+        monkeypatch.setattr(l3_main, "L1_INTERNAL_API_TOKEN", "tok")
+        forward_calls: list[dict] = []
+
+        async def _capture(payload: dict) -> bool:
+            forward_calls.append(payload)
+            return True
+
+        monkeypatch.setattr(l3_main, "_forward_human_issue", _capture)
+
+        payload = {
+            "repository": {"full_name": "acme/repo"},
+            "pull_request": {
+                "number": 42,
+                "head": {"sha": "abc123", "ref": "ai/SCRUM-16"},
+                "base": {"repo": {"full_name": "acme/repo"}},
+            },
+            "review": {
+                "id": 999,
+                "body": "## AI Review\n\nChanges requested.\n\n<!-- xcagent -->",
+                "submitted_at": "2026-04-11T00:00:00Z",
+                "html_url": "https://github.com/acme/repo/pull/42",
+                "user": {"login": "xcagentrockwell", "type": "User"},
+            },
+        }
+        await l3_main._forward_review_body_human_issue(
+            "review_changes_requested", payload
+        )
+        assert forward_calls == [], (
+            "harness self-review must NOT be forwarded — regression "
+            "for the self-reinforcing bot loop bug"
+        )
+
+    async def test_forward_review_body_forwards_real_human(
+        self, monkeypatch
+    ) -> None:
+        """Sanity: a real human review still flows through."""
+        monkeypatch.setattr(l3_main, "BOT_USERNAME", "xcagentrockwell")
+        monkeypatch.setattr(l3_main, "L1_INTERNAL_API_TOKEN", "tok")
+        forward_calls: list[dict] = []
+
+        async def _capture(payload: dict) -> bool:
+            forward_calls.append(payload)
+            return True
+
+        monkeypatch.setattr(l3_main, "_forward_human_issue", _capture)
+
+        payload = {
+            "repository": {"full_name": "acme/repo"},
+            "pull_request": {
+                "number": 42,
+                "head": {"sha": "abc123", "ref": "ai/SCRUM-16"},
+                "base": {"repo": {"full_name": "acme/repo"}},
+            },
+            "review": {
+                "id": 999,
+                "body": "Please rename Foo to Bar.",
+                "submitted_at": "2026-04-11T00:00:00Z",
+                "html_url": "https://github.com/acme/repo/pull/42",
+                "user": {"login": "alice", "type": "User"},
+            },
+        }
+        await l3_main._forward_review_body_human_issue(
+            "review_changes_requested", payload
+        )
+        assert len(forward_calls) == 1
+        assert forward_calls[0]["reviewer_login"] == "alice"

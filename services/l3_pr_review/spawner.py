@@ -125,6 +125,29 @@ class SessionSpawner:
         except (subprocess.TimeoutExpired, OSError) as exc:
             log.warning("branch_sync_failed", branch=branch, error=str(exc)[:200])
 
+    def _prepare_session(
+        self,
+        session_type: str,
+        *,
+        pr_number: int,
+        branch: str = "",
+        repo: str = "",
+    ) -> Any:
+        """Bind a logger and sync the worktree branch (if given).
+
+        Shared prelude for every ``spawn_*`` method. Previously the
+        three methods each open-coded ``logger.bind`` + conditional
+        ``_ensure_branch_current``, with subtle divergence in the
+        branch-guard condition (pr-review and comment-response used
+        ``if branch:``; ci-fix called unconditionally). Centralising
+        here keeps branch-safety policy in one place so future
+        session types can't re-introduce the drift.
+        """
+        log = logger.bind(pr_number=pr_number, session_type=session_type)
+        if branch:
+            self._ensure_branch_current(branch, log, expected_repo=repo)
+        return log
+
     def spawn_pr_review(
         self, pr_number: int, pr_diff: str, ticket_context: str,
         branch: str = "", repo: str = "",
@@ -134,9 +157,9 @@ class SessionSpawner:
         The session reads the diff, evaluates architecture and security,
         and posts a review directly to the GitHub PR via gh CLI.
         """
-        log = logger.bind(pr_number=pr_number, session_type="pr-review")
-        if branch:
-            self._ensure_branch_current(branch, log, expected_repo=repo)
+        self._prepare_session(
+            "pr-review", pr_number=pr_number, branch=branch, repo=repo,
+        )
         prompt = (
             f"You are an AI architecture reviewer for PR #{pr_number}.\n\n"
             f"1. Run: git diff main...HEAD\n"
@@ -175,8 +198,9 @@ class SessionSpawner:
         repo: str = "",
     ) -> bool:
         """Spawn a Sonnet session to fix CI failures."""
-        log = logger.bind(pr_number=pr_number, session_type="ci-fix")
-        self._ensure_branch_current(branch, log, expected_repo=repo)
+        self._prepare_session(
+            "ci-fix", pr_number=pr_number, branch=branch, repo=repo,
+        )
         prompt = (
             f"CI failed on PR #{pr_number}, branch {branch}.\n\n"
             f"1. Read the failure logs below\n"
@@ -194,31 +218,38 @@ class SessionSpawner:
         return self._spawn("ci-fix", prompt, model="sonnet", pr_number=pr_number)
 
     @staticmethod
-    def _sanitize_user_content(text: str) -> str:
-        """Escape XML-like closing tags to prevent prompt injection (case-insensitive)."""
-        import re
+    def _sanitize_tag(text: str, tag: str) -> str:
+        """Escape a specific closing XML-like tag to prevent prompt injection.
+
+        Case-insensitive. Used by the per-spawn wrappers below.
+        Previously ``_sanitize_user_content`` and ``_sanitize_ci_logs``
+        were copy-pasted with only the tag name differing — merging
+        them forces any future sanitizer to share the same regex
+        semantics (case-insensitive, full-tag-only match).
+        """
         return re.sub(
-            r"</user_provided_content>", "&lt;/user_provided_content&gt;",
-            text, flags=re.IGNORECASE,
+            rf"</{tag}>",
+            f"&lt;/{tag}&gt;",
+            text,
+            flags=re.IGNORECASE,
         )
 
-    @staticmethod
-    def _sanitize_ci_logs(text: str) -> str:
-        """Escape CI log closing tag to prevent prompt injection (case-insensitive)."""
-        import re
-        return re.sub(
-            r"</ci_failure_logs>", "&lt;/ci_failure_logs&gt;",
-            text, flags=re.IGNORECASE,
-        )
+    @classmethod
+    def _sanitize_user_content(cls, text: str) -> str:
+        return cls._sanitize_tag(text, "user_provided_content")
+
+    @classmethod
+    def _sanitize_ci_logs(cls, text: str) -> str:
+        return cls._sanitize_tag(text, "ci_failure_logs")
 
     def spawn_comment_response(
         self, pr_number: int, comment_body: str, comment_author: str,
         branch: str = "", repo: str = "",
     ) -> bool:
         """Spawn a session to respond to a human review comment."""
-        if branch:
-            log = logger.bind(pr_number=pr_number, session_type="comment-response")
-            self._ensure_branch_current(branch, log, expected_repo=repo)
+        self._prepare_session(
+            "comment-response", pr_number=pr_number, branch=branch, repo=repo,
+        )
         safe_body = self._sanitize_user_content(comment_body[:3000])
         prompt = (
             f"Human reviewer @{comment_author} commented on PR #{pr_number}:\n\n"

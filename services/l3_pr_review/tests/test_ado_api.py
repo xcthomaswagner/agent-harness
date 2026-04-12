@@ -152,3 +152,117 @@ async def test_ado_pr_state_handles_request_error() -> None:
         client=client,
     )
     assert state is None
+
+
+# --- human_approvals_count regression (default-OPEN bypass) ---
+#
+# Bug: iter 19 introduced human_approvals_count on the GitHub side
+# but ado_api never emitted it. The has_approval gate fell back to
+# approvals_count, so an ADO service-principal or build-identity
+# auto-reviewer casting vote=10 would satisfy the gate on its own
+# and default-OPEN auto-merge on AI-authored PRs. Iter 20 fix:
+# emit human_approvals_count from get_ado_pr_state using the
+# _is_ado_human_reviewer filter; the gate no longer falls back.
+
+
+def _base_pr(reviewers: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "createdBy": {"displayName": "xcagentrockwell"},
+        "status": "active",
+        "mergeStatus": "succeeded",
+        "lastMergeSourceCommit": {"commitId": "abc"},
+        "reviewers": reviewers,
+        "title": "T",
+        "labels": [],
+    }
+
+
+async def test_ado_human_approval_counted() -> None:
+    """A normal human reviewer with vote=10 counts as a human approval."""
+    client = _mk_client(_mk_response(200, _base_pr([
+        {
+            "vote": 10,
+            "displayName": "Alice",
+            "uniqueName": "alice@example.com",
+        },
+    ])))
+    state = await get_ado_pr_state(
+        "https://dev.azure.com/org", "proj", "repo", 1,
+        ado_pat="test-pat", client=client,
+    )
+    assert state is not None
+    assert state["approvals_count"] == 1
+    assert state["human_approvals_count"] == 1
+
+
+async def test_ado_service_principal_approval_not_counted() -> None:
+    """Regression: ADO service-principal reviewers (uniqueName starting
+    with svc.) must NOT count toward human_approvals_count — default-OPEN
+    on AI PRs otherwise."""
+    client = _mk_client(_mk_response(200, _base_pr([
+        {
+            "vote": 10,
+            "displayName": "Build Service",
+            "uniqueName": "svc.build.example.com",
+        },
+    ])))
+    state = await get_ado_pr_state(
+        "https://dev.azure.com/org", "proj", "repo", 1,
+        ado_pat="test-pat", client=client,
+    )
+    assert state is not None
+    assert state["approvals_count"] == 1
+    assert state["human_approvals_count"] == 0, (
+        "service-principal reviewer must not satisfy has_approval gate"
+    )
+
+
+async def test_ado_container_group_approval_not_counted() -> None:
+    """isContainer=True reviewers (AAD groups) don't count."""
+    client = _mk_client(_mk_response(200, _base_pr([
+        {
+            "vote": 10,
+            "displayName": "Engineering Team",
+            "uniqueName": "[Proj]\\Engineering",
+            "isContainer": True,
+        },
+    ])))
+    state = await get_ado_pr_state(
+        "https://dev.azure.com/org", "proj", "repo", 1,
+        ado_pat="test-pat", client=client,
+    )
+    assert state is not None
+    assert state["human_approvals_count"] == 0
+
+
+async def test_ado_build_identity_approval_not_counted() -> None:
+    """Build\\ and Project Collection Build reviewers don't count."""
+    client = _mk_client(_mk_response(200, _base_pr([
+        {
+            "vote": 10,
+            "displayName": "Project Collection Build Service (Org)",
+            "uniqueName": "Build\\abc-def",
+        },
+    ])))
+    state = await get_ado_pr_state(
+        "https://dev.azure.com/org", "proj", "repo", 1,
+        ado_pat="test-pat", client=client,
+    )
+    assert state is not None
+    assert state["human_approvals_count"] == 0
+
+
+async def test_ado_mixed_reviewers_counts_only_humans() -> None:
+    """Human + service principal + group: only the human counts."""
+    client = _mk_client(_mk_response(200, _base_pr([
+        {"vote": 10, "displayName": "Alice", "uniqueName": "alice@example.com"},
+        {"vote": 10, "displayName": "svc-build", "uniqueName": "svc.build"},
+        {"vote": 10, "displayName": "Team", "isContainer": True},
+    ])))
+    state = await get_ado_pr_state(
+        "https://dev.azure.com/org", "proj", "repo", 1,
+        ado_pat="test-pat", client=client,
+    )
+    assert state is not None
+    assert state["approvals_count"] == 3
+    assert state["human_approvals_count"] == 1

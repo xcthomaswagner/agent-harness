@@ -138,27 +138,64 @@ def _ticket_id_from_payload(payload: dict[str, Any]) -> str:
     return match.group(1) if match else ""
 
 
-def _is_bot_comment(payload: dict[str, Any], user_path: list[str]) -> bool:
-    """Check whether a comment was posted by the bot.
+def _is_bot_actor(
+    user: dict[str, Any] | None, body: str = ""
+) -> bool:
+    """Canonical bot-detection helper used by every webhook handler.
 
-    Two detection methods (either triggers skip):
-    1. Author's GitHub login matches BOT_USERNAME
-    2. Comment body contains the hidden BOT_COMMENT_MARKER
+    Returns True when ANY of the following signals are present:
+
+    1. ``user.type == "Bot"`` — GitHub App installations.
+    2. ``user.login`` ends in ``[bot]`` — GitHub convention for Apps.
+    3. ``user.login`` (case-insensitive) equals the harness's own
+       ``BOT_GITHUB_USERNAME`` env var — critical for catching
+       self-reviews posted by the harness under a normal-looking
+       user account (e.g. ``xcagentrockwell``), which has
+       ``type=User`` and no ``[bot]`` suffix.
+    4. The message ``body`` contains the hidden
+       ``BOT_COMMENT_MARKER`` — second-layer detection for cases
+       where the actor is spoofed or misconfigured.
+
+    Previously there were two separate helpers — ``_is_bot_user``
+    only covered signals (1) and (2), and ``_is_bot_comment`` added
+    (3) and (4). ``_forward_review_body_human_issue`` used the
+    weaker ``_is_bot_user``, which meant harness-posted review
+    bodies (posted under ``xcagentrockwell``) slipped past the
+    filter and were forwarded to L1 as if they were human
+    feedback, triggering a self-reinforcing bot loop where the
+    harness re-queued work based on its own critiques. Unifying
+    both helpers into one canonical path closes that gap and
+    makes it impossible to add a new handler that forgets a check.
     """
-    # Check author login
+    if not isinstance(user, dict):
+        user = {}
+    login = (user.get("login") or "").lower()
+    if user.get("type") == "Bot":
+        return True
+    if login.endswith("[bot]"):
+        return True
+    if login and BOT_USERNAME and login == BOT_USERNAME.lower():
+        return True
+    return bool(body and BOT_COMMENT_MARKER and BOT_COMMENT_MARKER in body)
+
+
+def _is_bot_comment(payload: dict[str, Any], user_path: list[str]) -> bool:
+    """Back-compat shim that walks ``user_path`` out of ``payload`` and
+    delegates to :func:`_is_bot_actor`.
+
+    Kept so existing call sites don't need to learn the new
+    signature in this commit. New code should call ``_is_bot_actor``
+    directly.
+    """
     obj: Any = payload
     for key in user_path:
         obj = obj.get(key, {})
-    login: str = obj.get("login", "") if isinstance(obj, dict) else ""
-    if login == BOT_USERNAME:
-        return True
-
-    # Check comment body for hidden marker
+    user = obj if isinstance(obj, dict) else {}
     body = (
         payload.get("review", {}).get("body", "")
         or payload.get("comment", {}).get("body", "")
     )
-    return BOT_COMMENT_MARKER in body
+    return _is_bot_actor(user, body)
 
 
 def _lookup_trace_id(ticket_id: str) -> str:
@@ -405,12 +442,18 @@ def _category_from_labels(labels: list[str]) -> str:
     return "escaped"
 
 
-def _is_bot_user(user: dict[str, Any]) -> bool:
-    """Return True if the GitHub user looks like a bot."""
-    if not isinstance(user, dict):
-        return False
-    login = (user.get("login") or "").lower()
-    return user.get("type") == "Bot" or login.endswith("[bot]")
+def _is_bot_user(user: dict[str, Any], body: str = "") -> bool:
+    """Back-compat shim delegating to :func:`_is_bot_actor`.
+
+    The old implementation checked only ``type=="Bot"`` and the
+    ``[bot]`` login suffix — it missed the harness's own
+    ``xcagentrockwell`` account (normal User type, no ``[bot]``
+    suffix), so review bodies the harness itself posted slipped
+    through every guard that called this helper. New callers should
+    pass ``body`` so the ``BOT_COMMENT_MARKER`` fallback can catch
+    spoofed cases.
+    """
+    return _is_bot_actor(user, body)
 
 
 def _truncate(value: str | None, limit: int = 2000) -> str | None:
@@ -500,13 +543,22 @@ def _build_autonomy_event(
 async def _forward_review_body_human_issue(
     event_type: str, payload: dict[str, Any]
 ) -> None:
-    """Forward the top-level review body as a human issue, if present and non-bot."""
+    """Forward the top-level review body as a human issue, if present and non-bot.
+
+    Passing ``body`` to :func:`_is_bot_user` is critical: the
+    harness posts reviews under a normal user account
+    (``xcagentrockwell``), so ``type`` is ``"User"`` and the
+    ``[bot]`` suffix check misses. The body-marker fallback
+    catches those self-reviews; without it, the harness's own
+    critiques were forwarded to L1 as human issues and triggered
+    a self-reinforcing bot loop.
+    """
     review = payload.get("review") or {}
     body = review.get("body") or ""
     if not body.strip():
         return
     user = review.get("user") or {}
-    if _is_bot_user(user):
+    if _is_bot_user(user, body):
         return
 
     ticket_id = _ticket_id_from_payload(payload)
@@ -856,12 +908,12 @@ async def _handle_review_comment_created(payload: dict[str, Any]) -> None:
     if not body.strip():
         return
     user = comment.get("user") or {}
-    if _is_bot_user(user):
+    # _is_bot_user now also checks BOT_USERNAME and the
+    # BOT_COMMENT_MARKER in body, so the explicit marker guard
+    # below is redundant — kept as-is to preserve the specific
+    # "ignoring_marker_*" log event during the transition.
+    if _is_bot_user(user, body):
         logger.debug("ignoring_bot_review_comment_created")
-        return
-    # Also honor the hidden marker guard used elsewhere
-    if BOT_COMMENT_MARKER and BOT_COMMENT_MARKER in body:
-        logger.debug("ignoring_marker_review_comment_created")
         return
 
     ticket_id = _ticket_id_from_payload(payload)

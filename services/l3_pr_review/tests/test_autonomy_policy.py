@@ -55,6 +55,7 @@ def _pr(**overrides: Any) -> dict[str, Any]:
         mergeable=True,
         mergeable_state="clean",
         approvals_count=1,
+        human_approvals_count=1,
         changes_requested_count=0,
         checks_passed=True,
         head_sha="abc123",
@@ -135,7 +136,9 @@ def test_already_merged_blocks() -> None:
 
 
 def test_no_approval_blocks() -> None:
-    ok, reason, _ = evaluate_policy_gates(_ctx(), _pr(approvals_count=0))
+    ok, reason, _ = evaluate_policy_gates(
+        _ctx(), _pr(approvals_count=0, human_approvals_count=0)
+    )
     assert ok is False
     assert reason == REASON_NO_APPROVAL
 
@@ -165,14 +168,23 @@ def test_human_approval_passes_even_with_bot_approval() -> None:
     assert reason == REASON_OK
 
 
-def test_ado_compat_fallback_uses_approvals_count() -> None:
-    """When human_approvals_count is missing (ADO path), fall back to
-    approvals_count so ADO PRs don't fail-CLOSED regress."""
+def test_missing_human_approvals_fails_closed() -> None:
+    """Regression: iter 19 had a fallback to approvals_count when
+    human_approvals_count was absent, which let ADO PRs (which
+    didn't yet emit the human field) bypass the bot-approval
+    defense — an ADO service-principal vote=10 became
+    approvals_count=1 and the gate passed. Iter 20 removes the
+    fallback: any pr_state missing human_approvals_count now fails
+    closed. Both github_api and ado_api now emit the field."""
     pr_state = _pr(approvals_count=1)
-    pr_state.pop("human_approvals_count", None)  # ensure not present
+    pr_state.pop("human_approvals_count", None)
     ok, reason, _ = evaluate_policy_gates(_ctx(), pr_state)
-    assert ok is True
-    assert reason == REASON_OK
+    assert ok is False
+    assert reason == REASON_NO_APPROVAL, (
+        "Missing human_approvals_count must fail-CLOSED — the "
+        "old fallback to approvals_count was a default-OPEN bypass "
+        "on ADO service-principal auto-approvals."
+    )
 
 
 def test_changes_requested_blocks() -> None:

@@ -255,21 +255,20 @@ _GATES: list[_Gate] = [
         REASON_ALREADY_MERGED,
         lambda ctx, pr: not bool(pr.get("merged")),
     ),
-    # Requires at least one HUMAN approval, not just any approval.
-    # ``human_approvals_count`` is computed in ``github_api.get_pr_state``
-    # by filtering out reviewers that look like GitHub Apps (``type``
-    # == "Bot", ``login`` ends with "[bot]", or matches the
-    # L3_APPROVAL_BOT_DENYLIST env var). Falls back to the legacy
-    # ``approvals_count`` only when the human-specific field is
-    # missing from the pr_state dict — keeps ADO callers (which don't
-    # yet distinguish bot reviewers) from fail-CLOSED regressing.
+    # Requires at least one HUMAN approval. ``human_approvals_count``
+    # is emitted by both github_api.get_pr_state (filtering
+    # type=Bot / [bot] logins / env denylist) and ado_api.get_ado_pr_state
+    # (filtering isContainer groups / service-principal markers /
+    # env denylist). Earlier iterations fell back to
+    # ``approvals_count`` when ``human_approvals_count`` was absent
+    # — that fallback WAS the default-OPEN bug that let ADO
+    # service-principal votes satisfy the gate on their own. The
+    # fallback is intentionally removed: any pr_state dict that
+    # doesn't carry ``human_approvals_count`` now fails closed.
     _Gate(
         "has_approval",
         REASON_NO_APPROVAL,
-        lambda ctx, pr: int(
-            pr.get("human_approvals_count", pr.get("approvals_count") or 0)
-            or 0
-        ) > 0,
+        lambda ctx, pr: int(pr.get("human_approvals_count") or 0) > 0,
     ),
     _Gate(
         "no_changes_requested",
