@@ -472,7 +472,9 @@ def compute_phase_durations(
     except TypeError:
         return []
 
-    durations: list[dict[str, Any]] = []
+    # Build per-event deltas first, then collapse same-phase entries
+    # so the duration bar shows one segment per logical phase.
+    raw: list[dict[str, Any]] = []
     for i in range(len(agent_entries) - 1):
         try:
             ts_start = datetime.fromisoformat(agent_entries[i].get("timestamp", ""))
@@ -480,13 +482,22 @@ def compute_phase_durations(
             delta = (ts_end - ts_start).total_seconds()
             if delta < 0:
                 continue
-            durations.append({
+            raw.append({
                 "phase": agent_entries[i].get("phase", ""),
                 "event": agent_entries[i].get("event", ""),
                 "duration_seconds": round(delta, 1),
             })
         except (ValueError, TypeError):
             continue
+
+    # Collapse consecutive entries with the same phase into one segment
+    durations: list[dict[str, Any]] = []
+    for entry in raw:
+        if durations and durations[-1]["phase"] == entry["phase"]:
+            durations[-1]["duration_seconds"] += entry["duration_seconds"]
+            durations[-1]["event"] = entry["event"]  # keep the later event name
+        else:
+            durations.append(dict(entry))
 
     return durations
 

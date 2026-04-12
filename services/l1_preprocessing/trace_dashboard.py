@@ -492,6 +492,8 @@ def _render_duration_bar(durations: list[dict[str, Any]]) -> str:
         return ""
     segs = ""
     for d in durations:
+        if d["duration_seconds"] <= 0:
+            continue  # skip zero-duration phases (e.g., pr_created logged same instant)
         pct = max(1, (d["duration_seconds"] / total_secs) * 100)
         color = _PHASE_COLORS.get(d["phase"], "#64748B")
         label = d["phase"].replace("_", " ")
