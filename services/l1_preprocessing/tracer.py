@@ -789,13 +789,41 @@ def build_span_tree(
     l1_nodes = [{"entry": e, "icon": _PHASE_ICON_TYPE.get(e.get("phase", ""), "event")}
                 for e in l1_entries]
 
-    # Build L2 nodes with artifact linking and duration
+    # Build L2 nodes with artifact linking and duration.
+    #
+    # compute_phase_durations returns deltas between consecutive agent
+    # events keyed by (phase, event). Match each L2 node to its duration
+    # entry so every row shows the time it took, not a raw timestamp.
+    # The last agent event has no "next" event — compute its duration as
+    # the delta from the previous event to it.
     durations = compute_phase_durations(entries)
-    duration_map = {d["phase"]: d["duration_seconds"] for d in durations}
+    # Compute per-event duration as "time from previous agent event to
+    # this one" — the natural "how long did this step take" measure.
+    # compute_phase_durations gives forward deltas (event N → N+1);
+    # we need backward deltas (event N-1 → N). Build from sorted agent
+    # timestamps directly.
+    agent_entries_sorted = sorted(
+        [e for e in run_entries if e.get("source") == "agent"],
+        key=lambda e: e.get("timestamp", ""),
+    )
+    # Map (phase, event) → backward delta in seconds
+    dur_lookup: dict[tuple[str, str], float] = {}
+    for i, ae in enumerate(agent_entries_sorted):
+        if i == 0:
+            dur_lookup[(ae.get("phase", ""), ae.get("event", ""))] = 0.0
+            continue
+        try:
+            ts_prev = datetime.fromisoformat(agent_entries_sorted[i - 1].get("timestamp", ""))
+            ts_curr = datetime.fromisoformat(ae.get("timestamp", ""))
+            delta = max(0, (ts_curr - ts_prev).total_seconds())
+        except (ValueError, TypeError):
+            delta = 0.0
+        dur_lookup[(ae.get("phase", ""), ae.get("event", ""))] = round(delta, 1)
 
     l2_nodes: list[dict[str, Any]] = []
     for e in l2_phase_events:
         phase = e.get("phase", "")
+        event = e.get("event", "")
 
         # Find matching artifacts
         artifacts = [
@@ -803,10 +831,13 @@ def build_span_tree(
             if _ARTIFACT_PHASE_MAP.get(a.get("event", "")) == phase
         ]
 
+        # Look up duration (backward delta: time from previous event to this one)
+        dur = dur_lookup.get((phase, event), 0.0)
+
         l2_nodes.append({
             "entry": e,
             "started_entry": l2_started_events.get(phase),
-            "duration_seconds": duration_map.get(phase),
+            "duration_seconds": dur,
             "artifacts": artifacts,
             "icon": _PHASE_ICON_TYPE.get(phase, "span"),
         })

@@ -357,9 +357,9 @@ def _render_span_row(
         cls = "badge-success" if overall == "PASS" else "badge-error"
         inline_badges += f' {_badge(f"{overall} {criteria}", cls)}'
 
-    # Duration
+    # Duration — always show relative duration when available, never raw timestamps
     dur_html = ""
-    if duration and duration > 0:
+    if duration is not None:
         dur_html = f'<div style="flex-shrink:0;text-align:right;font-size:11.2px;color:#64748B;margin-left:12px;white-space:nowrap">{_fmt_dur(duration)}</div>'
     elif ts:
         dur_html = f'<div style="flex-shrink:0;text-align:right;font-size:11.2px;color:#94A3B8;margin-left:12px">{ts[11:]}</div>'
