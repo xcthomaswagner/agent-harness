@@ -750,7 +750,6 @@ def render_session_panels(entries: list[dict]) -> str:
     # it's a single O(N) walk shared across every panel.
     artifacts = latest_artifacts(entries)
     parts = [
-        _render_tool_usage_panel(artifacts),
         _render_agent_instructions_panel(artifacts),
         _render_reasoning_narrative_panel(artifacts),
         _render_timeline_panel(artifacts),
@@ -758,3 +757,12 @@ def render_session_panels(entries: list[dict]) -> str:
         _render_raw_downloads_panel(entries, artifacts),
     ]
     return "".join(p for p in parts if p)
+
+
+def render_tool_usage_panel(entries: list[dict]) -> str:
+    """Render just the Tool Usage panel. Separated so the caller can
+    place it independently from the other session panels."""
+    if not entries:
+        return ""
+    artifacts = latest_artifacts(entries)
+    return _render_tool_usage_panel(artifacts)

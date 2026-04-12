@@ -63,17 +63,16 @@ class TestEmptyAndMissing:
                 }
             )
         ]
-        out = render_session_panels(entries)
+        # Tool Usage is now rendered via render_tool_usage_panel (separate)
+        from trace_dashboard_panels import render_tool_usage_panel
+        out = render_tool_usage_panel(entries)
         assert "Tool Usage" in out
         assert "5 tool calls across 3 assistant turns" in out
         assert "Read" in out
         assert "Bash" in out
-        # The other three panels should be absent
-        assert "Agent Instructions" not in out
-        assert "Reasoning Narrative" not in out
-        assert "Tool Calls Timeline" not in out
-        # Raw Downloads requires at least one of session_log / stream / claude_md
-        assert "Raw Downloads" not in out
+        # render_session_panels should NOT contain Tool Usage anymore
+        session_out = render_session_panels(entries)
+        assert "Tool Usage" not in session_out
 
 
 class TestAllFourArtifacts:
@@ -96,11 +95,16 @@ class TestAllFourArtifacts:
             _session_stream_entry(stream_file, line_count=1),
         ]
         out = render_session_panels(entries)
-        assert "Tool Usage" in out
+        # Tool Usage is rendered separately via render_tool_usage_panel
+        assert "Tool Usage" not in out
         assert "Agent Instructions" in out
         assert "Reasoning Narrative" in out
         assert "Tool Calls Timeline" in out
         assert "Raw Downloads" in out
+        # Verify tool usage renders via its own function
+        from trace_dashboard_panels import render_tool_usage_panel
+        tool_out = render_tool_usage_panel(entries)
+        assert "Tool Usage" in tool_out
 
     def test_character_count_in_header(self) -> None:
         entries = [_effective_claude_md_entry("x" * 1234)]
@@ -120,7 +124,8 @@ class TestToolIndexWarnings:
                 }
             )
         ]
-        out = render_session_panels(entries)
+        from trace_dashboard_panels import render_tool_usage_panel
+        out = render_tool_usage_panel(entries)
         assert "obsidian" in out
         assert "connected but never used" in out
 
@@ -139,11 +144,11 @@ class TestToolIndexWarnings:
                 }
             )
         ]
-        out = render_session_panels(entries)
+        from trace_dashboard_panels import render_tool_usage_panel
+        out = render_tool_usage_panel(entries)
         assert "First tool error" in out
         assert "Bash" in out
         assert "42" in out
-        # The error message is the most useful piece — verify it's surfaced.
         assert "command not found: foo" in out
 
     def test_tool_with_errors_annotation(self) -> None:
@@ -157,7 +162,8 @@ class TestToolIndexWarnings:
                 }
             )
         ]
-        out = render_session_panels(entries)
+        from trace_dashboard_panels import render_tool_usage_panel
+        out = render_tool_usage_panel(entries)
         assert "2 errors" in out
 
 
@@ -235,6 +241,7 @@ class TestTimelinePanel:
 
 class TestXssEscaping:
     def test_xss_in_tool_name_is_escaped(self) -> None:
+        from trace_dashboard_panels import render_tool_usage_panel
         entries = [
             _tool_index_entry(
                 {
@@ -244,7 +251,7 @@ class TestXssEscaping:
                 }
             )
         ]
-        out = render_session_panels(entries)
+        out = render_tool_usage_panel(entries)
         assert "<script>alert" not in out
         assert "&lt;script&gt;" in out
 
@@ -256,6 +263,7 @@ class TestXssEscaping:
         assert "&lt;img" in out
 
     def test_xss_in_unused_mcp_server_is_escaped(self) -> None:
+        from trace_dashboard_panels import render_tool_usage_panel
         entries = [
             _tool_index_entry(
                 {
@@ -266,7 +274,7 @@ class TestXssEscaping:
                 }
             )
         ]
-        out = render_session_panels(entries)
+        out = render_tool_usage_panel(entries)
         assert '<svg onload="x">' not in out
         assert "&lt;svg" in out
 
@@ -292,8 +300,9 @@ class TestRawDownloadsPanel:
 
 class TestToolIndexUnavailable:
     def test_renders_not_available_notice_without_crashing(self) -> None:
+        from trace_dashboard_panels import render_tool_usage_panel
         # Only a non-artifact entry; tool_index artifact absent
         entries = [{"phase": "webhook", "event": "received", "ticket_id": "N-1"}]
-        out = render_session_panels(entries)
+        out = render_tool_usage_panel(entries)
         assert "Tool Usage" in out
         assert "not available" in out

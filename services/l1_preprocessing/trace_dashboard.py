@@ -693,17 +693,22 @@ def _render_detail(ticket_id: str) -> str:
     # Session observability panels (commit 2 of post-mortem observability plan).
     # Isolated in trace_dashboard_panels.py to avoid merge conflicts with
     # commits 3 and 4 also modifying this file.
-    from trace_dashboard_panels import render_session_panels
+    from trace_dashboard_panels import render_session_panels, render_tool_usage_panel
     session_html = render_session_panels(entries)
+    tool_usage_html = render_tool_usage_panel(entries)
+    diag_html = _diag_checklist_html(entries)
 
     return f"""<!DOCTYPE html><html><head>
 {refresh_meta}
 <title>Trace &mdash; {_e(ticket_id)}</title>
 <style>{_LANGFUSE_STYLES}</style>
 </head><body><div class="page">
-{breadcrumb}{title}{_diag_checklist_html(entries)}{summary_bar}{investigate_box}{discuss_box}{dur_bar}{failure_box}
+{breadcrumb}{title}{summary_bar}{investigate_box}{discuss_box}{dur_bar}{failure_box}
+{l1_html}{l2_html}{l3_html}
 {session_html}
-{l1_html}{l2_html}{l3_html}{raw_html}
+{raw_html}
+{diag_html}
+{tool_usage_html}
 </div></body></html>"""
 
 
