@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import threading
 from unittest.mock import MagicMock, patch
 
 from spawner import SessionSpawner, _is_safe_branch
@@ -210,3 +212,105 @@ class TestBranchNameValidation:
         assert fetch_cmd[-1] == "ai/SCRUM-16"
         assert "--" in pull_cmd
         assert pull_cmd[-1] == "ai/SCRUM-16"
+
+
+# --- Watchdog zombie-reap regression ---
+#
+# Bug: _spawn's watchdog thread called proc.kill() on timeout but
+# never proc.wait()'d afterward, leaving the child in zombie state.
+# Over many timeouts the L3 process accumulates zombies and
+# eventually hits RLIMIT_NPROC, at which point every new spawn
+# fails silently. Fix: after proc.kill(), call proc.wait(timeout=5)
+# to reap. Log l3_session_unreapable if the 5s wait fails.
+
+
+class TestWatchdogZombieReap:
+    def _spawn_with_mock_proc(
+        self, proc_mock: MagicMock, tmp_path
+    ) -> threading.Thread | None:
+        """Spawn a session with a mocked Popen and capture the watchdog thread."""
+        spawner = SessionSpawner(repo_path=str(tmp_path))
+        captured: dict[str, threading.Thread] = {}
+        real_thread_start = threading.Thread.start
+
+        def _capture_start(self: threading.Thread) -> None:
+            captured["t"] = self
+            real_thread_start(self)
+
+        with (
+            patch("spawner.subprocess.Popen", return_value=proc_mock),
+            patch.object(threading.Thread, "start", _capture_start),
+        ):
+            spawner._spawn(
+                "pr-review",
+                "test prompt",
+                model="opus",
+                pr_number=1,
+            )
+        return captured.get("t")
+
+    def test_watchdog_reaps_after_kill(self, tmp_path) -> None:
+        """On timeout → kill, watchdog must call wait() again to reap."""
+        proc = MagicMock()
+        proc.pid = 99999
+        # First wait (with timeout=session_timeout) raises TimeoutExpired
+        # to trigger the kill path. Second wait (after kill) returns 0.
+        proc.wait = MagicMock(
+            side_effect=[
+                subprocess.TimeoutExpired(cmd="claude", timeout=1),
+                0,  # successful reap
+            ]
+        )
+        proc.kill = MagicMock()
+
+        # Shrink timeout so wait triggers immediately
+        with patch.dict("os.environ", {"L3_SESSION_TIMEOUT": "1"}):
+            watchdog = self._spawn_with_mock_proc(proc, tmp_path)
+        assert watchdog is not None
+        watchdog.join(timeout=5)
+        assert not watchdog.is_alive()
+
+        # First: waited for timeout and TimeoutExpired fired
+        # Kill was called
+        proc.kill.assert_called_once()
+        # Second wait with timeout=5 must have been called to reap the zombie
+        assert proc.wait.call_count == 2, (
+            "watchdog must call proc.wait() AFTER proc.kill() to reap zombie — "
+            "regression for RLIMIT_NPROC leak bug"
+        )
+        second_call_kwargs = proc.wait.call_args_list[1][1]
+        second_call_args = proc.wait.call_args_list[1][0]
+        # timeout=5 passed as kwarg or positional
+        assert (
+            second_call_kwargs.get("timeout") == 5
+            or (second_call_args and second_call_args[0] == 5)
+        )
+
+    def test_watchdog_logs_unreapable_on_secondary_timeout(
+        self, tmp_path
+    ) -> None:
+        """If the post-kill wait also times out, log l3_session_unreapable."""
+        proc = MagicMock()
+        proc.pid = 99999
+        proc.wait = MagicMock(
+            side_effect=[
+                subprocess.TimeoutExpired(cmd="claude", timeout=1),
+                subprocess.TimeoutExpired(cmd="claude", timeout=5),
+            ]
+        )
+        proc.kill = MagicMock()
+
+        with (
+            patch.dict("os.environ", {"L3_SESSION_TIMEOUT": "1"}),
+            patch("spawner.logger") as mock_logger,
+        ):
+            watchdog = self._spawn_with_mock_proc(proc, tmp_path)
+            assert watchdog is not None
+            watchdog.join(timeout=5)
+
+        # The unreapable log event must have fired
+        error_calls = [
+            c for c in mock_logger.error.call_args_list
+            if c.args and c.args[0] == "l3_session_unreapable"
+        ]
+        assert error_calls, "l3_session_unreapable must be logged when second wait times out"

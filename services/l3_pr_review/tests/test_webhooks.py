@@ -1311,10 +1311,19 @@ class TestGithubDefectHandler:
         body = "Regression from https://github.com/acme/widgets/pull/123 — see details."
         assert l3_main._extract_pr_ref(body, "acme/widgets") == ("acme/widgets", 123)
 
-    def test_extract_pr_ref_owner_repo_form(self) -> None:
-        body = "Broken by other-org/other-repo#55."
+    def test_extract_pr_ref_owner_repo_form_same_repo_matches(self) -> None:
+        body = "Broken by acme/widgets#55."
         assert l3_main._extract_pr_ref(body, "acme/widgets") == (
-            "other-org/other-repo", 55,
+            "acme/widgets", 55,
+        )
+
+    def test_extract_pr_ref_cross_repo_owner_repo_form_rejected(self) -> None:
+        """Regression: cross-repo owner/repo#N must NOT resolve — attacker
+        could otherwise inject a defect-link against a victim repo in
+        another org by creating a labelled issue."""
+        body = "Broken by other-org/other-repo#55."
+        assert l3_main._extract_pr_ref(body, "acme/widgets") is None, (
+            "cross-repo owner/repo#N reference must be rejected"
         )
 
     def test_extract_pr_ref_same_repo_hash(self) -> None:
@@ -1325,10 +1334,29 @@ class TestGithubDefectHandler:
         body = "Something is broken. No references here."
         assert l3_main._extract_pr_ref(body, "acme/widgets") is None
 
-    def test_extract_pr_ref_full_url_beats_bare(self) -> None:
-        # Full URL should win over a trailing bare #N
+    def test_extract_pr_ref_cross_repo_url_rejected(self) -> None:
+        """Regression: cross-repo github.com/<owner>/<repo>/pull/<n> URL
+        must be rejected. Previously the first match won regardless
+        of source repo, letting an attacker poison L1 defect-link
+        tracking for any victim repo."""
         body = "See https://github.com/foo/bar/pull/9 and also #1"
-        assert l3_main._extract_pr_ref(body, "acme/widgets") == ("foo/bar", 9)
+        assert l3_main._extract_pr_ref(body, "acme/widgets") is None, (
+            "cross-repo URL must be rejected — regression for "
+            "defect-link cross-repo injection bug"
+        )
+
+    def test_extract_pr_ref_same_repo_url_accepted(self) -> None:
+        """Sanity: same-repo URL still resolves."""
+        body = "See https://github.com/acme/widgets/pull/9 for context."
+        assert l3_main._extract_pr_ref(body, "acme/widgets") == (
+            "acme/widgets", 9,
+        )
+
+    def test_extract_pr_ref_empty_same_repo_rejects_everything(self) -> None:
+        """Defensive: when same_repo is empty, reject every URL/owner-repo
+        match so we never trust attacker-controlled repo names alone."""
+        body = "See https://github.com/acme/widgets/pull/9"
+        assert l3_main._extract_pr_ref(body, "") is None
 
     def test_category_from_labels_maps_correctly(self) -> None:
         assert l3_main._category_from_labels(["defect"]) == "escaped"

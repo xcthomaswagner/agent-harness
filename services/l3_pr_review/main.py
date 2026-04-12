@@ -138,6 +138,52 @@ def _ticket_id_from_payload(payload: dict[str, Any]) -> str:
     return match.group(1) if match else ""
 
 
+@dataclass(frozen=True)
+class _PRHandlerCtx:
+    """Fields every PR-scoped handler needs to do its work.
+
+    Collapses the 5-line block of ``pr.get(...)``/``_pr_head_branch``/
+    ``_ticket_id_from_payload``/``repo_full_name`` that each handler
+    used to open-code. Previously this block drifted between
+    handlers — ``_handle_review_approved`` read ``repo`` from
+    ``pr.base.repo.full_name`` while others used
+    ``payload.repository.full_name``. Centralising here collapses
+    the fallback chain into one place and makes any new handler
+    start from a typed object rather than six ``payload.get`` calls.
+    """
+    pr: dict[str, Any]
+    pr_number: int
+    branch: str
+    head_sha: str
+    repo: str
+    ticket_id: str
+    labels: list[str]
+
+
+def _pr_handler_ctx(payload: dict[str, Any]) -> _PRHandlerCtx:
+    """Build a ``_PRHandlerCtx`` from a GitHub PR webhook payload."""
+    pr = payload.get("pull_request", {}) or {}
+    # repo resolution: prefer top-level repository.full_name (always
+    # present on PR webhooks), fall back to pr.base.repo.full_name
+    # (used by review webhooks where the top-level repo may be
+    # missing or stale). This fallback chain was previously
+    # duplicated across handlers with subtle drift.
+    repo = (payload.get("repository") or {}).get("full_name", "") or (
+        ((pr.get("base") or {}).get("repo") or {}).get("full_name", "")
+    )
+    return _PRHandlerCtx(
+        pr=pr,
+        pr_number=int(pr.get("number") or 0),
+        branch=_pr_head_branch(pr),
+        head_sha=_pr_head_sha(pr),
+        repo=repo,
+        ticket_id=_ticket_id_from_payload(payload) or "",
+        labels=[
+            (label or {}).get("name", "") for label in (pr.get("labels") or [])
+        ],
+    )
+
+
 def _is_bot_actor(
     user: dict[str, Any] | None, body: str = ""
 ) -> bool:
@@ -414,16 +460,52 @@ _PR_REF_BARE_PATTERN = re.compile(r"(?<![A-Za-z0-9/#])#(\d+)(?![A-Za-z0-9/])")
 def _extract_pr_ref(body: str, same_repo: str) -> tuple[str, int] | None:
     """Return (repo_full_name, pr_number) from first PR reference in body, else None.
 
-    same_repo is used when the body contains a bare same-repo '#N' reference.
+    Cross-repo references are REJECTED: if the body points at an
+    ``owner/repo`` that doesn't equal ``same_repo``, this returns None.
+
+    The issue body that feeds this function is attacker-controllable
+    (anyone who can create a labelled issue — broad permission on
+    public repos, any contributor on private). Previously a PR URL
+    pointing at an unrelated victim repo in a different org would
+    be accepted verbatim, and ``_handle_issue_labeled`` would forward
+    a defect-link to L1 with ``pr_repo_full_name`` set to the victim's
+    repo — polluting L1's defect audit trail across orgs and
+    potentially starving autonomy on the victim repo if L1 gates
+    auto-merge on defect counts. Same-repo references via the bare
+    ``#N`` pattern are unchanged: they already required ``same_repo``
+    to resolve, so there's no attack surface there.
+
+    ``same_repo`` is the repository the webhook originated from —
+    the caller must pass it (and it should never be empty in
+    practice; if it is, we fall through and return None rather than
+    trusting the body alone).
     """
     if not body:
         return None
     m = _PR_REF_URL_PATTERN.search(body)
     if m:
-        return m.group(1), int(m.group(2))
+        ref_repo = m.group(1)
+        if not same_repo or ref_repo != same_repo:
+            logger.warning(
+                "pr_ref_cross_repo_rejected",
+                ref_repo=ref_repo,
+                source_repo=same_repo,
+                pattern="url",
+            )
+            return None
+        return ref_repo, int(m.group(2))
     m = _PR_REF_OWNER_REPO_PATTERN.search(body)
     if m:
-        return m.group(1), int(m.group(2))
+        ref_repo = m.group(1)
+        if not same_repo or ref_repo != same_repo:
+            logger.warning(
+                "pr_ref_cross_repo_rejected",
+                ref_repo=ref_repo,
+                source_repo=same_repo,
+                pattern="owner_repo",
+            )
+            return None
+        return ref_repo, int(m.group(2))
     m = _PR_REF_BARE_PATTERN.search(body)
     if m and same_repo:
         return same_repo, int(m.group(1))
@@ -793,102 +875,85 @@ async def _handle_review_changes_requested(payload: dict[str, Any]) -> None:
         logger.debug("ignoring_bot_changes_requested")
         return
     review = payload.get("review", {})
-    pr = payload.get("pull_request", {})
-    pr_number = pr.get("number", 0)
+    ctx = _pr_handler_ctx(payload)
     review_body = review.get("body", "")
     reviewer = review.get("user", {}).get("login", "unknown")
 
-    log = logger.bind(pr_number=pr_number, reviewer=reviewer)
+    log = logger.bind(pr_number=ctx.pr_number, reviewer=reviewer)
     log.info("handling_changes_requested")
 
     await _forward_review_events("review_changes_requested", payload)
 
-    ticket_id = _ticket_id_from_payload(payload)
-    if ticket_id:
-        append_trace(ticket_id, _lookup_trace_id(ticket_id), "l3_changes_requested",
-                     "changes_requested_spawned", pr_number=pr_number,
-                     reviewer=reviewer)
+    if ctx.ticket_id:
+        append_trace(
+            ctx.ticket_id, _lookup_trace_id(ctx.ticket_id),
+            "l3_changes_requested", "changes_requested_spawned",
+            pr_number=ctx.pr_number, reviewer=reviewer,
+        )
 
-    branch = _pr_head_branch(pr)
-    repo = payload.get("repository", {}).get("full_name", "")
     _get_spawner().spawn_comment_response(
-        pr_number=pr_number,
+        pr_number=ctx.pr_number,
         comment_body=f"Changes requested by @{reviewer}:\n\n{review_body}",
         comment_author=reviewer,
-        branch=branch,
-        repo=repo,
+        branch=ctx.branch,
+        repo=ctx.repo,
     )
 
 
 async def _handle_review_approved(payload: dict[str, Any]) -> None:
     """Handle PR approval — check if auto-merge is appropriate."""
-    pr = payload.get("pull_request", {})
-    pr_number = pr.get("number", 0)
-    branch = _pr_head_branch(pr)
+    ctx = _pr_handler_ctx(payload)
     reviewer = payload.get("review", {}).get("user", {}).get("login", "unknown")
-    repo = pr.get("base", {}).get("repo", {}).get("full_name", "")
 
-    log = logger.bind(pr_number=pr_number, reviewer=reviewer)
+    log = logger.bind(pr_number=ctx.pr_number, reviewer=reviewer)
     log.info("handling_review_approved")
 
     await _forward_review_events("review_approved", payload)
 
-    # Extract the AI ticket id from the branch. Approvals on non-AI
-    # branches (main, develop, a human PR that happens to be on this
-    # repo) must not trigger L1's /api/agent-complete — silently
-    # marking an unrelated branch as a "completed ticket". The
-    # previous ``branch.replace("ai/", "")`` replaced every
-    # occurrence of the substring anywhere in the branch name AND
-    # passed non-AI branches through unchanged, both of which
-    # produced wrong ticket ids.
-    ticket_id = _ticket_id_from_payload(payload)
-    if not ticket_id:
+    # Approvals on non-AI branches (main, develop, a human PR that
+    # happens to be on this repo) must not trigger L1's
+    # /api/agent-complete — silently marking an unrelated branch as
+    # a "completed ticket".
+    if not ctx.ticket_id:
         log.info(
             "pr_approved_skipped_non_ai_branch",
-            branch=branch,
+            branch=ctx.branch,
             reason="branch does not match ai/<TICKET>-<N> pattern",
         )
         return
 
-    # Extract ticket type from PR labels
-    labels = [label.get("name", "") for label in pr.get("labels", [])]
-    ticket_type = _ticket_type_from_labels(labels)
+    ticket_type = _ticket_type_from_labels(ctx.labels)
 
-    # Notify L1 of the approval for autonomy tracking. Routes through
-    # the shared retry helper — previously this was the only L1 caller
-    # with a bespoke inline 2-attempt retry loop. ``headers={}`` keeps
-    # the current no-auth-header behavior (L1 runs with API_KEY unset
-    # in dev); swap to ``{"X-API-Key": ...}`` once the production
-    # deployment enforces it.
+    # Notify L1 of the approval for autonomy tracking via the shared
+    # retry helper. ``headers={}`` preserves the current no-auth
+    # header behavior (L1 runs with API_KEY unset in dev); swap to
+    # ``{"X-API-Key": ...}`` once production enforces it.
     await _post_to_l1_with_retry(
         "/api/agent-complete",
         {
-            "ticket_id": ticket_id,
+            "ticket_id": ctx.ticket_id,
             "status": "complete",
-            "pr_url": pr.get("html_url", ""),
-            "branch": branch,
+            "pr_url": ctx.pr.get("html_url", ""),
+            "branch": ctx.branch,
         },
         log_event="l1_agent_complete_failed",
-        log_context={"ticket_id": ticket_id, "branch": branch},
+        log_context={"ticket_id": ctx.ticket_id, "branch": ctx.branch},
         headers={},
     )
 
     log.info(
         "pr_approved",
         ticket_type=ticket_type,
-        branch=branch,
-        repo=repo,
+        branch=ctx.branch,
+        repo=ctx.repo,
     )
 
-    # Phase 4: evaluate auto-merge policy. Reuses ``ticket_id``
-    # extracted at the top of the function via the canonical regex —
-    # we would have already returned if it were empty.
     try:
         await evaluate_and_maybe_merge(
-            repo_full_name=repo,
-            pr_number=pr_number,
-            head_sha=_pr_head_sha(pr),
-            ticket_id=ticket_id,
+            repo_full_name=ctx.repo,
+            pr_number=ctx.pr_number,
+            head_sha=ctx.head_sha,
+            ticket_id=ctx.ticket_id,
             ticket_type=ticket_type,
             trigger_event="review_approved",
         )
