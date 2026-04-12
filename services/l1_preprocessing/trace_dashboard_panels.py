@@ -105,13 +105,19 @@ def _panel_wrapper(header_html: str, body_html: str, open_by_default: bool) -> s
     return (
         f'<div style="border:{_PANEL_BORDER};border-radius:8px;'
         f'margin-bottom:16px;overflow:hidden">'
-        f'<div style="display:flex;align-items:center;gap:8px;padding:10px 16px;'
-        f'background:{_PANEL_HEADER_BG};border-bottom:{_PANEL_BORDER};'
+        f'<div style="display:flex;align-items:center;gap:8px;'
+        f'padding:10px 16px;background:{_PANEL_HEADER_BG};'
+        f'border-bottom:{_PANEL_BORDER};'
         f'font-weight:600;font-size:13.2px;cursor:pointer" '
-        f'onclick="var b=this.nextElementSibling;b.style.display=b.style.display===\'none\'?\'\':\' none\';'
-        f'this.querySelector(\'svg\').style.transform=b.style.display===\'none\'?\'\':\' rotate(90deg)\'">'
-        f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#64748B" stroke-width="2" '
-        f'style="transition:transform 0.2s;transform:{chevron_rot}"><path d="M9 18l6-6-6-6"/></svg>'
+        f"onclick=\"var b=this.nextElementSibling;"
+        f"b.style.display=b.style.display==='none'?'':'none';"
+        f"this.querySelector('svg').style.transform="
+        f"b.style.display==='none'?'':'rotate(90deg)'\">"
+        f'<svg width="16" height="16" viewBox="0 0 24 24" '
+        f'fill="none" stroke="#64748B" stroke-width="2" '
+        f'style="transition:transform 0.2s;'
+        f'transform:{chevron_rot}">'
+        f'<path d="M9 18l6-6-6-6"/></svg>'
         f'{header_html}</div>'
         f'<div style="padding:12px 16px;{display}">{body_html}</div>'
         f'</div>'
@@ -588,20 +594,34 @@ def _render_conversation_panel(artifacts: dict[str, dict[str, Any]]) -> str:
                             if len(inp_str) > _TOOL_INPUT_PREVIEW:
                                 inp_preview = _e(inp_str[:_TOOL_INPUT_PREVIEW])
                                 inp_rest = _e(inp_str[_TOOL_INPUT_PREVIEW:])
+                                _pre = (
+                                    'white-space:pre-wrap;'
+                                    'word-wrap:break-word;'
+                                    'font-size:11px;margin:4px 0 0 0;'
+                                    'padding:6px;background:#FFFFFF;'
+                                    'border-radius:3px;'
+                                    'border:1px solid #E2E8F0'
+                                )
                                 inp_html = (
-                                    f'<pre style="white-space:pre-wrap;word-wrap:break-word;'
-                                    f'font-size:11px;margin:4px 0 0 0;padding:6px;'
-                                    f'background:#FFFFFF;border-radius:3px;border:1px solid #E2E8F0">'
-                                    f'{inp_preview}<details style="display:inline">'
-                                    f'<summary style="cursor:pointer;color:#4D45E5;'
-                                    f'font-size:10px">show full input</summary>'
+                                    f'<pre style="{_pre}">'
+                                    f'{inp_preview}'
+                                    f'<details style="display:inline">'
+                                    f'<summary style="cursor:pointer;'
+                                    f'color:#4D45E5;font-size:10px">'
+                                    f'show full input</summary>'
                                     f'{inp_rest}</details></pre>'
                                 )
                             else:
+                                _pre = (
+                                    'white-space:pre-wrap;'
+                                    'word-wrap:break-word;'
+                                    'font-size:11px;margin:4px 0 0 0;'
+                                    'padding:6px;background:#FFFFFF;'
+                                    'border-radius:3px;'
+                                    'border:1px solid #E2E8F0'
+                                )
                                 inp_html = (
-                                    f'<pre style="white-space:pre-wrap;word-wrap:break-word;'
-                                    f'font-size:11px;margin:4px 0 0 0;padding:6px;'
-                                    f'background:#FFFFFF;border-radius:3px;border:1px solid #E2E8F0">'
+                                    f'<pre style="{_pre}">'
                                     f'{_e(inp_str)}</pre>'
                                 ) if inp_str.strip() else ""
                             label_html = (
@@ -648,8 +668,10 @@ def _render_conversation_panel(artifacts: dict[str, dict[str, Any]]) -> str:
                                 f'border-radius:3px;border:1px solid #E2E8F0;'
                                 f'max-height:200px;overflow-y:auto">'
                                 f'{res_preview}<details style="display:inline">'
-                                f'<summary style="cursor:pointer;color:#4D45E5;'
-                                f'font-size:10px">show full result ({len(res_str):,} chars)</summary>'
+                                f'<summary style="cursor:pointer;'
+                                f'color:#4D45E5;font-size:10px">'
+                                f'show full result '
+                                f'({len(res_str):,} chars)</summary>'
                                 f'{res_rest}</details></pre>'
                             )
                         else:

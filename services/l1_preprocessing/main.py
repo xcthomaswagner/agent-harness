@@ -489,7 +489,8 @@ def _extract_ticket_payload(
             branch = b
             break
 
-    if branch and settings.default_client_repo and re.fullmatch(r"[A-Za-z0-9_./][A-Za-z0-9_./ +-]*", branch):
+    branch_ok = re.fullmatch(r"[A-Za-z0-9_./][A-Za-z0-9_./ +-]*", branch)
+    if branch and settings.default_client_repo and branch_ok:
         candidate = (
             Path(settings.default_client_repo).parent
             / "worktrees" / branch / ".harness" / "ticket.json"

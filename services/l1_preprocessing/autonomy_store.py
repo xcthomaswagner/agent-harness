@@ -993,10 +993,10 @@ def list_confirmed_escaped_defects(
     if not pr_run_ids:
         return []
     # Chunk to stay under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
-    _CHUNK = 900
+    chunk_size = 900
     rows: list[sqlite3.Row] = []
-    for i in range(0, len(pr_run_ids), _CHUNK):
-        chunk = pr_run_ids[i : i + _CHUNK]
+    for i in range(0, len(pr_run_ids), chunk_size):
+        chunk = pr_run_ids[i : i + chunk_size]
         placeholders = ",".join("?" for _ in chunk)
         sql = (
             "SELECT dl.*, pr.pr_number, pr.pr_url, pr.client_profile, "

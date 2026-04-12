@@ -418,7 +418,9 @@ class TicketAnalyst:
                 SizeClassification.SMALL,
             ),
             estimated_units=max(1, _safe_int(size_data.get("estimated_units"), 1)),
-            recommended_dev_count=max(1, min(10, _safe_int(size_data.get("recommended_dev_count"), 1))),
+            recommended_dev_count=max(
+                1, min(10, _safe_int(size_data.get("recommended_dev_count"), 1))
+            ),
             decomposition_needed=size_data.get("decomposition_needed", False),
             rationale=size_data.get("rationale", ""),
         )

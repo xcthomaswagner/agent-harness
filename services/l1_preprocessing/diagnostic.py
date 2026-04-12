@@ -476,13 +476,18 @@ def render_diagnostic_checklist(checks: list[dict[str, Any]]) -> str:
     return (
         '<div style="border:1px solid #E2E8F0;'
         'border-radius:8px;margin-bottom:20px;background:#FFFFFF;overflow:hidden">'
-        '<div style="display:flex;align-items:center;gap:8px;padding:10px 16px;'
-        'background:#F7F9FB;border-bottom:1px solid #E2E8F0;'
+        '<div style="display:flex;align-items:center;gap:8px;'
+        'padding:10px 16px;background:#F7F9FB;'
+        'border-bottom:1px solid #E2E8F0;'
         'font-weight:600;font-size:13.2px;cursor:pointer" '
-        'onclick="var b=this.nextElementSibling;b.style.display=b.style.display===\'none\'?\'\':\'none\';'
-        'this.querySelector(\'svg\').style.transform=b.style.display===\'none\'?\'\':\'rotate(90deg)\'">'
-        '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#64748B" stroke-width="2" '
-        'style="transition:transform 0.2s"><path d="M9 18l6-6-6-6"/></svg>'
+        "onclick=\"var b=this.nextElementSibling;"
+        "b.style.display=b.style.display==='none'?'':'none';"
+        "this.querySelector('svg').style.transform="
+        "b.style.display==='none'?'':'rotate(90deg)'\">"
+        '<svg width="16" height="16" viewBox="0 0 24 24" '
+        'fill="none" stroke="#64748B" stroke-width="2" '
+        'style="transition:transform 0.2s">'
+        '<path d="M9 18l6-6-6-6"/></svg>'
         'Diagnostic Checklist</div>'
         '<div style="display:none">'
         + "".join(rows)
