@@ -754,15 +754,21 @@ def build_span_tree(
     l3_entries: list[dict[str, Any]] = []
     error_entries: list[dict[str, Any]] = []
 
-    # L1 entries: non-agent, non-artifact entries from the full trace
+    # L1 entries: ticket intake only (webhook received, processing, analyst,
+    # dispatch). Exclude skipped/duplicate webhooks, completion callbacks,
+    # and artifact consolidation — those are infrastructure noise, not intake.
+    _L1_SKIP_EVENTS = {"ado_webhook_skipped_not_edge", "agent_finished"}
+    _L1_SKIP_PHASES = {"artifact", "completion"}
     for e in entries:
         source = e.get("source", "")
         phase = e.get("phase", "")
+        event = e.get("event", "")
         is_l1 = (
             source != "agent"
-            and phase != "artifact"
+            and phase not in _L1_SKIP_PHASES
             and not phase.startswith("l3_")
-            and e.get("event") != "error"
+            and event != "error"
+            and event not in _L1_SKIP_EVENTS
         )
         if is_l1:
             l1_entries.append(e)
