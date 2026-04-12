@@ -10,6 +10,48 @@ import structlog
 logger = structlog.get_logger()
 
 
+async def _paginate(
+    c: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    *,
+    envelope_key: str | None = None,
+    max_pages: int = 20,
+) -> list[Any] | None:
+    """GET a paginated GitHub endpoint, following Link rel=next.
+
+    Returns the concatenated items on success, or None if any page fails
+    with a non-200. ``envelope_key`` selects the list from a wrapper
+    object (e.g. ``check_suites`` in ``/check-suites`` responses); when
+    None the page body itself must be a list.
+
+    ``max_pages`` caps runaway follows in the unlikely event of a
+    server loop (GitHub's own cap is ~10 for most endpoints at
+    per_page=100).
+
+    GitHub defaults to 30 items per page; without explicit pagination
+    a human's CHANGES_REQUESTED review can silently drop off page 1 on
+    PRs with many bot reviewers, making the auto-merge gate fail-open.
+    """
+    items: list[Any] = []
+    next_url: str | None = url
+    params: dict[str, str] | None = {"per_page": "100"}
+    for _ in range(max_pages):
+        if next_url is None:
+            break
+        resp = await c.get(next_url, headers=headers, params=params)
+        if resp.status_code != 200:
+            return None
+        body = resp.json()
+        page = body.get(envelope_key, []) if envelope_key else body
+        if isinstance(page, list):
+            items.extend(page)
+        next_link = resp.links.get("next") if hasattr(resp, "links") else None
+        next_url = next_link.get("url") if next_link else None
+        params = None  # per_page already encoded in next_url
+    return items
+
+
 async def get_pr_state(
     repo_full_name: str,
     pr_number: int,
@@ -44,11 +86,12 @@ async def get_pr_state(
         pr = pr_resp.json()
         head_sha = (pr.get("head") or {}).get("sha", "")
 
-        # Reviews — need approvals + changes_requested counts (latest per user)
-        reviews_resp = await c.get(
-            f"{base}/pulls/{pr_number}/reviews", headers=headers
-        )
-        reviews = reviews_resp.json() if reviews_resp.status_code == 200 else []
+        # Reviews — need approvals + changes_requested counts (latest per user).
+        # Must paginate: on PRs with many bot reviewers a human's
+        # CHANGES_REQUESTED can otherwise fall off page 1 silently.
+        reviews = await _paginate(
+            c, f"{base}/pulls/{pr_number}/reviews", headers
+        ) or []
         # Collapse to latest review per user (reviews come in chronological order)
         latest_by_user: dict[str, str] = {}
         for r in reviews:
@@ -63,27 +106,30 @@ async def get_pr_state(
             1 for s in latest_by_user.values() if s == "CHANGES_REQUESTED"
         )
 
-        # Check suites for head_sha
+        # Check suites for head_sha — paginated for the same reason as
+        # reviews: a large repo can ship many CI suites per commit and
+        # we must see every one before trusting ``checks_passed``.
         checks_passed = False
         if head_sha:
-            cs_resp = await c.get(
-                f"{base}/commits/{head_sha}/check-suites", headers=headers
+            suites = await _paginate(
+                c,
+                f"{base}/commits/{head_sha}/check-suites",
+                headers,
+                envelope_key="check_suites",
             )
-            if cs_resp.status_code == 200:
-                suites = cs_resp.json().get("check_suites", [])
-                if suites:
-                    # ALL suites must be completed — if any are still
-                    # queued or in_progress, checks_passed stays False
-                    # to prevent premature merge decisions.
-                    all_done = all(
-                        s.get("status") == "completed" for s in suites
+            if suites:
+                # ALL suites must be completed — if any are still
+                # queued or in_progress, checks_passed stays False
+                # to prevent premature merge decisions.
+                all_done = all(
+                    s.get("status") == "completed" for s in suites
+                )
+                if all_done:
+                    checks_passed = all(
+                        s.get("conclusion")
+                        in ("success", "skipped", "neutral")
+                        for s in suites
                     )
-                    if all_done:
-                        checks_passed = all(
-                            s.get("conclusion")
-                            in ("success", "skipped", "neutral")
-                            for s in suites
-                        )
 
         return {
             "author": (pr.get("user") or {}).get("login", ""),

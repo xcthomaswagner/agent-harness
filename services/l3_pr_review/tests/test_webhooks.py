@@ -1485,3 +1485,65 @@ async def test_github_defect_forward_skip_when_no_token(tmp_path) -> None:
     ):
         await l3_main._forward_github_defect(payload)
     assert not backlog_path.exists()
+
+
+# --- Admin backlog endpoints: constant-time token auth ---
+#
+# Bug: the /admin/backlog/drain and /admin/backlog/status endpoints
+# used plain ``!=`` to compare the X-Internal-Api-Token header against
+# the configured secret. ``!=`` short-circuits on the first differing
+# byte, leaking timing that lets an attacker recover the secret byte
+# by byte. Fix: ``hmac.compare_digest`` via ``_require_internal_api_token``.
+
+
+async def test_admin_drain_rejects_missing_token(monkeypatch) -> None:
+    monkeypatch.setenv("L1_INTERNAL_API_TOKEN", "s3cr3t")
+    async with await _make_client() as client:
+        resp = await client.post("/admin/backlog/drain")
+    assert resp.status_code == 401
+
+
+async def test_admin_drain_rejects_wrong_token(monkeypatch) -> None:
+    monkeypatch.setenv("L1_INTERNAL_API_TOKEN", "s3cr3t")
+    async with await _make_client() as client:
+        resp = await client.post(
+            "/admin/backlog/drain",
+            headers={"X-Internal-Api-Token": "wrong"},
+        )
+    assert resp.status_code == 401
+
+
+async def test_admin_drain_503_when_not_configured(monkeypatch) -> None:
+    """Empty env var must NOT accept an empty-string token."""
+    monkeypatch.setenv("L1_INTERNAL_API_TOKEN", "")
+    async with await _make_client() as client:
+        resp = await client.post(
+            "/admin/backlog/drain",
+            headers={"X-Internal-Api-Token": ""},
+        )
+    assert resp.status_code == 503
+
+
+async def test_admin_status_rejects_wrong_token(monkeypatch) -> None:
+    monkeypatch.setenv("L1_INTERNAL_API_TOKEN", "s3cr3t")
+    async with await _make_client() as client:
+        resp = await client.get(
+            "/admin/backlog/status",
+            headers={"X-Internal-Api-Token": "wrong"},
+        )
+    assert resp.status_code == 401
+
+
+async def test_admin_status_accepts_correct_token(
+    monkeypatch, tmp_path
+) -> None:
+    import backlog as backlog_mod
+
+    monkeypatch.setenv("L1_INTERNAL_API_TOKEN", "s3cr3t")
+    monkeypatch.setattr(backlog_mod, "BACKLOG_PATH", tmp_path / "backlog.jsonl")
+    async with await _make_client() as client:
+        resp = await client.get(
+            "/admin/backlog/status",
+            headers={"X-Internal-Api-Token": "s3cr3t"},
+        )
+    assert resp.status_code == 200

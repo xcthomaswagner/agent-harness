@@ -10,10 +10,17 @@ import pytest
 from github_api import get_pr_state, merge_pr
 
 
-def _mk_response(status: int, json_body: Any) -> MagicMock:
+def _mk_response(
+    status: int,
+    json_body: Any,
+    *,
+    next_url: str | None = None,
+) -> MagicMock:
     resp = MagicMock()
     resp.status_code = status
     resp.json = MagicMock(return_value=json_body)
+    # httpx.Response.links is a dict[str, dict[str, str]] keyed by rel.
+    resp.links = {"next": {"url": next_url}} if next_url else {}
     return resp
 
 
@@ -229,6 +236,94 @@ async def test_get_pr_state_checks_passed_false_if_suite_queued() -> None:
     )
     assert state is not None
     assert state["checks_passed"] is False
+
+
+# --- get_pr_state pagination regression ---
+#
+# Bug: get_pr_state used to fetch /reviews and /check-suites without
+# pagination. GitHub defaults to 30 items per page, so on PRs with many
+# bot reviewers a human's CHANGES_REQUESTED could silently drop off
+# page 1 → auto-merge gate fail-open. Fix: follow Link rel=next with
+# per_page=100.
+
+
+async def test_get_pr_state_paginates_reviews_across_pages() -> None:
+    """Human CHANGES_REQUESTED on page 2 must be counted."""
+    pr_json = {
+        "user": {"login": "bot"},
+        "merged": False,
+        "mergeable": True,
+        "mergeable_state": "clean",
+        "head": {"sha": "abc"},
+        "labels": [],
+    }
+    # Page 1: 2 bot approvals. Page 2: 1 human CHANGES_REQUESTED.
+    reviews_page1 = [
+        {"user": {"login": "bot1"}, "state": "APPROVED"},
+        {"user": {"login": "bot2"}, "state": "APPROVED"},
+    ]
+    reviews_page2 = [
+        {"user": {"login": "human"}, "state": "CHANGES_REQUESTED"},
+    ]
+    suites_json = {
+        "check_suites": [{"status": "completed", "conclusion": "success"}]
+    }
+    client = _mk_client(
+        [
+            _mk_response(200, pr_json),
+            _mk_response(
+                200, reviews_page1, next_url="https://api.github.com/reviews?page=2"
+            ),
+            _mk_response(200, reviews_page2),
+            _mk_response(200, suites_json),
+        ]
+    )
+    state = await get_pr_state(
+        "acme/repo", 1, github_token="tok", client=client
+    )
+    assert state is not None
+    assert state["approvals_count"] == 2
+    assert state["changes_requested_count"] == 1, (
+        "human review on page 2 must be included — regression for "
+        "bug where missing pagination let auto-merge gate fail-open"
+    )
+
+
+async def test_get_pr_state_paginates_check_suites_across_pages() -> None:
+    """A failing suite on page 2 must block checks_passed."""
+    pr_json = {
+        "user": {"login": "bot"},
+        "merged": False,
+        "mergeable": True,
+        "mergeable_state": "clean",
+        "head": {"sha": "abc"},
+        "labels": [],
+    }
+    suites_page1 = {
+        "check_suites": [{"status": "completed", "conclusion": "success"}]
+    }
+    suites_page2 = {
+        "check_suites": [{"status": "completed", "conclusion": "failure"}]
+    }
+    client = _mk_client(
+        [
+            _mk_response(200, pr_json),
+            _mk_response(200, []),
+            _mk_response(
+                200,
+                suites_page1,
+                next_url="https://api.github.com/check-suites?page=2",
+            ),
+            _mk_response(200, suites_page2),
+        ]
+    )
+    state = await get_pr_state(
+        "acme/repo", 1, github_token="tok", client=client
+    )
+    assert state is not None
+    assert state["checks_passed"] is False, (
+        "failing suite on page 2 must block checks_passed"
+    )
 
 
 # --- merge_pr ---

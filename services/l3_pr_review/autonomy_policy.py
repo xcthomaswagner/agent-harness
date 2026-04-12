@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -65,6 +66,64 @@ def _cache_clear() -> None:
     _cache.clear()
 
 
+async def _cached_l1_get(
+    cache_key: str,
+    url: str,
+    *,
+    fail_closed: Any,
+    parse: Callable[[dict[str, Any]], Any],
+    params: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    log_event: str | None = None,
+    log_context: dict[str, Any] | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> Any:
+    """Shared GET-with-cache for the three ``fetch_*`` helpers.
+
+    Each caller used to duplicate ~25 lines of cache check → owns_client
+    httpx dance → non-200 fail-closed → JSON parse → RequestError /
+    ValueError fail-closed → aclose. Centralising it here makes the
+    fail-closed default explicit and harder to accidentally forget
+    when new L1 endpoints are added (the default-open hazard that bit
+    us in ado_api.py).
+
+    ``parse`` maps the JSON body to the cached value. ``fail_closed``
+    is returned (and NOT cached) on any failure. ``log_event`` / ``log_context``
+    are logged as warnings on failure so callers don't each duplicate
+    a structured log line.
+    """
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    owns_client = client is None
+    c = client or httpx.AsyncClient(timeout=5.0)
+    try:
+        resp = await c.get(url, params=params, headers=headers)
+        if resp.status_code != 200:
+            if log_event:
+                logger.warning(
+                    log_event, status=resp.status_code, **(log_context or {})
+                )
+            return fail_closed
+        value = parse(resp.json())
+        _cache_set(cache_key, value)
+        return value
+    except (httpx.RequestError, ValueError):
+        if log_event:
+            logger.warning(log_event, **(log_context or {}))
+        return fail_closed
+    finally:
+        if owns_client:
+            await c.aclose()
+
+
+def _parse_recommended_mode(data: dict[str, Any]) -> tuple[str, str]:
+    mode = str(data.get("recommended_mode") or "conservative")
+    dq = str((data.get("data_quality") or {}).get("status") or "unknown")
+    return (mode, dq)
+
+
 async def fetch_recommended_mode(
     client_profile: str,
     *,
@@ -75,30 +134,16 @@ async def fetch_recommended_mode(
 
     Fail-closed to ('conservative', 'unknown') on error.
     """
-    key = f"mode:{client_profile}"
-    cached = _cache_get(key)
-    if cached is not None:
-        return cached  # type: ignore[no-any-return]
-    url = f"{l1_url.rstrip('/')}/api/autonomy"
-    owns_client = client is None
-    c = client or httpx.AsyncClient(timeout=5.0)
-    try:
-        resp = await c.get(url, params={"client_profile": client_profile})
-        if resp.status_code != 200:
-            logger.warning("l1_autonomy_fetch_non_200", status=resp.status_code)
-            return ("conservative", "unknown")
-        data = resp.json()
-        mode = str(data.get("recommended_mode") or "conservative")
-        dq = str((data.get("data_quality") or {}).get("status") or "unknown")
-        result = (mode, dq)
-        _cache_set(key, result)
-        return result
-    except (httpx.RequestError, ValueError):
-        logger.warning("l1_autonomy_fetch_failed", client_profile=client_profile)
-        return ("conservative", "unknown")
-    finally:
-        if owns_client:
-            await c.aclose()
+    return await _cached_l1_get(
+        f"mode:{client_profile}",
+        f"{l1_url.rstrip('/')}/api/autonomy",
+        fail_closed=("conservative", "unknown"),
+        parse=_parse_recommended_mode,
+        params={"client_profile": client_profile},
+        log_event="l1_autonomy_fetch_failed",
+        log_context={"client_profile": client_profile},
+        client=client,
+    )
 
 
 async def fetch_auto_merge_enabled(
@@ -108,25 +153,21 @@ async def fetch_auto_merge_enabled(
     client: httpx.AsyncClient | None = None,
 ) -> bool:
     """GET /api/autonomy/auto-merge-toggle?client_profile=. Fail-closed to False."""
-    key = f"toggle:{client_profile}"
-    cached = _cache_get(key)
-    if cached is not None:
-        return bool(cached)
-    url = f"{l1_url.rstrip('/')}/api/autonomy/auto-merge-toggle"
-    owns_client = client is None
-    c = client or httpx.AsyncClient(timeout=5.0)
-    try:
-        resp = await c.get(url, params={"client_profile": client_profile})
-        if resp.status_code != 200:
-            return False
-        enabled = bool(resp.json().get("enabled", False))
-        _cache_set(key, enabled)
-        return enabled
-    except (httpx.RequestError, ValueError):
-        return False
-    finally:
-        if owns_client:
-            await c.aclose()
+    return await _cached_l1_get(
+        f"toggle:{client_profile}",
+        f"{l1_url.rstrip('/')}/api/autonomy/auto-merge-toggle",
+        fail_closed=False,
+        parse=lambda data: bool(data.get("enabled", False)),
+        params={"client_profile": client_profile},
+        client=client,
+    )
+
+
+_EMPTY_PROFILE: dict[str, Any] = {
+    "client_profile": "",
+    "low_risk_ticket_types": [],
+    "auto_merge_enabled_yaml": False,
+}
 
 
 async def fetch_profile_by_repo(
@@ -137,44 +178,18 @@ async def fetch_profile_by_repo(
     client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """Resolve repo -> client_profile via L1. Returns dict (may have empty profile)."""
-    key = f"profile:{repo_full_name}"
-    cached = _cache_get(key)
-    if cached is not None:
-        return cached  # type: ignore[no-any-return]
     if not internal_token:
         logger.warning("l1_profile_by_repo_no_token")
-        return {
-            "client_profile": "",
-            "low_risk_ticket_types": [],
-            "auto_merge_enabled_yaml": False,
-        }
-    url = f"{l1_url.rstrip('/')}/api/internal/autonomy/profile-by-repo"
-    owns_client = client is None
-    c = client or httpx.AsyncClient(timeout=5.0)
-    try:
-        resp = await c.get(
-            url,
-            params={"repo_full_name": repo_full_name},
-            headers={"X-Internal-Api-Token": internal_token},
-        )
-        if resp.status_code != 200:
-            return {
-                "client_profile": "",
-                "low_risk_ticket_types": [],
-                "auto_merge_enabled_yaml": False,
-            }
-        data: dict[str, Any] = resp.json()
-        _cache_set(key, data)
-        return data
-    except (httpx.RequestError, ValueError):
-        return {
-            "client_profile": "",
-            "low_risk_ticket_types": [],
-            "auto_merge_enabled_yaml": False,
-        }
-    finally:
-        if owns_client:
-            await c.aclose()
+        return _EMPTY_PROFILE
+    return await _cached_l1_get(
+        f"profile:{repo_full_name}",
+        f"{l1_url.rstrip('/')}/api/internal/autonomy/profile-by-repo",
+        fail_closed=_EMPTY_PROFILE,
+        parse=lambda data: data,
+        params={"repo_full_name": repo_full_name},
+        headers={"X-Internal-Api-Token": internal_token},
+        client=client,
+    )
 
 
 @dataclass(frozen=True)

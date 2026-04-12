@@ -70,6 +70,26 @@ def _get_spawner() -> SessionSpawner:
 
 # --- Helpers ---
 
+
+def _require_internal_api_token(x_internal_api_token: str | None) -> None:
+    """Validate the admin API token in constant time.
+
+    Plain ``!=`` leaks timing on the first differing byte, so an
+    attacker can byte-by-byte recover the secret. Use
+    ``hmac.compare_digest`` and raise the generic 401 only after the
+    compare, so missing tokens and wrong tokens take the same path.
+
+    Fails with 503 when the admin API isn't configured (empty env
+    var) so we don't accidentally accept an empty-string token.
+    """
+    expected = os.getenv("L1_INTERNAL_API_TOKEN", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="Admin API not configured")
+    provided = x_internal_api_token or ""
+    if not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+
+
 _AI_BRANCH_PATTERN = re.compile(r"^ai/([A-Za-z0-9]+-\d+)")
 
 
@@ -131,38 +151,46 @@ _AUTONOMY_EVENTS_PATH = "/api/internal/autonomy/events"
 _HUMAN_ISSUES_PATH = "/api/internal/autonomy/human-issues"
 
 
-async def _forward_autonomy_event_once(event: dict[str, Any]) -> bool:
-    """POST event to L1 with retry-once on transient failure.
+async def _post_to_l1_with_retry(
+    path: str,
+    payload: dict[str, Any],
+    *,
+    log_event: str,
+    log_context: dict[str, Any],
+) -> bool:
+    """POST ``payload`` to L1 with retry-once on transient failure.
 
-    Returns True on success (2xx), False on double-fail or non-retryable 4xx.
-    Assumes L1_INTERNAL_API_TOKEN is set (caller must short-circuit otherwise).
+    Returns True on 2xx, False on non-retryable 4xx or double-fail 5xx.
+    Shared path for the three ``_forward_*_once`` helpers which used
+    to duplicate ~45 lines of identical retry scaffolding, differing
+    only in URL, log event name, and which payload fields to log.
+
+    Assumes L1_INTERNAL_API_TOKEN is set (caller must short-circuit
+    otherwise). ``log_context`` is merged into every failure log.
     """
-    url = f"{L1_SERVICE_URL.rstrip('/')}{_AUTONOMY_EVENTS_PATH}"
+    url = f"{L1_SERVICE_URL.rstrip('/')}{path}"
     headers = {"X-Internal-Api-Token": L1_INTERNAL_API_TOKEN}
 
     last_error: str = ""
     for attempt in range(2):
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(url, json=event, headers=headers)
+                resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code >= 500:
                 last_error = f"HTTP {resp.status_code}"
                 if attempt == 0:
                     await asyncio.sleep(1)
                     continue
                 return False
-            elif resp.status_code >= 400:
-                # Non-retryable client error
+            if resp.status_code >= 400:
                 logger.error(
-                    "l1_autonomy_event_forward_failed",
+                    log_event,
                     status_code=resp.status_code,
                     body=resp.text[:500],
-                    event_type=event.get("event_type"),
-                    ticket_id=event.get("ticket_id"),
+                    **log_context,
                 )
                 return False
-            else:
-                return True
+            return True
         except httpx.RequestError as exc:
             last_error = f"RequestError: {exc}"
             if attempt == 0:
@@ -170,15 +198,21 @@ async def _forward_autonomy_event_once(event: dict[str, Any]) -> bool:
                 continue
             return False
 
-    # Unreachable, but defensive
-    logger.error(
-        "l1_autonomy_event_forward_failed",
-        error=last_error,
-        event_type=event.get("event_type"),
-        ticket_id=event.get("ticket_id"),
-        url=url,
-    )
+    logger.error(log_event, error=last_error, url=url, **log_context)
     return False
+
+
+async def _forward_autonomy_event_once(event: dict[str, Any]) -> bool:
+    """POST event to L1 with retry-once on transient failure."""
+    return await _post_to_l1_with_retry(
+        _AUTONOMY_EVENTS_PATH,
+        event,
+        log_event="l1_autonomy_event_forward_failed",
+        log_context={
+            "event_type": event.get("event_type"),
+            "ticket_id": event.get("ticket_id"),
+        },
+    )
 
 
 async def _forward_autonomy_event(event: dict[str, Any]) -> None:
@@ -206,51 +240,16 @@ async def _forward_autonomy_event(event: dict[str, Any]) -> None:
 
 
 async def _forward_human_issue_once(payload: dict[str, Any]) -> bool:
-    """POST human issue to L1 with retry-once on transient failure.
-
-    Returns True on success (2xx), False on double-fail or non-retryable 4xx.
-    Assumes L1_INTERNAL_API_TOKEN is set (caller must short-circuit otherwise).
-    """
-    url = f"{L1_SERVICE_URL.rstrip('/')}{_HUMAN_ISSUES_PATH}"
-    headers = {"X-Internal-Api-Token": L1_INTERNAL_API_TOKEN}
-
-    last_error: str = ""
-    for attempt in range(2):
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(url, json=payload, headers=headers)
-            if resp.status_code >= 500:
-                last_error = f"HTTP {resp.status_code}"
-                if attempt == 0:
-                    await asyncio.sleep(1)
-                    continue
-                return False
-            elif resp.status_code >= 400:
-                logger.error(
-                    "l1_human_issue_forward_failed",
-                    status_code=resp.status_code,
-                    body=resp.text[:500],
-                    event_type=payload.get("event_type"),
-                    ticket_id=payload.get("ticket_id"),
-                )
-                return False
-            else:
-                return True
-        except httpx.RequestError as exc:
-            last_error = f"RequestError: {exc}"
-            if attempt == 0:
-                await asyncio.sleep(1)
-                continue
-            return False
-
-    logger.error(
-        "l1_human_issue_forward_failed",
-        error=last_error,
-        event_type=payload.get("event_type"),
-        ticket_id=payload.get("ticket_id"),
-        url=url,
+    """POST human issue to L1 with retry-once on transient failure."""
+    return await _post_to_l1_with_retry(
+        _HUMAN_ISSUES_PATH,
+        payload,
+        log_event="l1_human_issue_forward_failed",
+        log_context={
+            "event_type": payload.get("event_type"),
+            "ticket_id": payload.get("ticket_id"),
+        },
     )
-    return False
 
 
 async def _forward_human_issue(payload: dict[str, Any]) -> None:
@@ -321,50 +320,16 @@ def _category_from_labels(labels: list[str]) -> str:
 
 
 async def _forward_github_defect_once(payload: dict[str, Any]) -> bool:
-    """POST GitHub defect-link payload to L1 with retry-once on transient failure.
-
-    Returns True on success (2xx), False on double-fail or non-retryable 4xx.
-    Assumes L1_INTERNAL_API_TOKEN is set (caller must short-circuit otherwise).
-    """
-    url = f"{L1_SERVICE_URL.rstrip('/')}{_GITHUB_DEFECT_LINK_PATH}"
-    headers = {"X-Internal-Api-Token": L1_INTERNAL_API_TOKEN}
-
-    last_error: str = ""
-    for attempt in range(2):
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(url, json=payload, headers=headers)
-            if resp.status_code >= 500:
-                last_error = f"HTTP {resp.status_code}"
-                if attempt == 0:
-                    await asyncio.sleep(1)
-                    continue
-                return False
-            elif resp.status_code >= 400:
-                logger.error(
-                    "l1_github_defect_forward_failed",
-                    status_code=resp.status_code,
-                    body=resp.text[:500],
-                    issue_number=payload.get("issue_number"),
-                    pr_number=payload.get("pr_number"),
-                )
-                return False
-            else:
-                return True
-        except httpx.RequestError as exc:
-            last_error = f"RequestError: {exc}"
-            if attempt == 0:
-                await asyncio.sleep(1)
-                continue
-            return False
-
-    logger.error(
-        "l1_github_defect_forward_failed",
-        error=last_error,
-        issue_number=payload.get("issue_number"),
-        url=url,
+    """POST GitHub defect-link to L1 with retry-once on transient failure."""
+    return await _post_to_l1_with_retry(
+        _GITHUB_DEFECT_LINK_PATH,
+        payload,
+        log_event="l1_github_defect_forward_failed",
+        log_context={
+            "issue_number": payload.get("issue_number"),
+            "pr_number": payload.get("pr_number"),
+        },
     )
-    return False
 
 
 async def _forward_github_defect(payload: dict[str, Any]) -> None:
@@ -1062,11 +1027,7 @@ async def _drain_backlog_on_startup() -> None:
 async def post_drain_backlog(
     x_internal_api_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    expected = os.getenv("L1_INTERNAL_API_TOKEN", "")
-    if not expected:
-        raise HTTPException(status_code=503, detail="Admin API not configured")
-    if not x_internal_api_token or x_internal_api_token != expected:
-        raise HTTPException(status_code=401, detail="Invalid admin token")
+    _require_internal_api_token(x_internal_api_token)
     forwarders: dict[str, Callable[[dict[str, Any]], Awaitable[bool]]] = {
         "autonomy_event": _forward_autonomy_event_once,
         "human_issue": _forward_human_issue_once,
@@ -1080,11 +1041,7 @@ async def post_drain_backlog(
 async def get_backlog_status(
     x_internal_api_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    expected = os.getenv("L1_INTERNAL_API_TOKEN", "")
-    if not expected:
-        raise HTTPException(status_code=503, detail="Admin API not configured")
-    if not x_internal_api_token or x_internal_api_token != expected:
-        raise HTTPException(status_code=401, detail="Invalid admin token")
+    _require_internal_api_token(x_internal_api_token)
     return backlog_status()
 
 
