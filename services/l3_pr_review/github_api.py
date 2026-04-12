@@ -92,15 +92,33 @@ async def get_pr_state(
         reviews = await _paginate(
             c, f"{base}/pulls/{pr_number}/reviews", headers
         ) or []
-        # Collapse to latest review per user (reviews come in chronological order)
+        # Collapse to latest review per user (reviews come in chronological order).
+        #
+        # APPROVED reviews are ONLY counted when they target the
+        # current head_sha. Otherwise, a human who approved commit A
+        # followed by the agent force-pushing commit B would leave a
+        # stale APPROVED review on the reviews endpoint, making
+        # approvals_count=1 and the approval gate fail-OPEN on a
+        # commit that was never actually reviewed. GitHub's native
+        # "dismiss stale reviews" branch protection is per-repo and
+        # not guaranteed, so L3 must enforce it defensively.
+        #
+        # CHANGES_REQUESTED reviews are KEPT regardless of commit —
+        # a rejection shouldn't silently clear just because a new
+        # commit landed. The reviewer re-APPROVING on the new commit
+        # is the only thing that should unblock.
         latest_by_user: dict[str, str] = {}
         for r in reviews:
             if r.get("state") == "COMMENTED":
                 continue  # Comments don't count as approval/change request
             user = (r.get("user") or {}).get("login", "")
             state = r.get("state", "")
-            if user and state:
-                latest_by_user[user] = state
+            if not (user and state):
+                continue
+            if state == "APPROVED" and r.get("commit_id") != head_sha:
+                # Stale approval against an older commit — drop.
+                continue
+            latest_by_user[user] = state
         approvals = sum(1 for s in latest_by_user.values() if s == "APPROVED")
         changes_req = sum(
             1 for s in latest_by_user.values() if s == "CHANGES_REQUESTED"

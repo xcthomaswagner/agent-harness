@@ -93,6 +93,32 @@ def _require_internal_api_token(x_internal_api_token: str | None) -> None:
 _AI_BRANCH_PATTERN = re.compile(r"^ai/([A-Za-z0-9]+-\d+)")
 
 
+_TICKET_TYPE_LABELS: tuple[str, ...] = (
+    "bug",
+    "chore",
+    "config",
+    "dependency",
+    "docs",
+    "story",
+)
+
+
+def _ticket_type_from_labels(
+    labels: list[str], *, default: str = "story"
+) -> str:
+    """Return the first label that matches a known ticket type, or ``default``.
+
+    Consolidates the copy-pasted label scan that appeared in both
+    ``_handle_review_approved`` and ``_handle_ci_passed``. The two
+    call sites previously used *different* label sets (one omitted
+    "story"), so a new ticket type would have required touching both.
+    """
+    for label in labels:
+        if label in _TICKET_TYPE_LABELS:
+            return label
+    return default
+
+
 def _ticket_id_from_payload(payload: dict[str, Any]) -> str:
     """Extract ticket ID from the PR branch name (e.g., ai/SCRUM-16 → SCRUM-16)."""
     pr = payload.get("pull_request", {})
@@ -157,19 +183,21 @@ async def _post_to_l1_with_retry(
     *,
     log_event: str,
     log_context: dict[str, Any],
+    headers: dict[str, str] | None = None,
 ) -> bool:
     """POST ``payload`` to L1 with retry-once on transient failure.
 
     Returns True on 2xx, False on non-retryable 4xx or double-fail 5xx.
-    Shared path for the three ``_forward_*_once`` helpers which used
-    to duplicate ~45 lines of identical retry scaffolding, differing
-    only in URL, log event name, and which payload fields to log.
+    Shared path for every L1 forwarder — both the internal autonomy
+    pipelines (which use ``X-Internal-Api-Token``, the default) and
+    the ``/api/agent-complete`` caller (which today sends no auth
+    header because L1 runs with ``API_KEY`` unset in local dev).
 
-    Assumes L1_INTERNAL_API_TOKEN is set (caller must short-circuit
-    otherwise). ``log_context`` is merged into every failure log.
+    ``log_context`` is merged into every failure log.
     """
     url = f"{L1_SERVICE_URL.rstrip('/')}{path}"
-    headers = {"X-Internal-Api-Token": L1_INTERNAL_API_TOKEN}
+    if headers is None:
+        headers = {"X-Internal-Api-Token": L1_INTERNAL_API_TOKEN}
 
     last_error: str = ""
     for attempt in range(2):
@@ -743,42 +771,28 @@ async def _handle_review_approved(payload: dict[str, Any]) -> None:
         )
         return
 
-    # Extract ticket type from branch name or PR labels
+    # Extract ticket type from PR labels
     labels = [label.get("name", "") for label in pr.get("labels", [])]
-    ticket_type = "story"  # Default
-    for label in labels:
-        if label in ("bug", "chore", "config", "dependency", "docs"):
-            ticket_type = label
-            break
+    ticket_type = _ticket_type_from_labels(labels)
 
-    # Notify L1 of the approval for autonomy tracking (retry once on failure)
-    l1_url = os.getenv("L1_SERVICE_URL", "http://localhost:8000")
-    completion_json = {
-        "ticket_id": ticket_id,
-        "status": "complete",
-        "pr_url": pr.get("html_url", ""),
-        "branch": branch,
-    }
-    for attempt in range(2):
-        try:
-            import httpx
-
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{l1_url}/api/agent-complete",
-                    json=completion_json,
-                    timeout=10.0,
-                )
-                resp.raise_for_status()
-            break
-        except Exception:
-            if attempt == 0:
-                log.warning("l1_notification_failed_retrying")
-                import asyncio
-                await asyncio.sleep(2)
-            else:
-                log.error("l1_notification_failed", url=l1_url,
-                          ticket_id=completion_json["ticket_id"])
+    # Notify L1 of the approval for autonomy tracking. Routes through
+    # the shared retry helper — previously this was the only L1 caller
+    # with a bespoke inline 2-attempt retry loop. ``headers={}`` keeps
+    # the current no-auth-header behavior (L1 runs with API_KEY unset
+    # in dev); swap to ``{"X-API-Key": ...}`` once the production
+    # deployment enforces it.
+    await _post_to_l1_with_retry(
+        "/api/agent-complete",
+        {
+            "ticket_id": ticket_id,
+            "status": "complete",
+            "pr_url": pr.get("html_url", ""),
+            "branch": branch,
+        },
+        log_event="l1_agent_complete_failed",
+        log_context={"ticket_id": ticket_id, "branch": branch},
+        headers={},
+    )
 
     log.info(
         "pr_approved",
@@ -897,13 +911,11 @@ async def _handle_ci_passed(payload: dict[str, Any]) -> None:
     for pr_number in pr_numbers:
         try:
             # We need ticket_type; fetch labels via PR state
-            ticket_type = ""
             pr_state = await get_pr_state(repo_full_name, pr_number)
-            if pr_state:
-                for label in pr_state.get("labels", []):
-                    if label in ("bug", "chore", "config", "dependency", "docs", "story"):
-                        ticket_type = label
-                        break
+            ticket_type = _ticket_type_from_labels(
+                pr_state.get("labels", []) if pr_state else [],
+                default="",
+            )
             await evaluate_and_maybe_merge(
                 repo_full_name=repo_full_name,
                 pr_number=pr_number,

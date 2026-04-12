@@ -1,5 +1,6 @@
-"""Tests for GitHub webhook event classification."""
+"""Tests for GitHub + ADO webhook event classification."""
 
+from ado_event_classifier import classify_ado_event
 from event_classifier import EventType, classify_event
 
 
@@ -124,3 +125,82 @@ class TestUnknownEvents:
         headers = {}
         payload = {}
         assert classify_event(headers, payload) == EventType.IGNORED
+
+
+# --- ADO vote classification (rejection-wins safety) ---
+#
+# Bug: ado_event_classifier._extract_latest_vote walked the reviewers
+# array and returned the first non-zero vote under the assumption
+# "ADO sends the changed reviewer first" — which is NOT guaranteed by
+# the ADO webhook contract. When reviewer X previously approved (+10)
+# and reviewer Y then rejected (-10), list order could place X first
+# and the classifier would return REVIEW_APPROVED, masking Y's
+# rejection and default-OPENing evaluate_and_maybe_merge.
+# Fix: collapse all votes with "any rejection wins".
+
+
+class TestADOReviewerVotes:
+    def _updated_payload(self, reviewers: list[dict]) -> dict:
+        return {
+            "eventType": "git.pullrequest.updated",
+            "resource": {
+                "status": "active",
+                "reviewers": reviewers,
+            },
+        }
+
+    def test_rejection_wins_over_earlier_approval(self) -> None:
+        """X approved +10 then Y rejected -10; rejection must win regardless of list order."""
+        payload = self._updated_payload([
+            {"displayName": "X", "vote": 10},
+            {"displayName": "Y", "vote": -10},
+        ])
+        assert classify_ado_event(payload) == EventType.REVIEW_CHANGES_REQUESTED
+
+    def test_rejection_wins_when_listed_last(self) -> None:
+        payload = self._updated_payload([
+            {"displayName": "A", "vote": 10},
+            {"displayName": "B", "vote": 10},
+            {"displayName": "C", "vote": -10},
+        ])
+        assert classify_ado_event(payload) == EventType.REVIEW_CHANGES_REQUESTED
+
+    def test_waiting_for_author_treated_as_rejection(self) -> None:
+        """ADO -5 = waiting for author — treat as changes-requested for auto-merge safety."""
+        payload = self._updated_payload([
+            {"displayName": "X", "vote": -5},
+        ])
+        assert classify_ado_event(payload) == EventType.REVIEW_CHANGES_REQUESTED
+
+    def test_all_approved_classifies_approved(self) -> None:
+        payload = self._updated_payload([
+            {"displayName": "X", "vote": 10},
+            {"displayName": "Y", "vote": 10},
+        ])
+        assert classify_ado_event(payload) == EventType.REVIEW_APPROVED
+
+    def test_approved_with_suggestions_classifies_comment(self) -> None:
+        """ADO 5 = approved with suggestions — classify as a comment, not approval."""
+        payload = self._updated_payload([
+            {"displayName": "X", "vote": 5},
+        ])
+        assert classify_ado_event(payload) == EventType.REVIEW_COMMENT
+
+    def test_all_zero_votes_falls_through(self) -> None:
+        """No actionable votes — should not classify as a review event."""
+        payload = self._updated_payload([
+            {"displayName": "X", "vote": 0},
+        ])
+        # Falls through to lastMergeSourceCommit / unhandled → IGNORED.
+        assert classify_ado_event(payload) == EventType.IGNORED
+
+    def test_empty_reviewers_with_commit_falls_through_to_sync(self) -> None:
+        payload = {
+            "eventType": "git.pullrequest.updated",
+            "resource": {
+                "status": "active",
+                "reviewers": [],
+                "lastMergeSourceCommit": {"commitId": "abc"},
+            },
+        }
+        assert classify_ado_event(payload) == EventType.PR_SYNCHRONIZE

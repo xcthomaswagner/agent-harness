@@ -11,6 +11,51 @@ from event_classifier import EventType
 logger = structlog.get_logger()
 
 
+# ADO reviewer vote codes — see Azure DevOps REST API,
+# GitPullRequestReviewer.vote:
+#   https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-reviewers
+#
+#   10 = approved
+#    5 = approved with suggestions
+#    0 = no vote / reset
+#   -5 = waiting for author
+#  -10 = rejected
+#
+# Safety posture: when classifying for the auto-merge pipeline we
+# COLLAPSE the whole reviewers array with "any rejection wins".
+# Previously the classifier walked the reviewers list and returned the
+# first non-zero vote under the assumption "ADO sends the changed
+# reviewer first" — which is not guaranteed by the ADO webhook
+# contract. On a PR where reviewer X approved and reviewer Y then
+# rejected, the list order could place X first, masking Y's rejection
+# and misclassifying the event as REVIEW_APPROVED. That would flow
+# through _handle_review_approved -> evaluate_and_maybe_merge and
+# default-OPEN the merge decision. Treating any -10/-5 as the
+# dominant signal is the only safe order-independent rule.
+_ADO_VOTE_REJECTED = {-10, -5}
+_ADO_VOTE_APPROVED = {10}
+_ADO_VOTE_SUGGESTED = {5}
+
+
+def _classify_reviewer_votes(
+    reviewers: list[dict[str, Any]],
+) -> EventType | None:
+    """Collapse all reviewer votes to a single EventType with rejection-wins.
+
+    Returns None when the reviewers list is empty or all votes are 0.
+    """
+    if not reviewers:
+        return None
+    votes = {int(r.get("vote", 0)) for r in reviewers}
+    if votes & _ADO_VOTE_REJECTED:
+        return EventType.REVIEW_CHANGES_REQUESTED
+    if votes & _ADO_VOTE_APPROVED:
+        return EventType.REVIEW_APPROVED
+    if votes & _ADO_VOTE_SUGGESTED:
+        return EventType.REVIEW_COMMENT
+    return None
+
+
 def classify_ado_event(payload: dict[str, Any]) -> EventType:
     """Classify an ADO Service Hook event into an actionable EventType.
 
@@ -47,17 +92,10 @@ def classify_ado_event(payload: dict[str, Any]) -> EventType:
         if status == "abandoned":
             return EventType.IGNORED
 
-        # Check for reviewer vote changes
         reviewers: list[dict[str, Any]] = resource.get("reviewers", [])
-        if reviewers:
-            vote = _extract_latest_vote(reviewers)
-            if vote is not None:
-                if vote == 10:
-                    return EventType.REVIEW_APPROVED
-                if vote in (-10, -5):
-                    return EventType.REVIEW_CHANGES_REQUESTED
-                if vote in (0, 5):
-                    return EventType.REVIEW_COMMENT
+        vote_event = _classify_reviewer_votes(reviewers)
+        if vote_event is not None:
+            return vote_event
 
         # Check for new commits (source branch updated)
         # ADO includes lastMergeSourceCommit when source is updated.
@@ -75,22 +113,3 @@ def classify_ado_event(payload: dict[str, Any]) -> EventType:
 
     logger.debug("unhandled_ado_event", event_type=event_type)
     return EventType.IGNORED
-
-
-def _extract_latest_vote(reviewers: list[dict[str, Any]]) -> int | None:
-    """Extract the most recent non-zero vote from the reviewers list.
-
-    ADO PR payloads include all reviewers.  When a webhook fires for a
-    vote change, the updated reviewer entry reflects the new vote.
-    We return the first non-zero vote found (ADO sends the changed
-    reviewer first in update payloads), or 0 if all votes are zero,
-    or None if the list is empty.
-    """
-    if not reviewers:
-        return None
-    for reviewer in reviewers:
-        vote = reviewer.get("vote", 0)
-        if vote != 0:
-            return int(vote)
-    # All reviewers have vote=0 (no vote / reset)
-    return 0

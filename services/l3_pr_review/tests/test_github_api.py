@@ -47,7 +47,7 @@ async def test_get_pr_state_happy_path() -> None:
         "title": "Fix X",
     }
     reviews_json = [
-        {"user": {"login": "alice"}, "state": "APPROVED"},
+        {"user": {"login": "alice"}, "state": "APPROVED", "commit_id": "abc123"},
     ]
     suites_json = {
         "check_suites": [{"status": "completed", "conclusion": "success"}]
@@ -94,12 +94,13 @@ async def test_get_pr_state_collapses_reviews_per_user() -> None:
         "head": {"sha": "abc"},
         "labels": [],
     }
-    # alice: CHANGES_REQUESTED then APPROVED — latest wins; comment ignored
+    # alice: CHANGES_REQUESTED then APPROVED — latest wins; comment ignored.
+    # All reviews target the current head_sha "abc" so they count.
     reviews_json = [
-        {"user": {"login": "alice"}, "state": "CHANGES_REQUESTED"},
-        {"user": {"login": "alice"}, "state": "COMMENTED"},  # ignored
-        {"user": {"login": "alice"}, "state": "APPROVED"},
-        {"user": {"login": "bob"}, "state": "CHANGES_REQUESTED"},
+        {"user": {"login": "alice"}, "state": "CHANGES_REQUESTED", "commit_id": "abc"},
+        {"user": {"login": "alice"}, "state": "COMMENTED", "commit_id": "abc"},
+        {"user": {"login": "alice"}, "state": "APPROVED", "commit_id": "abc"},
+        {"user": {"login": "bob"}, "state": "CHANGES_REQUESTED", "commit_id": "abc"},
     ]
     suites_json = {
         "check_suites": [{"status": "completed", "conclusion": "success"}]
@@ -258,12 +259,13 @@ async def test_get_pr_state_paginates_reviews_across_pages() -> None:
         "labels": [],
     }
     # Page 1: 2 bot approvals. Page 2: 1 human CHANGES_REQUESTED.
+    # All target the current head_sha "abc".
     reviews_page1 = [
-        {"user": {"login": "bot1"}, "state": "APPROVED"},
-        {"user": {"login": "bot2"}, "state": "APPROVED"},
+        {"user": {"login": "bot1"}, "state": "APPROVED", "commit_id": "abc"},
+        {"user": {"login": "bot2"}, "state": "APPROVED", "commit_id": "abc"},
     ]
     reviews_page2 = [
-        {"user": {"login": "human"}, "state": "CHANGES_REQUESTED"},
+        {"user": {"login": "human"}, "state": "CHANGES_REQUESTED", "commit_id": "abc"},
     ]
     suites_json = {
         "check_suites": [{"status": "completed", "conclusion": "success"}]
@@ -324,6 +326,132 @@ async def test_get_pr_state_paginates_check_suites_across_pages() -> None:
     assert state["checks_passed"] is False, (
         "failing suite on page 2 must block checks_passed"
     )
+
+
+# --- get_pr_state stale approval regression ---
+#
+# Bug: get_pr_state counted APPROVED reviews without checking their
+# commit_id. A human approves commit A; agent force-pushes commit B;
+# the old review still appears in /pulls/{n}/reviews with commit_id=A.
+# approvals_count=1 → approval gate passes → evaluate_and_maybe_merge
+# fires merge_pr on commit B which was never reviewed.
+# Fix: drop APPROVED reviews whose commit_id != head_sha.
+# CHANGES_REQUESTED reviews remain sticky across commits (a rejection
+# shouldn't silently clear just because a new commit lands).
+
+
+async def test_get_pr_state_drops_stale_approval_on_old_commit() -> None:
+    """APPROVED review on commit A must NOT count when head_sha is B."""
+    pr_json = {
+        "user": {"login": "bot"},
+        "merged": False,
+        "mergeable": True,
+        "mergeable_state": "clean",
+        "head": {"sha": "B"},
+        "labels": [],
+    }
+    reviews_json = [
+        {
+            "user": {"login": "human"},
+            "state": "APPROVED",
+            "commit_id": "A",  # stale — was approved on an older commit
+        },
+    ]
+    suites_json = {
+        "check_suites": [{"status": "completed", "conclusion": "success"}]
+    }
+    client = _mk_client(
+        [
+            _mk_response(200, pr_json),
+            _mk_response(200, reviews_json),
+            _mk_response(200, suites_json),
+        ]
+    )
+    state = await get_pr_state(
+        "acme/repo", 1, github_token="tok", client=client
+    )
+    assert state is not None
+    assert state["approvals_count"] == 0, (
+        "stale approval against an older commit must not be counted — "
+        "regression for default-OPEN auto-merge bug"
+    )
+
+
+async def test_get_pr_state_keeps_changes_requested_across_commits() -> None:
+    """CHANGES_REQUESTED on old commit must stay sticky."""
+    pr_json = {
+        "user": {"login": "bot"},
+        "merged": False,
+        "mergeable": True,
+        "mergeable_state": "clean",
+        "head": {"sha": "B"},
+        "labels": [],
+    }
+    reviews_json = [
+        {
+            "user": {"login": "human"},
+            "state": "CHANGES_REQUESTED",
+            "commit_id": "A",  # old commit — but rejection stays
+        },
+    ]
+    suites_json = {
+        "check_suites": [{"status": "completed", "conclusion": "success"}]
+    }
+    client = _mk_client(
+        [
+            _mk_response(200, pr_json),
+            _mk_response(200, reviews_json),
+            _mk_response(200, suites_json),
+        ]
+    )
+    state = await get_pr_state(
+        "acme/repo", 1, github_token="tok", client=client
+    )
+    assert state is not None
+    assert state["changes_requested_count"] == 1, (
+        "rejection must be sticky across new commits; only a fresh "
+        "APPROVED review should clear it"
+    )
+
+
+async def test_get_pr_state_fresh_approval_replaces_old_rejection() -> None:
+    """Reviewer's new APPROVED on current commit clears their old CHANGES_REQUESTED."""
+    pr_json = {
+        "user": {"login": "bot"},
+        "merged": False,
+        "mergeable": True,
+        "mergeable_state": "clean",
+        "head": {"sha": "B"},
+        "labels": [],
+    }
+    reviews_json = [
+        {
+            "user": {"login": "human"},
+            "state": "CHANGES_REQUESTED",
+            "commit_id": "A",
+        },
+        {
+            "user": {"login": "human"},
+            "state": "APPROVED",
+            "commit_id": "B",  # fresh approval on current head
+        },
+    ]
+    suites_json = {
+        "check_suites": [{"status": "completed", "conclusion": "success"}]
+    }
+    client = _mk_client(
+        [
+            _mk_response(200, pr_json),
+            _mk_response(200, reviews_json),
+            _mk_response(200, suites_json),
+        ]
+    )
+    state = await get_pr_state(
+        "acme/repo", 1, github_token="tok", client=client
+    )
+    assert state is not None
+    assert state["approvals_count"] == 1
+    assert state["changes_requested_count"] == 0
 
 
 # --- merge_pr ---
