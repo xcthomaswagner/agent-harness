@@ -1250,6 +1250,58 @@ class TestAutoMergeTrigger:
             await _asyncio.sleep(0.1)
             assert mock_eval.await_count == 1
 
+    async def test_review_approved_skips_non_ai_branch(self) -> None:
+        """Bug regression: _handle_review_approved used
+        ``branch.replace("ai/", "")`` which (a) replaced all
+        occurrences of the substring, not just the prefix, and
+        (b) passed non-AI branches through unchanged — so a human
+        approving a PR on ``main`` or ``develop`` sent a completion
+        request to L1 with that branch name as the ``ticket_id``.
+        Fixed by extracting the ticket via ``_ticket_id_from_payload``
+        (regex-based) and early-returning when the branch doesn't
+        match the ``ai/<PROJ>-<N>`` pattern."""
+        payload = _base_pr_payload("submitted")
+        # Non-AI branch — human PR merged into this repo.
+        payload["pull_request"]["head"]["ref"] = "feature/human-work"
+        payload["review"] = {
+            "state": "approved",
+            "id": 1,
+            "body": "",
+            "html_url": "https://github.com/org/repo/pull/42",
+            "user": {"login": "human-reviewer"},
+        }
+
+        mock_eval = AsyncMock(return_value={"status": "dry_run"})
+        with (
+            patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+            patch.object(
+                l3_main, "_forward_autonomy_event", new_callable=AsyncMock
+            ),
+            patch.object(
+                l3_main, "_forward_human_issue", new_callable=AsyncMock
+            ),
+            patch.object(l3_main, "evaluate_and_maybe_merge", mock_eval),
+            patch("main.httpx.AsyncClient") as mock_client,
+        ):
+            mock_inst = AsyncMock()
+            mock_inst.post = AsyncMock()
+            mock_client.return_value.__aenter__.return_value = mock_inst
+
+            async with await _make_client() as client:
+                response = await _post_webhook(
+                    client, payload, "pull_request_review"
+                )
+
+            assert response.status_code == 202
+            import asyncio as _asyncio
+
+            await _asyncio.sleep(0.1)
+
+            # Neither L1 /api/agent-complete nor the auto-merge
+            # evaluator should fire for a non-AI branch.
+            mock_inst.post.assert_not_called()
+            mock_eval.assert_not_called()
+
 
 # --- GitHub defect (issue labeled) handling ---
 

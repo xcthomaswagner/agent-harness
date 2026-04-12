@@ -177,6 +177,93 @@ async def fetch_profile_by_repo(
             await c.aclose()
 
 
+@dataclass(frozen=True)
+class _Gate:
+    """One policy gate — name, reason code on failure, predicate.
+
+    ``predicate`` returns True when the gate PASSES. ``applies_when``
+    is an optional precondition: when it returns False the gate is
+    skipped and recorded as True (pass-through, e.g. ``low_risk`` only
+    applies in semi_autonomous mode).
+
+    Keeping the table ordered and explicit means the gate sequence is
+    auditable in one place and new gates are a single line addition —
+    the previous 11-branch if/return ladder forced every new rule to
+    find the right insertion point and copy 3-line scaffolding.
+    """
+    name: str
+    reason: str
+    predicate: Any  # Callable[[AutoMergeContext, dict], bool]
+    applies_when: Any = None  # Optional[Callable[[AutoMergeContext, dict], bool]]
+
+
+def _low_risk_predicate(
+    ctx: AutoMergeContext, _pr: dict[str, Any]
+) -> bool:
+    return (ctx.ticket_type or "").lower() in {
+        t.lower() for t in ctx.low_risk_types
+    }
+
+
+_GATES: list[_Gate] = [
+    _Gate(
+        "profile_enabled",
+        REASON_KILL_SWITCH_OFF,
+        lambda ctx, pr: ctx.profile_enabled,
+    ),
+    _Gate(
+        "data_quality_good",
+        REASON_DATA_QUALITY_DEGRADED,
+        lambda ctx, pr: ctx.data_quality_status == "good",
+    ),
+    _Gate(
+        "mode_allows_merge",
+        REASON_MODE_CONSERVATIVE,
+        lambda ctx, pr: ctx.recommended_mode in ("semi_autonomous", "full_autonomous"),
+    ),
+    # Only applies in semi_autonomous mode — full_autonomous skips the
+    # low-risk check entirely (pass-through).
+    _Gate(
+        "low_risk_ticket_type",
+        REASON_NOT_LOW_RISK_IN_SEMI,
+        _low_risk_predicate,
+        applies_when=lambda ctx, pr: ctx.recommended_mode == "semi_autonomous",
+    ),
+    _Gate(
+        "bot_authored",
+        REASON_HUMAN_AUTHORED,
+        lambda ctx, pr: (pr.get("author") or "").lower()
+        == ctx.bot_github_username.lower(),
+    ),
+    _Gate(
+        "not_already_merged",
+        REASON_ALREADY_MERGED,
+        lambda ctx, pr: not bool(pr.get("merged")),
+    ),
+    _Gate(
+        "has_approval",
+        REASON_NO_APPROVAL,
+        lambda ctx, pr: int(pr.get("approvals_count") or 0) > 0,
+    ),
+    _Gate(
+        "no_changes_requested",
+        REASON_CHANGES_REQUESTED,
+        lambda ctx, pr: int(pr.get("changes_requested_count") or 0) == 0,
+    ),
+    _Gate(
+        "ci_passed",
+        REASON_CI_NOT_PASSED,
+        lambda ctx, pr: bool(pr.get("checks_passed")),
+    ),
+    _Gate(
+        "mergeable",
+        REASON_NOT_MERGEABLE,
+        lambda ctx, pr: bool(pr.get("mergeable"))
+        and (pr.get("mergeable_state") or "").lower() == "clean",
+    ),
+]
+
+
 def evaluate_policy_gates(
     ctx: AutoMergeContext, pr_state: dict[str, Any]
 ) -> tuple[bool, str, dict[str, bool]]:
@@ -184,75 +271,24 @@ def evaluate_policy_gates(
 
     pr_state keys required: author, merged, mergeable, mergeable_state,
     approvals_count, changes_requested_count, checks_passed.
+
+    Gates are iterated in the order declared in ``_GATES``. The first
+    gate whose predicate returns False short-circuits with its reason
+    code. Gates with an ``applies_when`` precondition (currently only
+    ``low_risk_ticket_type``) record True and skip the predicate when
+    the precondition is False. ``global_enabled`` is recorded but
+    never fails the gates — the orchestrator decides whether to
+    execute the merge vs. record it as a dry run.
     """
-    gates: dict[str, bool] = {}
-    # Record global switch state for audit but do NOT fail gates on it —
-    # the orchestrator decides whether to execute the merge vs. record dry_run.
-    gates["global_enabled"] = ctx.global_enabled
+    gates: dict[str, bool] = {"global_enabled": ctx.global_enabled}
 
-    # 1. Per-profile kill switch
-    gates["profile_enabled"] = ctx.profile_enabled
-    if not ctx.profile_enabled:
-        return False, REASON_KILL_SWITCH_OFF, gates
-
-    # 3. Data quality must be 'good'
-    dq_ok = ctx.data_quality_status == "good"
-    gates["data_quality_good"] = dq_ok
-    if not dq_ok:
-        return False, REASON_DATA_QUALITY_DEGRADED, gates
-
-    # 4. Mode must be semi or full autonomous
-    mode_ok = ctx.recommended_mode in ("semi_autonomous", "full_autonomous")
-    gates["mode_allows_merge"] = mode_ok
-    if not mode_ok:
-        return False, REASON_MODE_CONSERVATIVE, gates
-
-    # 5. If semi_autonomous, ticket_type must be low-risk
-    if ctx.recommended_mode == "semi_autonomous":
-        low_risk = (ctx.ticket_type or "").lower() in {
-            t.lower() for t in ctx.low_risk_types
-        }
-        gates["low_risk_ticket_type"] = low_risk
-        if not low_risk:
-            return False, REASON_NOT_LOW_RISK_IN_SEMI, gates
-    else:
-        gates["low_risk_ticket_type"] = True  # not required
-
-    # 6. Author must be the bot
-    author_ok = (pr_state.get("author") or "").lower() == ctx.bot_github_username.lower()
-    gates["bot_authored"] = author_ok
-    if not author_ok:
-        return False, REASON_HUMAN_AUTHORED, gates
-
-    # 7. Not already merged
-    already_merged = bool(pr_state.get("merged"))
-    gates["not_already_merged"] = not already_merged
-    if already_merged:
-        return False, REASON_ALREADY_MERGED, gates
-
-    # 8. At least one approval
-    approvals = int(pr_state.get("approvals_count") or 0)
-    gates["has_approval"] = approvals > 0
-    if approvals < 1:
-        return False, REASON_NO_APPROVAL, gates
-
-    # 9. No outstanding changes_requested
-    changes_req = int(pr_state.get("changes_requested_count") or 0)
-    gates["no_changes_requested"] = changes_req == 0
-    if changes_req > 0:
-        return False, REASON_CHANGES_REQUESTED, gates
-
-    # 10. CI passed
-    ci_ok = bool(pr_state.get("checks_passed"))
-    gates["ci_passed"] = ci_ok
-    if not ci_ok:
-        return False, REASON_CI_NOT_PASSED, gates
-
-    # 11. Mergeable per GitHub (clean state incorporates required checks/reviews)
-    mergeable = bool(pr_state.get("mergeable"))
-    clean = (pr_state.get("mergeable_state") or "").lower() == "clean"
-    gates["mergeable"] = mergeable and clean
-    if not mergeable or not clean:
-        return False, REASON_NOT_MERGEABLE, gates
+    for gate in _GATES:
+        if gate.applies_when is not None and not gate.applies_when(ctx, pr_state):
+            gates[gate.name] = True
+            continue
+        ok = gate.predicate(ctx, pr_state)
+        gates[gate.name] = ok
+        if not ok:
+            return False, gate.reason, gates
 
     return True, REASON_OK, gates

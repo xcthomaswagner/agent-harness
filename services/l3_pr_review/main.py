@@ -761,6 +761,23 @@ async def _handle_review_approved(payload: dict[str, Any]) -> None:
     # Forward top-level review body as a human issue (only if body non-empty)
     await _forward_review_body_human_issue("review_approved", payload)
 
+    # Extract the AI ticket id from the branch. Approvals on non-AI
+    # branches (main, develop, a human PR that happens to be on this
+    # repo) must not trigger L1's /api/agent-complete — silently
+    # marking an unrelated branch as a "completed ticket". The
+    # previous ``branch.replace("ai/", "")`` replaced every
+    # occurrence of the substring anywhere in the branch name AND
+    # passed non-AI branches through unchanged, both of which
+    # produced wrong ticket ids.
+    ticket_id = _ticket_id_from_payload(payload)
+    if not ticket_id:
+        log.info(
+            "pr_approved_skipped_non_ai_branch",
+            branch=branch,
+            reason="branch does not match ai/<TICKET>-<N> pattern",
+        )
+        return
+
     # Extract ticket type from branch name or PR labels
     labels = [label.get("name", "") for label in pr.get("labels", [])]
     ticket_type = "story"  # Default
@@ -772,7 +789,7 @@ async def _handle_review_approved(payload: dict[str, Any]) -> None:
     # Notify L1 of the approval for autonomy tracking (retry once on failure)
     l1_url = os.getenv("L1_SERVICE_URL", "http://localhost:8000")
     completion_json = {
-        "ticket_id": branch.replace("ai/", ""),
+        "ticket_id": ticket_id,
         "status": "complete",
         "pr_url": pr.get("html_url", ""),
         "branch": branch,
@@ -805,13 +822,10 @@ async def _handle_review_approved(payload: dict[str, Any]) -> None:
         repo=repo,
     )
 
-    # Phase 4: evaluate auto-merge policy
+    # Phase 4: evaluate auto-merge policy. Reuses ``ticket_id``
+    # extracted at the top of the function via the canonical regex —
+    # we would have already returned if it were empty.
     try:
-        ticket_id = (
-            branch.replace("ai/", "")
-            if branch.startswith("ai/")
-            else _ticket_id_from_payload(payload)
-        )
         await evaluate_and_maybe_merge(
             repo_full_name=repo,
             pr_number=pr_number,

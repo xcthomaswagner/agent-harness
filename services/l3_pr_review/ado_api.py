@@ -84,8 +84,20 @@ async def get_ado_pr_state(
             "changes_requested_count": changes_requested,
             "title": pr.get("title", ""),
             "status": status,
-            # Compatibility keys with GitHub normalized dict
-            "mergeable": merge_status == "succeeded" or merge_status == "notSet",
+            # Compatibility keys with GitHub normalized dict.
+            #
+            # Only ``succeeded`` is treated as mergeable. Previously this
+            # returned True for ``notSet`` as well, but ``notSet`` means
+            # ADO has not yet computed the merge status — semantically
+            # equivalent to GitHub's ``mergeable: null`` unknown state.
+            # evaluate_policy_gates does ``bool(pr_state.get("mergeable"))``,
+            # so the old code silently fail-OPENed the mergeable gate
+            # (the most dangerous default-open location in the codebase)
+            # for any ADO PR whose mergeStatus was still being computed
+            # at webhook time. Other non-succeeded states (``conflicts``,
+            # ``rejectedByPolicy``, ``failure``, ``queued``) all
+            # correctly evaluate to False.
+            "mergeable": merge_status == "succeeded",
             "mergeable_state": merge_status,
             "checks_passed": False,  # ADO Pipelines CI not yet integrated
             "labels": [label.get("name", "") for label in pr.get("labels", [])],
