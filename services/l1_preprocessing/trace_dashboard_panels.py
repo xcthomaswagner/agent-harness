@@ -447,7 +447,242 @@ def _render_timeline_panel(artifacts: dict[str, dict[str, Any]]) -> str:
     return _panel_wrapper(header, body, open_by_default=False)
 
 
-# --- Panel 5: Raw Downloads ---
+# --- Panel 5: Conversation View (chat-style model interaction) ---
+
+
+_MAX_CONVERSATION_EVENTS = 200
+_REASONING_TRUNCATE = 800
+_TOOL_INPUT_PREVIEW = 300
+_TOOL_RESULT_PREVIEW = 600
+
+
+def _render_conversation_bubble(
+    role: str, content_html: str, meta: str = "",
+) -> str:
+    """Render a chat-style bubble for the conversation view."""
+    if role == "assistant":
+        bg = "#F0F4FF"
+        border_color = "#4D45E5"
+        label = "Agent"
+        label_color = "#4D45E5"
+    elif role == "tool_use":
+        bg = "#F7F9FB"
+        border_color = "#64748B"
+        label = "Tool Call"
+        label_color = "#64748B"
+    elif role == "tool_result":
+        bg = "#F1F5F9"
+        border_color = "#94A3B8"
+        label = "Result"
+        label_color = "#94A3B8"
+    else:
+        bg = "#FFFFFF"
+        border_color = "#E2E8F0"
+        label = role
+        label_color = "#64748B"
+
+    meta_html = (
+        f'<span style="color:#94A3B8;font-size:10px;margin-left:8px">{_e(meta)}</span>'
+        if meta else ""
+    )
+    return (
+        f'<div style="margin-bottom:6px;padding:8px 12px;background:{bg};'
+        f'border-left:3px solid {border_color};border-radius:4px;font-size:12px">'
+        f'<div style="font-weight:600;font-size:11px;color:{label_color};'
+        f'margin-bottom:4px">{label}{meta_html}</div>'
+        f'{content_html}</div>'
+    )
+
+
+def _render_conversation_panel(artifacts: dict[str, dict[str, Any]]) -> str:
+    """Render a chat-style conversation view from session-stream.jsonl.
+
+    Shows the model's reasoning interleaved with tool calls and results,
+    similar to LangSmith's conversation view. Each message is a bubble
+    with progressive disclosure for long content.
+    """
+    artifact = artifacts.get(ARTIFACT_SESSION_STREAM)
+    if artifact is None:
+        return ""
+
+    artifact_path = artifact.get("artifact_path") or ""
+    if not artifact_path or not Path(str(artifact_path)).exists():
+        return ""
+
+    path = Path(str(artifact_path))
+    bubbles: list[str] = []
+    event_count = 0
+    total_lines = 0
+
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for lineno, raw_line in enumerate(f, start=1):
+                total_lines = lineno
+                if len(bubbles) >= _MAX_CONVERSATION_EVENTS:
+                    continue  # keep counting lines
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
+                try:
+                    event = json.loads(raw_line)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(event, dict):
+                    continue
+
+                etype = event.get("type", "")
+                msg = event.get("message") or {}
+                content_blocks = msg.get("content") or []
+                if not isinstance(content_blocks, list):
+                    continue
+
+                if etype == "assistant":
+                    for block in content_blocks:
+                        if not isinstance(block, dict):
+                            continue
+                        btype = block.get("type", "")
+
+                        if btype == "text":
+                            text = str(block.get("text", ""))
+                            if not text.strip():
+                                continue
+                            if len(text) > _REASONING_TRUNCATE:
+                                shown = _e(text[:_REASONING_TRUNCATE])
+                                hidden = _e(text[_REASONING_TRUNCATE:])
+                                content_html = (
+                                    f'<div style="white-space:pre-wrap;word-wrap:break-word;'
+                                    f'font-family:ui-sans-serif,system-ui,sans-serif">'
+                                    f'{shown}<details style="display:inline"><summary '
+                                    f'style="cursor:pointer;color:#4D45E5;font-size:11px">'
+                                    f'show more ({len(text):,} chars)</summary>'
+                                    f'{hidden}</details></div>'
+                                )
+                            else:
+                                content_html = (
+                                    f'<div style="white-space:pre-wrap;word-wrap:break-word;'
+                                    f'font-family:ui-sans-serif,system-ui,sans-serif">'
+                                    f'{_e(text)}</div>'
+                                )
+                            bubbles.append(_render_conversation_bubble(
+                                "assistant", content_html
+                            ))
+
+                        elif btype == "tool_use":
+                            tool_name = str(block.get("name", ""))
+                            inp = block.get("input", "")
+                            if isinstance(inp, dict | list):
+                                inp_str = json.dumps(inp, indent=2)
+                            else:
+                                inp_str = str(inp)
+                            color = _tool_color(tool_name)
+                            if len(inp_str) > _TOOL_INPUT_PREVIEW:
+                                inp_preview = _e(inp_str[:_TOOL_INPUT_PREVIEW])
+                                inp_rest = _e(inp_str[_TOOL_INPUT_PREVIEW:])
+                                inp_html = (
+                                    f'<pre style="white-space:pre-wrap;word-wrap:break-word;'
+                                    f'font-size:11px;margin:4px 0 0 0;padding:6px;'
+                                    f'background:#FFFFFF;border-radius:3px;border:1px solid #E2E8F0">'
+                                    f'{inp_preview}<details style="display:inline">'
+                                    f'<summary style="cursor:pointer;color:#4D45E5;'
+                                    f'font-size:10px">show full input</summary>'
+                                    f'{inp_rest}</details></pre>'
+                                )
+                            else:
+                                inp_html = (
+                                    f'<pre style="white-space:pre-wrap;word-wrap:break-word;'
+                                    f'font-size:11px;margin:4px 0 0 0;padding:6px;'
+                                    f'background:#FFFFFF;border-radius:3px;border:1px solid #E2E8F0">'
+                                    f'{_e(inp_str)}</pre>'
+                                ) if inp_str.strip() else ""
+                            label_html = (
+                                f'<span style="font-family:ui-monospace,Menlo,monospace;'
+                                f'font-weight:600;color:{color}">{_e(tool_name)}</span>'
+                            )
+                            bubbles.append(_render_conversation_bubble(
+                                "tool_use", f'{label_html}{inp_html}'
+                            ))
+
+                elif etype == "user":
+                    for block in content_blocks:
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") != "tool_result":
+                            continue
+                        is_error = block.get("is_error", False)
+                        res = block.get("content", "")
+                        if isinstance(res, list):
+                            parts = []
+                            for p in res:
+                                if isinstance(p, dict) and "text" in p:
+                                    parts.append(str(p["text"]))
+                                else:
+                                    parts.append(str(p))
+                            res_str = "\n".join(parts)
+                        else:
+                            res_str = str(res)
+
+                        if not res_str.strip():
+                            continue
+
+                        err_badge = (
+                            '<span style="color:#DB2626;font-weight:600;'
+                            'font-size:10px"> ERROR</span>'
+                            if is_error else ""
+                        )
+                        if len(res_str) > _TOOL_RESULT_PREVIEW:
+                            res_preview = _e(res_str[:_TOOL_RESULT_PREVIEW])
+                            res_rest = _e(res_str[_TOOL_RESULT_PREVIEW:])
+                            res_html = (
+                                f'<pre style="white-space:pre-wrap;word-wrap:break-word;'
+                                f'font-size:11px;padding:6px;background:#FFFFFF;'
+                                f'border-radius:3px;border:1px solid #E2E8F0;'
+                                f'max-height:200px;overflow-y:auto">'
+                                f'{res_preview}<details style="display:inline">'
+                                f'<summary style="cursor:pointer;color:#4D45E5;'
+                                f'font-size:10px">show full result ({len(res_str):,} chars)</summary>'
+                                f'{res_rest}</details></pre>'
+                            )
+                        else:
+                            res_html = (
+                                f'<pre style="white-space:pre-wrap;word-wrap:break-word;'
+                                f'font-size:11px;padding:6px;background:#FFFFFF;'
+                                f'border-radius:3px;border:1px solid #E2E8F0;'
+                                f'max-height:200px;overflow-y:auto">{_e(res_str)}</pre>'
+                            )
+                        bubbles.append(_render_conversation_bubble(
+                            "tool_result", f'{err_badge}{res_html}'
+                        ))
+
+                event_count += 1
+
+    except OSError:
+        return ""
+
+    if not bubbles:
+        return ""
+
+    header = (
+        f'Agent Conversation '
+        f'<span class="meta" style="font-weight:400">&mdash; '
+        f'{len(bubbles)} messages from {total_lines:,} stream events</span>'
+    )
+
+    footer = ""
+    if len(bubbles) >= _MAX_CONVERSATION_EVENTS:
+        footer = (
+            f'<div style="padding:8px 10px;border-top:{_PANEL_BORDER};font-size:11px;'
+            f'color:#64748B">Showing first {len(bubbles)} messages '
+            f'&mdash; use Raw Downloads for the full stream.</div>'
+        )
+
+    body = (
+        f'<div style="max-height:600px;overflow-y:auto;border:{_PANEL_BORDER};'
+        f'border-radius:4px;padding:8px">{"".join(bubbles)}</div>{footer}'
+    )
+    return _panel_wrapper(header, body, open_by_default=False)
+
+
+# --- Panel 6: Raw Downloads ---
 
 
 _DOWNLOADABLE_ARTIFACTS = (
@@ -519,6 +754,7 @@ def render_session_panels(entries: list[dict]) -> str:
         _render_agent_instructions_panel(artifacts),
         _render_reasoning_narrative_panel(artifacts),
         _render_timeline_panel(artifacts),
+        _render_conversation_panel(artifacts),
         _render_raw_downloads_panel(entries, artifacts),
     ]
     return "".join(p for p in parts if p)
