@@ -127,23 +127,30 @@ def _ado_payload(
     }
 
 
+def _no_ado_auth():
+    """Context manager that clears ADO webhook auth so tests run without .env secrets."""
+    return patch.object(main.settings, "ado_webhook_token", "")
+
+
 async def test_ado_webhook_accepts_valid_payload() -> None:
     """When no auth secrets are configured, webhook is accepted (local dev)."""
     payload = _ado_payload(tags="ai-implement")
-    async with await _make_client() as client:
-        response = await client.post("/webhooks/ado", json=payload)
-        assert response.status_code == 202
-        assert response.json()["status"] == "accepted"
+    with _no_ado_auth():
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/ado", json=payload)
+            assert response.status_code == 202
+            assert response.json()["status"] == "accepted"
 
 
 async def test_ado_webhook_rejects_non_json() -> None:
-    async with await _make_client() as client:
-        response = await client.post(
-            "/webhooks/ado",
-            content=b"not json",
-            headers={"Content-Type": "application/json"},
-        )
-        assert response.status_code == 422
+    with _no_ado_auth():
+        async with await _make_client() as client:
+            response = await client.post(
+                "/webhooks/ado",
+                content=b"not json",
+                headers={"Content-Type": "application/json"},
+            )
+            assert response.status_code == 422
 
 
 async def test_ado_webhook_accepts_token_header() -> None:
@@ -202,21 +209,23 @@ async def test_ado_webhook_rejects_wrong_token() -> None:
 async def test_ado_webhook_skips_when_no_ai_tag() -> None:
     """Work items without the ai-implement tag are skipped."""
     payload = _ado_payload(tags="sprint-7; enhancement")
-    async with await _make_client() as client:
-        response = await client.post("/webhooks/ado", json=payload)
-        assert response.status_code == 202
-        data = response.json()
-        assert data["status"] == "skipped"
-        assert "ai-implement" in data["reason"]
+    with _no_ado_auth():
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/ado", json=payload)
+            assert response.status_code == 202
+            data = response.json()
+            assert data["status"] == "skipped"
+            assert "ai-implement" in data["reason"]
 
 
 async def test_ado_webhook_processes_when_ai_tag_present() -> None:
     """Work items with the ai-implement tag are accepted."""
     payload = _ado_payload(tags="ai-implement; sprint-7")
-    async with await _make_client() as client:
-        response = await client.post("/webhooks/ado", json=payload)
-        assert response.status_code == 202
-        assert response.json()["status"] == "accepted"
+    with _no_ado_auth():
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/ado", json=payload)
+            assert response.status_code == 202
+            assert response.json()["status"] == "accepted"
 
 
 def _mock_process_ticket_that_releases() -> AsyncMock:
@@ -244,7 +253,8 @@ async def test_ado_webhook_second_call_with_same_tag_is_not_a_new_edge() -> None
     the webhook-handler level edge detection in isolation.
     """
     payload = _ado_payload(work_item_id=7777, tags="ai-implement")
-    with patch.object(main, "_process_ticket", _mock_process_ticket_that_releases()):
+    with _no_ado_auth(), \
+            patch.object(main, "_process_ticket", _mock_process_ticket_that_releases()):
         async with await _make_client() as client:
             first = await client.post("/webhooks/ado", json=payload)
             assert first.status_code == 202
@@ -260,7 +270,8 @@ async def test_ado_webhook_tag_removed_then_readded_retriggers() -> None:
     """If the tag is removed and then re-added, that IS a new edge and the
     pipeline should fire again. Without clearing state on tag-absent webhooks
     a re-add after the first cascade would be silently skipped forever."""
-    with patch.object(main, "_process_ticket", _mock_process_ticket_that_releases()):
+    with _no_ado_auth(), \
+            patch.object(main, "_process_ticket", _mock_process_ticket_that_releases()):
         async with await _make_client() as client:
             # First fire: absent → present. Accepted.
             p1 = _ado_payload(work_item_id=8888, tags="ai-implement")
@@ -407,7 +418,7 @@ async def test_ado_webhook_remaps_ticket_id(tmp_path: Path) -> None:
 
     payload = _ado_payload(work_item_id=123, project="XC-SF-30in30", tags="ai-implement")
 
-    with patch("main.find_profile_by_ado_project") as mock_find:
+    with _no_ado_auth(), patch("main.find_profile_by_ado_project") as mock_find:
         from client_profile import ClientProfile
 
         profile_data = {
@@ -521,7 +532,7 @@ async def test_webhook_stats_counters() -> None:
     Bug 1's fix would reset _last_trigger_state between calls and the
     second webhook would hit the accepted path instead of not-edge.
     """
-    with patch.object(main, "_process_ticket", new_callable=AsyncMock):
+    with _no_ado_auth(), patch.object(main, "_process_ticket", new_callable=AsyncMock):
         async with await _make_client() as client:
             # Accepted edge: fresh ticket, tag present.
             accepted = _ado_payload(work_item_id=9001, tags="ai-implement")

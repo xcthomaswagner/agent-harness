@@ -781,18 +781,18 @@ def build_span_tree(
     # L1 entries: ticket intake only (webhook received, processing, analyst,
     # dispatch). Exclude skipped/duplicate webhooks, completion callbacks,
     # and artifact consolidation — those are infrastructure noise, not intake.
-    _L1_SKIP_EVENTS = {"ado_webhook_skipped_not_edge", "agent_finished"}
-    _L1_SKIP_PHASES = {"artifact", "completion"}
+    l1_skip_events = {"ado_webhook_skipped_not_edge", "agent_finished"}
+    l1_skip_phases = {"artifact", "completion"}
     for e in entries:
         source = e.get("source", "")
         phase = e.get("phase", "")
         event = e.get("event", "")
         is_l1 = (
             source != "agent"
-            and phase not in _L1_SKIP_PHASES
+            and phase not in l1_skip_phases
             and not phase.startswith("l3_")
             and event != "error"
-            and event not in _L1_SKIP_EVENTS
+            and event not in l1_skip_events
         )
         if is_l1:
             l1_entries.append(e)

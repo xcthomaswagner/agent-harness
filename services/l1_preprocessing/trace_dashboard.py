@@ -8,10 +8,9 @@ Provides three views:
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
-
-import re
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
@@ -199,7 +198,7 @@ def _render_trace_table(traces: list[dict[str, Any]], total: int, page: int, per
             f'</div>' if dur_pct else ""
         )
 
-        _PHASE_LABELS = {
+        phase_labels = {
             "ticket_read": "Read Ticket",
             "planning": "Planning",
             "plan_review": "Plan Review",
@@ -213,11 +212,11 @@ def _render_trace_table(traces: list[dict[str, Any]], total: int, page: int, per
             "pr_created": "PR Created",
             "complete": "Complete",
         }
-        tooltip_parts = [_PHASE_LABELS.get(d["phase"], d["phase"].replace("_", " ").title()) for d in dots]
+        tooltip_parts = [phase_labels.get(d["phase"], d["phase"].replace("_", " ").title()) for d in dots]
         tooltip = " → ".join(tooltip_parts)
         dots_html = f'<div style="display:flex;gap:2px" title="{_e(tooltip)}">'
         for d in dots:
-            label = _PHASE_LABELS.get(d["phase"], d["phase"].replace("_", " ").title())
+            label = phase_labels.get(d["phase"], d["phase"].replace("_", " ").title())
             dots_html += f'<div style="width:8px;height:8px;border-radius:2px;background:{d["color"]}" title="{_e(label)}"></div>'
         dots_html += '</div>'
 
