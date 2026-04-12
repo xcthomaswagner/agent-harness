@@ -199,9 +199,26 @@ def _render_trace_table(traces: list[dict[str, Any]], total: int, page: int, per
             f'</div>' if dur_pct else ""
         )
 
-        dots_html = '<div style="display:flex;gap:2px">'
+        _PHASE_LABELS = {
+            "ticket_read": "Read Ticket",
+            "planning": "Planning",
+            "plan_review": "Plan Review",
+            "implementation": "Implementation",
+            "merge": "Merge",
+            "security_scan": "Security Scan",
+            "code_review": "Code Review",
+            "judge": "Judge",
+            "qa_validation": "QA Validation",
+            "simplify": "Simplify",
+            "pr_created": "PR Created",
+            "complete": "Complete",
+        }
+        tooltip_parts = [_PHASE_LABELS.get(d["phase"], d["phase"].replace("_", " ").title()) for d in dots]
+        tooltip = " → ".join(tooltip_parts)
+        dots_html = f'<div style="display:flex;gap:2px" title="{_e(tooltip)}">'
         for d in dots:
-            dots_html += f'<div style="width:8px;height:8px;border-radius:2px;background:{d["color"]}" title="{_e(d["phase"])}"></div>'
+            label = _PHASE_LABELS.get(d["phase"], d["phase"].replace("_", " ").title())
+            dots_html += f'<div style="width:8px;height:8px;border-radius:2px;background:{d["color"]}" title="{_e(label)}"></div>'
         dots_html += '</div>'
 
         rows += (
