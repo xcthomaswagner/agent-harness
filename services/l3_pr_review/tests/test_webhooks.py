@@ -52,7 +52,8 @@ async def test_health() -> None:
     async with await _make_client() as client:
         response = await client.get("/health")
         assert response.status_code == 200
-        assert response.json() == {"status": "ok"}
+        data = response.json()
+        assert data["status"] in ("ok", "degraded")
 
 
 # --- PR opened -> spawns review ---

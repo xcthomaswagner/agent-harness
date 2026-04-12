@@ -174,6 +174,15 @@ _JSON_FIELD_SECRETS: list[tuple[str, str]] = [
     (r"password", "password"),
     # api_key / apiKey / ApiKey.
     (r"api_?key", "api_key"),
+    # secret / client_secret / clientSecret — OAuth client credentials.
+    (r"(?:client_?)?secret", "secret"),
+    # refresh_token / refreshToken.
+    (r"refresh_?token", "refresh_token"),
+    # private_key as a JSON string (PEM block pass covers the key body,
+    # but the field name itself should trigger redaction of the value).
+    (r"private_?key", "private_key"),
+    # authorization headers logged as JSON fields.
+    (r"authorization", "authorization"),
 ]
 
 for _field_re, _canonical in _JSON_FIELD_SECRETS:

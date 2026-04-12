@@ -302,14 +302,20 @@ class SessionSpawner:
 
     @staticmethod
     def _sanitize_tag(text: str, tag: str) -> str:
-        """Escape a specific closing XML-like tag to prevent prompt injection.
+        """Escape opening and closing XML-like tags to prevent prompt injection.
 
         Case-insensitive. Used by the per-spawn wrappers below.
-        Previously ``_sanitize_user_content`` and ``_sanitize_ci_logs``
-        were copy-pasted with only the tag name differing — merging
-        them forces any future sanitizer to share the same regex
-        semantics (case-insensitive, full-tag-only match).
+        Escaping both directions prevents an attacker from injecting a
+        fake opening boundary (``<tag>``) to confuse the LLM about
+        where trusted content begins, in addition to the original
+        closing-tag escape.
         """
+        text = re.sub(
+            rf"<{tag}>",
+            f"&lt;{tag}&gt;",
+            text,
+            flags=re.IGNORECASE,
+        )
         return re.sub(
             rf"</{tag}>",
             f"&lt;/{tag}&gt;",
@@ -319,11 +325,13 @@ class SessionSpawner:
 
     @classmethod
     def _sanitize_user_content(cls, text: str) -> str:
-        return cls._sanitize_tag(text, "user_provided_content")
+        text = cls._sanitize_tag(text, "user_provided_content")
+        return cls._sanitize_tag(text, "ci_failure_logs")
 
     @classmethod
     def _sanitize_ci_logs(cls, text: str) -> str:
-        return cls._sanitize_tag(text, "ci_failure_logs")
+        text = cls._sanitize_tag(text, "ci_failure_logs")
+        return cls._sanitize_tag(text, "user_provided_content")
 
     def spawn_comment_response(
         self, pr_number: int, comment_body: str, comment_author: str,
@@ -437,7 +445,9 @@ class SessionSpawner:
             return True
         except FileNotFoundError:
             log.error("claude_cli_not_found")
+            pid_file.unlink(missing_ok=True)
             return False
         except OSError as exc:
             log.error("session_spawn_failed", error=str(exc))
+            pid_file.unlink(missing_ok=True)
             return False

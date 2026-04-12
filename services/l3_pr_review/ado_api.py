@@ -74,7 +74,7 @@ def _is_ado_human_reviewer(reviewer: dict[str, Any]) -> bool:
     harness_bot = (os.getenv("BOT_GITHUB_USERNAME") or "").strip().lower()
     if harness_bot:
         denylist.add(harness_bot)
-    return not any(name and name in denylist for name in (unique, display))
+    return not any(name and name in denylist for name in (unique, descriptor, display))
 
 
 async def get_ado_pr_state(
@@ -134,6 +134,14 @@ async def get_ado_pr_state(
 
         status = pr.get("status", "")
         last_merge_source = pr.get("lastMergeSourceCommit") or {}
+        head_sha = last_merge_source.get("commitId", "")
+        if not head_sha:
+            logger.warning(
+                "ado_pr_missing_head_sha",
+                pr_id=pr_id,
+                status=status,
+                hint="lastMergeSourceCommit absent — merge status may still be computing",
+            )
 
         # ADO mergeStatus: "succeeded", "conflicts", "notSet", etc.
         merge_status = pr.get("mergeStatus", "")
@@ -141,7 +149,7 @@ async def get_ado_pr_state(
         return {
             "author": (pr.get("createdBy") or {}).get("displayName", ""),
             "merged": status == "completed",
-            "head_sha": last_merge_source.get("commitId", ""),
+            "head_sha": head_sha,
             "approvals_count": approvals,
             "human_approvals_count": human_approvals,
             "changes_requested_count": changes_requested,

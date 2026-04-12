@@ -8,6 +8,7 @@ and triggers the integration merge.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,9 @@ import structlog
 from tracer import atomic_write_text
 
 logger = structlog.get_logger()
+
+# Safe branch name pattern — mirrors spawner._SAFE_BRANCH_RE.
+_SAFE_BRANCH_RE = re.compile(r"[A-Za-z0-9_./][A-Za-z0-9_./+-]*")
 
 DEFAULT_TRACKING_PATH = Path(__file__).resolve().parents[2] / "data" / "cross-ticket.json"
 
@@ -144,13 +148,22 @@ class CrossTicketCoordinator:
                 parent_id = item.parent_ticket_id
 
         self._save(items)
+        if parent_id:
+            logger.info(
+                "sub_ticket_status_updated",
+                sub_ticket=sub_ticket_id,
+                parent=parent_id,
+                status=status,
+            )
 
         if not parent_id:
             return None
 
-        # Check if all sub-tickets for this parent are done
+        # Check if all sub-tickets for this parent are merged.
+        # "pr_created" means the PR exists but hasn't been reviewed —
+        # integration must wait until every branch is actually merged.
         siblings = [i for i in items if i.parent_ticket_id == parent_id]
-        all_done = all(s.status in ("merged", "pr_created") for s in siblings)
+        all_done = all(s.status == "merged" for s in siblings)
 
         if all_done:
             logger.info("all_sub_tickets_complete", parent=parent_id)
@@ -180,6 +193,13 @@ class CrossTicketCoordinator:
             logger.warning("no_branches_to_integrate", parent=parent_id)
             return False
 
+        # Validate all branch names before any git operations — a branch
+        # starting with "-" would be parsed as a git option (CVE-2017-1000117).
+        for b in [target_branch, *branches]:
+            if not _SAFE_BRANCH_RE.fullmatch(b):
+                logger.error("unsafe_branch_name_rejected", branch=b[:100], parent=parent_id)
+                return False
+
         integration_branch = f"ai/{parent_id}-integration"
         log = logger.bind(parent=parent_id, branches=branches)
         log.info("starting_integration_merge")
@@ -187,15 +207,16 @@ class CrossTicketCoordinator:
         try:
             # Create integration branch from target
             subprocess.run(
-                ["git", "checkout", "-b", integration_branch, target_branch],
+                ["git", "checkout", "-b", integration_branch, "--", target_branch],
                 cwd=client_repo, check=True, capture_output=True,
             )
 
             # Merge each sub-ticket branch
             for branch in branches:
                 result = subprocess.run(
-                    ["git", "merge", "--no-ff", branch, "-m",
-                     f"merge: integrate {branch} into {integration_branch}"],
+                    ["git", "merge", "--no-ff", "-m",
+                     f"merge: integrate {branch} into {integration_branch}",
+                     "--", branch],
                     cwd=client_repo, capture_output=True,
                 )
                 if result.returncode != 0:

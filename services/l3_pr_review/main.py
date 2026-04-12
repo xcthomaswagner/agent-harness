@@ -700,6 +700,9 @@ async def _handle_pr_opened(payload: dict[str, Any]) -> None:
     """Handle a new or ready-for-review PR — spawn AI review."""
     pr = payload.get("pull_request", {})
     pr_number = pr.get("number", 0)
+    if not pr_number or not isinstance(pr_number, int) or pr_number <= 0:
+        logger.debug("pr_opened_invalid_pr_number", raw=pr.get("number"))
+        return
     pr_diff_url = pr.get("diff_url", "")
     pr_body = pr.get("body", "")
 
@@ -777,7 +780,8 @@ async def _handle_ci_failed(payload: dict[str, Any]) -> None:
     """Handle CI failure — fetch logs and spawn fix agent."""
     check = payload.get("check_suite", payload.get("check_run", {}))
     pr_numbers = [
-        pr.get("number", 0) for pr in check.get("pull_requests", [])
+        n for pr in check.get("pull_requests", [])
+        if (n := pr.get("number")) and isinstance(n, int) and n > 0
     ]
     branch = check.get("head_branch", "")
     conclusion = check.get("conclusion", "")
@@ -841,6 +845,9 @@ async def _handle_review_comment(payload: dict[str, Any]) -> None:
 
     if not comment_body.strip():
         return
+    if not pr_number or not isinstance(pr_number, int) or pr_number <= 0:
+        logger.debug("review_comment_invalid_pr_number", raw=pr_number)
+        return
 
     log = logger.bind(pr_number=pr_number, author=comment_author)
     log.info("handling_review_comment")
@@ -879,6 +886,10 @@ async def _handle_review_changes_requested(payload: dict[str, Any]) -> None:
     review_body = review.get("body", "")
     reviewer = review.get("user", {}).get("login", "unknown")
 
+    if not ctx.pr_number or ctx.pr_number <= 0:
+        logger.debug("changes_requested_invalid_pr_number", raw=ctx.pr_number)
+        return
+
     log = logger.bind(pr_number=ctx.pr_number, reviewer=reviewer)
     log.info("handling_changes_requested")
 
@@ -893,7 +904,7 @@ async def _handle_review_changes_requested(payload: dict[str, Any]) -> None:
 
     _get_spawner().spawn_comment_response(
         pr_number=ctx.pr_number,
-        comment_body=f"Changes requested by @{reviewer}:\n\n{review_body}",
+        comment_body=f"Changes requested by @{reviewer}:\n\n{review_body[:3000]}",
         comment_author=reviewer,
         branch=ctx.branch,
         repo=ctx.repo,
@@ -902,6 +913,9 @@ async def _handle_review_changes_requested(payload: dict[str, Any]) -> None:
 
 async def _handle_review_approved(payload: dict[str, Any]) -> None:
     """Handle PR approval — check if auto-merge is appropriate."""
+    if _is_bot_comment(payload, ["review", "user"]):
+        logger.debug("ignoring_bot_approval")
+        return
     ctx = _pr_handler_ctx(payload)
     reviewer = payload.get("review", {}).get("user", {}).get("login", "unknown")
 
@@ -921,6 +935,12 @@ async def _handle_review_approved(payload: dict[str, Any]) -> None:
             reason="branch does not match ai/<TICKET>-<N> pattern",
         )
         return
+
+    append_trace(
+        ctx.ticket_id, _lookup_trace_id(ctx.ticket_id),
+        "l3_approval", "review_approved",
+        pr_number=ctx.pr_number, reviewer=reviewer,
+    )
 
     ticket_type = _ticket_type_from_labels(ctx.labels)
 
@@ -1017,6 +1037,9 @@ async def _handle_pr_merged(payload: dict[str, Any]) -> None:
     """Handle PR merged — forward autonomy event to L1."""
     pr = payload.get("pull_request", {})
     pr_number = pr.get("number", 0)
+    if not pr_number or not isinstance(pr_number, int) or pr_number <= 0:
+        logger.debug("pr_merged_invalid_pr_number", raw=pr.get("number"))
+        return
     merged_at = pr.get("merged_at")
 
     log = logger.bind(pr_number=pr_number, merged_at=merged_at)
@@ -1033,7 +1056,10 @@ async def _handle_ci_passed(payload: dict[str, Any]) -> None:
     """Handle CI passing — check if PR is approved and ready for auto-merge."""
     check = payload.get("check_suite", payload.get("check_run", {}))
     pr_entries = check.get("pull_requests", []) or []
-    pr_numbers = [pr.get("number", 0) for pr in pr_entries]
+    pr_numbers = [
+        n for pr in pr_entries
+        if (n := pr.get("number")) and isinstance(n, int) and n > 0
+    ]
     branch = check.get("head_branch", "")
     head_sha = check.get("head_sha", "") or check.get("head_commit", {}).get("id", "")
     repo_full_name = (
@@ -1202,8 +1228,17 @@ async def get_backlog_status(
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> dict[str, Any]:
+    warnings: list[str] = []
+    if not L1_INTERNAL_API_TOKEN:
+        warnings.append("L1_INTERNAL_API_TOKEN not set — event forwarding disabled")
+    if not os.getenv("GITHUB_TOKEN") and not os.getenv("AGENT_GH_TOKEN"):
+        warnings.append("No GitHub token configured — PR state fetching will fail")
+    status = "degraded" if warnings else "ok"
+    result: dict[str, Any] = {"status": status}
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 @app.post("/webhooks/github", status_code=202)
@@ -1365,4 +1400,4 @@ async def ado_pr_webhook(
 
     # Other ADO event types — log but don't act yet
     logger.info("ado_event_not_yet_handled", event_type=event_type, pr_id=pr_id)
-    return {"status": "accepted", "event_type": event_type}
+    return {"status": "unhandled", "event_type": event_type}

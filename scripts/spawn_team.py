@@ -353,6 +353,7 @@ def main() -> None:
                 copied_count += 1
             except (OSError, shutil.Error) as e:
                 print(f"[spawn] WARNING: Failed to copy {local_path}: {e}")
+                att["local_path"] = ""  # clear broken path so agent doesn't chase a ghost
     if copied_count:
         # Re-write ticket.json with updated local_paths
         with (worktree_dir / ".harness" / "ticket.json").open("w") as f:

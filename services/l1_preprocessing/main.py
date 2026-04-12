@@ -228,6 +228,12 @@ def _try_claim_ticket(ticket_id: str) -> bool:
         claimed_at = _active_tickets.get(ticket_id)
         if claimed_at is not None and (now - claimed_at) < _ACTIVE_TICKET_TTL_SEC:
             return False
+        if claimed_at is not None:
+            logger.warning(
+                "ticket_claim_ttl_expired",
+                ticket_id=ticket_id,
+                stale_age_sec=round(now - claimed_at),
+            )
         _active_tickets[ticket_id] = now
         return True
 
@@ -483,7 +489,7 @@ def _extract_ticket_payload(
             branch = b
             break
 
-    if branch and settings.default_client_repo:
+    if branch and settings.default_client_repo and re.fullmatch(r"[A-Za-z0-9_./][A-Za-z0-9_./ +-]*", branch):
         candidate = (
             Path(settings.default_client_repo).parent
             / "worktrees" / branch / ".harness" / "ticket.json"
@@ -1605,11 +1611,20 @@ async def github_webhook_proxy(request: Request) -> dict[str, str]:
                 },
                 timeout=30.0,
             )
+            if response.status_code >= 400:
+                logger.warning(
+                    "l3_proxy_http_error",
+                    status=response.status_code,
+                )
+                return {"status": "l3_error", "http_status": str(response.status_code)}
             result: dict[str, str] = response.json()
             return result
         except httpx.ConnectError:
             logger.warning("l3_service_unavailable")
             return {"status": "l3_unavailable"}
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("l3_proxy_failed", error=str(exc)[:200])
+            return {"status": "l3_error"}
 
 
 class FailedUnit(BaseModel):
@@ -1811,7 +1826,9 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
             )
             log.info("screenshot_uploaded", path=str(screenshot_path))
 
-        if payload.status == "complete":
+        if payload.status not in ("complete", "partial", "escalated"):
+            log.warning("unknown_completion_status", status=payload.status)
+        elif payload.status == "complete":
             await adapter.transition_status(payload.ticket_id, "Done")
             log.info("ticket_transitioned_to_done")
         elif payload.status in ("partial", "escalated"):

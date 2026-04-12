@@ -428,16 +428,17 @@ def _find_run_start_idx(entries: list[dict[str, Any]]) -> int:
         return 0
 
     # Walk candidates from latest to earliest, pick the first one that has
-    # agent entries OR processing_started after it
+    # agent entries OR processing_started/Pipeline complete after it
     for idx in reversed(candidates):
         for j in range(idx + 1, len(entries)):
             after = entries[j]
             if after.get("source") == "agent":
                 return idx
-            if after.get("event", "") == "processing_started":
+            ev = after.get("event", "")
+            if ev == "processing_started" or "Pipeline" in ev:
                 return idx
-    # Fallback: use first candidate
-    return candidates[0]
+    # Fallback: use newest candidate (most likely the current run)
+    return candidates[-1]
 
 
 def compute_phase_durations(

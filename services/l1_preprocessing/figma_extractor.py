@@ -178,8 +178,10 @@ class FigmaExtractor:
         self, file_key: str, node_id: str
     ) -> dict[str, Any] | None:
         """Fetch a specific node from a Figma file."""
+        from urllib.parse import quote
+        encoded_id = quote(node_id, safe="")
         response = await self._fetch_with_retry(
-            f"/v1/files/{file_key}/nodes?ids={node_id}", "node_fetch"
+            f"/v1/files/{file_key}/nodes?ids={encoded_id}", "node_fetch"
         )
         if not response:
             return None

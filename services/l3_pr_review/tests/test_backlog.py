@@ -114,13 +114,15 @@ async def test_corrupt_line_skipped_and_logged(_tmp_backlog: Path) -> None:
     assert result["drained"] == 0
 
 
-async def test_unknown_endpoint_skipped(_tmp_backlog: Path) -> None:
+async def test_unknown_endpoint_preserved(_tmp_backlog: Path) -> None:
     await backlog_mod.append_backlog("bogus", {"x": 1})
 
     forwarders: dict[str, backlog_mod.ForwarderFn] = {"autonomy_event": _always_ok}
     result = await backlog_mod.drain_backlog(forwarders)
-    assert result["corrupt"] == 1
+    # Unknown endpoints are preserved for retry, not destroyed
+    assert result["remaining"] == 1
     assert result["drained"] == 0
+    assert result["corrupt"] == 0
 
 
 async def test_concurrent_appends_no_interleave(_tmp_backlog: Path) -> None:

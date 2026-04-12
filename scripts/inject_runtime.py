@@ -104,6 +104,9 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
 
     # --- Step 3: Platform profile supplements ---
     if platform_profile:
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", platform_profile):
+            print(f"Error: Invalid platform profile name: {platform_profile!r}")
+            sys.exit(1)
         profile_dir = RUNTIME_DIR / "platform-profiles" / platform_profile
 
         if not profile_dir.is_dir():

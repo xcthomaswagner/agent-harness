@@ -114,7 +114,11 @@ async def drain_backlog(forwarders: dict[str, ForwarderFn]) -> dict[str, int]:
                 continue
             forwarder = forwarders.get(endpoint)
             if forwarder is None:
-                corrupt += 1
+                # Preserve — handler may be temporarily missing (import
+                # error, registration typo). Next drain will retry once
+                # the handler is registered. Destroying the entry here
+                # would permanently lose the event with no recovery path.
+                survivors.append(entry)
                 logger.warning("l3_backlog_unknown_endpoint", endpoint=endpoint)
                 continue
             try:
@@ -150,10 +154,12 @@ async def drain_backlog(forwarders: dict[str, ForwarderFn]) -> dict[str, int]:
 
 def backlog_status() -> dict[str, Any]:
     """Return file size + count + oldest/newest timestamps."""
-    if not BACKLOG_PATH.exists():
-        return {"entries": 0, "bytes": 0, "oldest_ts": "", "newest_ts": ""}
-    size = BACKLOG_PATH.stat().st_size
-    lines = BACKLOG_PATH.read_text(encoding="utf-8").splitlines()
+    empty = {"entries": 0, "bytes": 0, "oldest_ts": "", "newest_ts": ""}
+    try:
+        size = BACKLOG_PATH.stat().st_size
+        lines = BACKLOG_PATH.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return empty
     entries: list[dict[str, Any]] = []
     for line in lines:
         if not line.strip():
@@ -186,4 +192,4 @@ async def _enforce_size_cap() -> None:
     kept = [ln for ln in lines[-keep_count:] if ln.strip()]
     content = "\n".join(kept) + ("\n" if kept else "")
     _atomic_write_text(BACKLOG_PATH, content)
-    logger.warning("l3_backlog_overflow_dropped", dropped=len(lines) - keep_count)
+    logger.warning("l3_backlog_overflow_dropped", dropped=len(lines) - len(kept))

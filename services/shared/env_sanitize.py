@@ -22,6 +22,7 @@ SECRET_VARS: frozenset[str] = frozenset({
     "WEBHOOK_SECRET",
     "REDIS_URL",
     "GITHUB_TOKEN",       # Operator's token — agents use AGENT_GH_TOKEN instead
+    "GH_TOKEN",           # Operator's gh CLI token — overwritten by AGENT_GH_TOKEN below
     "AGENT_GH_TOKEN",     # Raw agent token — injected as GH_TOKEN below
     "API_KEY",            # L1 control-plane auth — must not leak to agents
     "L1_INTERNAL_API_TOKEN",  # L1 autonomy internal API — must not leak to agents

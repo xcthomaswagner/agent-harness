@@ -46,7 +46,7 @@ def _classify_reviewer_votes(
     """
     if not reviewers:
         return None
-    votes = {int(r.get("vote", 0)) for r in reviewers}
+    votes = {int(r.get("vote") or 0) for r in reviewers}
     if votes & _ADO_VOTE_REJECTED:
         return EventType.REVIEW_CHANGES_REQUESTED
     if votes & _ADO_VOTE_APPROVED:

@@ -956,11 +956,18 @@ def get_defect_link(
 
 
 def _parse_iso(value: str) -> datetime | None:
-    """Parse ISO-8601 string; return None on empty/malformed input."""
+    """Parse ISO-8601 string; return None on empty/malformed input.
+
+    Always returns a UTC-aware datetime so callers can safely subtract
+    any two parsed values without a naive-vs-aware TypeError.
+    """
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt
     except ValueError:
         return None
 
@@ -985,19 +992,24 @@ def list_confirmed_escaped_defects(
     """
     if not pr_run_ids:
         return []
-    placeholders = ",".join("?" for _ in pr_run_ids)
-    sql = (
-        "SELECT dl.*, pr.pr_number, pr.pr_url, pr.client_profile, "
-        "pr.ticket_id, pr.merged_at "
-        "FROM defect_links dl "
-        "JOIN pr_runs pr ON pr.id = dl.pr_run_id "
-        f"WHERE dl.pr_run_id IN ({placeholders}) "
-        "AND pr.merged = 1 "
-        "AND pr.merged_at != '' "
-        "AND dl.confirmed = 1 "
-        "AND dl.category = 'escaped'"
-    )
-    rows = conn.execute(sql, tuple(pr_run_ids)).fetchall()
+    # Chunk to stay under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
+    _CHUNK = 900
+    rows: list[sqlite3.Row] = []
+    for i in range(0, len(pr_run_ids), _CHUNK):
+        chunk = pr_run_ids[i : i + _CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        sql = (
+            "SELECT dl.*, pr.pr_number, pr.pr_url, pr.client_profile, "
+            "pr.ticket_id, pr.merged_at "
+            "FROM defect_links dl "
+            "JOIN pr_runs pr ON pr.id = dl.pr_run_id "
+            f"WHERE dl.pr_run_id IN ({placeholders}) "
+            "AND pr.merged = 1 "
+            "AND pr.merged_at != '' "
+            "AND dl.confirmed = 1 "
+            "AND dl.category = 'escaped'"
+        )
+        rows.extend(conn.execute(sql, tuple(chunk)).fetchall())
 
     out: list[sqlite3.Row] = []
     for r in rows:

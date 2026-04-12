@@ -86,6 +86,13 @@ async def _paginate(
         page = body.get(envelope_key, []) if envelope_key else body
         if isinstance(page, list):
             items.extend(page)
+        else:
+            logger.warning(
+                "paginate_unexpected_body_type",
+                url=next_url,
+                envelope_key=envelope_key,
+                body_type=type(page).__name__,
+            )
         next_link = resp.links.get("next") if hasattr(resp, "links") else None
         next_url = next_link.get("url") if next_link else None
         params = None  # per_page already encoded in next_url
@@ -156,8 +163,8 @@ async def get_pr_state(
         latest_by_user: dict[str, str] = {}
         user_is_bot: dict[str, bool] = {}
         for r in reviews:
-            if r.get("state") == "COMMENTED":
-                continue  # Comments don't count as approval/change request
+            if r.get("state") in ("COMMENTED", "DISMISSED"):
+                continue  # Neither affects approval/rejection state
             reviewer = r.get("user") or {}
             user = reviewer.get("login", "")
             state = r.get("state", "")

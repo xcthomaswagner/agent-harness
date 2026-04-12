@@ -124,10 +124,13 @@ async def evaluate_and_maybe_merge(
 
     dedup = _dedup_key(repo_full_name, pr_number, head_sha)
     prior = _recent_merge_outcomes.get(dedup)
-    if prior == "merged":
-        # Already merged on this sha — don't re-merge
+    if prior in ("merged", "in_progress"):
         logger.info("auto_merge_dedup_skipped", dedup=dedup, prior=prior)
         return {"status": "deduped"}
+
+    # Claim this key immediately so concurrent webhooks for the same
+    # (repo, pr, sha) block while we evaluate + merge.
+    _record_outcome(dedup, "in_progress")
 
     log = logger.bind(
         repo=repo_full_name, pr=pr_number, ticket=ticket_id, trigger=trigger_event

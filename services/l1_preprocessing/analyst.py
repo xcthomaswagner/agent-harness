@@ -43,6 +43,21 @@ _RUBRIC_FILES: dict[TicketType, str] = {
 }
 
 
+def _safe_int(value: Any, default: int) -> int:
+    """Coerce LLM output to int, returning *default* for None/invalid.
+
+    LLM output may contain strings like "two" or floats like 1.5.
+    Rather than crashing, we fall back and log a warning.
+    """
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning("invalid_int_value", value=str(value)[:50], default=default)
+        return default
+
+
 def _safe_enum[E](enum_cls: type[E], value: str | None, default: E) -> E:
     """Convert a string to an enum member, returning *default* for invalid values.
 
@@ -311,8 +326,10 @@ class TicketAnalyst:
         """
         text = text.strip()
 
-        # Look for a ```json ... ``` or ``` ... ``` code block anywhere in the text
-        match = re.search(r"```(?:json)?\s*\n(.*?)\n\s*```", text, re.DOTALL)
+        # Look for a ```json ... ``` or ``` ... ``` code block anywhere in the text.
+        # Allow optional trailing whitespace/newline before closing fence so
+        # both "```json\n{...}\n```" and "```json\n{...}```" are matched.
+        match = re.search(r"```(?:json)?\s*\n(.*?)\s*```", text, re.DOTALL)
         if match:
             return match.group(1).strip()
 
@@ -400,8 +417,8 @@ class TicketAnalyst:
                 size_data.get("classification"),
                 SizeClassification.SMALL,
             ),
-            estimated_units=size_data.get("estimated_units", 1),
-            recommended_dev_count=size_data.get("recommended_dev_count", 1),
+            estimated_units=max(1, _safe_int(size_data.get("estimated_units"), 1)),
+            recommended_dev_count=max(1, min(10, _safe_int(size_data.get("recommended_dev_count"), 1))),
             decomposition_needed=size_data.get("decomposition_needed", False),
             rationale=size_data.get("rationale", ""),
         )

@@ -11,7 +11,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter
+import re
+
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 
 from dashboard_common import (
@@ -46,6 +48,14 @@ from tracer import (
 )
 
 router = APIRouter()
+
+
+def _safe_ticket_id(ticket_id: str) -> str:
+    """Validate ticket_id against path traversal. Mirrors main._validate_ticket_id."""
+    if not ticket_id or not re.fullmatch(r"[A-Za-z0-9_-]+", ticket_id):
+        raise HTTPException(status_code=400, detail="Invalid ticket_id")
+    return ticket_id
+
 
 # --- Langfuse Design System ---
 # Base CSS (body/typography/badge) imported from dashboard_common so
@@ -871,6 +881,7 @@ async def traces_list(
 @router.get("/traces/{ticket_id}", response_class=HTMLResponse)
 async def trace_detail(ticket_id: str) -> str:
     """Show Langfuse-style span tree for a ticket."""
+    _safe_ticket_id(ticket_id)
     return _render_detail(ticket_id)
 
 
@@ -901,4 +912,8 @@ async def traces_api(
 @router.get("/api/traces/{ticket_id}", response_model=None)
 async def trace_api(ticket_id: str) -> list[dict[str, Any]]:
     """JSON API for a single trace."""
-    return read_trace(ticket_id)
+    _safe_ticket_id(ticket_id)
+    entries = read_trace(ticket_id)
+    if not entries:
+        raise HTTPException(status_code=404, detail=f"No trace found for {ticket_id}")
+    return entries

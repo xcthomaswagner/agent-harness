@@ -111,6 +111,7 @@ class JiraAdapter:
                 content_type=att.get("mimeType", ""),
             )
             for att in fields.get("attachment", [])
+            if isinstance(att, dict)
         ]
 
         # Linked issues.
@@ -199,8 +200,10 @@ class JiraAdapter:
         return JiraAdapter._adf_to_text(value)
 
     @staticmethod
-    def _adf_to_text(node: dict[str, Any]) -> str:
+    def _adf_to_text(node: dict[str, Any], _depth: int = 0) -> str:
         """Recursively convert an ADF document node to plain text."""
+        if _depth > 100:
+            return ""  # Guard against maliciously nested ADF
         node_type = node.get("type", "")
         text_parts: list[str] = []
 
@@ -214,7 +217,7 @@ class JiraAdapter:
 
         # Process children
         for child in node.get("content", []):
-            text_parts.append(JiraAdapter._adf_to_text(child))
+            text_parts.append(JiraAdapter._adf_to_text(child, _depth + 1))
 
         joined = "".join(text_parts)
 

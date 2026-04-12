@@ -15,7 +15,10 @@ request host; ngrok-style public forwards to loopback break that.
 
 from __future__ import annotations
 
+import re
+
 DISCUSS_BASE_URL = "http://localhost:8000"
+_SAFE_TICKET_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 INVESTIGATE_COMMAND_TEMPLATE = (
     "mkdir -p /tmp/trace-{ticket_id} && \\\n"
@@ -31,4 +34,6 @@ INVESTIGATE_COMMAND_TEMPLATE = (
 
 def build_investigate_command(ticket_id: str, base_url: str = DISCUSS_BASE_URL) -> str:
     """Render the copy-paste shell snippet for a local post-mortem session."""
+    if not _SAFE_TICKET_ID.match(ticket_id):
+        raise ValueError(f"Invalid ticket_id for shell command: {ticket_id!r}")
     return INVESTIGATE_COMMAND_TEMPLATE.format(ticket_id=ticket_id, base=base_url)

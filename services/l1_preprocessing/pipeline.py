@@ -148,19 +148,25 @@ class Pipeline:
                      tokens_out=tokens_out if isinstance(tokens_out, int) else 0)
 
         # Step 2: Route based on output type
-        if output_type == "enriched":
-            if not isinstance(output, EnrichedTicket):
-                raise TypeError(f"Expected EnrichedTicket, got {type(output).__name__}")
-            return await self._handle_enriched(output, log, tid, temp_dirs)
+        try:
+            if output_type == "enriched":
+                if not isinstance(output, EnrichedTicket):
+                    raise TypeError(f"Expected EnrichedTicket, got {type(output).__name__}")
+                return await self._handle_enriched(output, log, tid, temp_dirs)
 
-        if output_type == "info_request":
-            if not isinstance(output, InfoRequest):
-                raise TypeError(f"Expected InfoRequest, got {type(output).__name__}")
-            return await self._handle_info_request(output, log)
+            if output_type == "info_request":
+                if not isinstance(output, InfoRequest):
+                    raise TypeError(f"Expected InfoRequest, got {type(output).__name__}")
+                return await self._handle_info_request(output, log)
 
-        if not isinstance(output, DecompositionPlan):
-            raise TypeError(f"Expected DecompositionPlan, got {type(output).__name__}")
-        return await self._handle_decomposition(output, log)
+            if not isinstance(output, DecompositionPlan):
+                raise TypeError(f"Expected DecompositionPlan, got {type(output).__name__}")
+            return await self._handle_decomposition(output, log)
+        finally:
+            # Ensure temp dirs are cleaned on ALL paths, not just enriched.
+            # _handle_enriched also calls cleanup internally, but the
+            # idempotent shutil.rmtree + clear() makes the double-call safe.
+            self._cleanup_temp_dirs(log, temp_dirs)
 
     def _load_client_profile(self, ticket: TicketPayload) -> ClientProfile | None:
         """Load the client profile for this ticket's project.
@@ -198,14 +204,14 @@ class Pipeline:
 
         log.info("downloading_image_attachments", count=len(image_attachments))
 
-        dest_dir = tempfile.mkdtemp(prefix=f"attachments-{ticket.id}-")
-        temp_dirs.append(dest_dir)
         # Route attachment download by source — ADO adapter lacks this method
         # so we skip for ADO tickets (attachments stay as URL-only references)
         if ticket.source == TicketSource.ADO:
             log.info("attachment_download_skipped_ado")
             downloaded = 0
         else:
+            dest_dir = tempfile.mkdtemp(prefix=f"attachments-{ticket.id}-")
+            temp_dirs.append(dest_dir)
             updated = await self._jira_adapter.download_image_attachments(
                 ticket.attachments, dest_dir
             )
@@ -326,13 +332,15 @@ class Pipeline:
             or self._settings.default_client_repo
         )
 
-        spawn_result = await self._trigger_l2(
-            enriched, ticket_path, log,
-            pipeline_mode=pipeline_mode, client_repo_override=client_repo,
-            trace_id=tid,
-            client_profile_name=profile.name if profile else "",
-        )
-        self._cleanup_temp_dirs(log, temp_dirs)
+        try:
+            spawn_result = await self._trigger_l2(
+                enriched, ticket_path, log,
+                pipeline_mode=pipeline_mode, client_repo_override=client_repo,
+                trace_id=tid,
+                client_profile_name=profile.name if profile else "",
+            )
+        finally:
+            ticket_path.unlink(missing_ok=True)
 
         append_trace(enriched.id, tid, "pipeline", "l2_dispatched",
                      pipeline_mode=pipeline_mode, spawn_triggered=spawn_result,

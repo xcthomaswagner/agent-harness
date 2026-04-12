@@ -53,6 +53,7 @@ def _cache_get(key: str) -> Any | None:
         return None
     expiry, value = entry
     if time.monotonic() >= expiry:
+        del _cache[key]
         return None
     return value
 
@@ -135,7 +136,7 @@ async def fetch_recommended_mode(
     Fail-closed to ('conservative', 'unknown') on error.
     """
     return await _cached_l1_get(
-        f"mode:{client_profile}",
+        f"mode:{client_profile}@{l1_url}",
         f"{l1_url.rstrip('/')}/api/autonomy",
         fail_closed=("conservative", "unknown"),
         parse=_parse_recommended_mode,
@@ -154,7 +155,7 @@ async def fetch_auto_merge_enabled(
 ) -> bool:
     """GET /api/autonomy/auto-merge-toggle?client_profile=. Fail-closed to False."""
     return await _cached_l1_get(
-        f"toggle:{client_profile}",
+        f"toggle:{client_profile}@{l1_url}",
         f"{l1_url.rstrip('/')}/api/autonomy/auto-merge-toggle",
         fail_closed=False,
         parse=lambda data: bool(data.get("enabled", False)),
@@ -182,7 +183,7 @@ async def fetch_profile_by_repo(
         logger.warning("l1_profile_by_repo_no_token")
         return _EMPTY_PROFILE
     return await _cached_l1_get(
-        f"profile:{repo_full_name}",
+        f"profile:{repo_full_name}@{l1_url}",
         f"{l1_url.rstrip('/')}/api/internal/autonomy/profile-by-repo",
         fail_closed=_EMPTY_PROFILE,
         parse=lambda data: data,
@@ -284,7 +285,7 @@ _GATES: list[_Gate] = [
         "mergeable",
         REASON_NOT_MERGEABLE,
         lambda ctx, pr: bool(pr.get("mergeable"))
-        and (pr.get("mergeable_state") or "").lower() == "clean",
+        and (pr.get("mergeable_state") or "").lower() in ("clean", "succeeded"),
     ),
 ]
 

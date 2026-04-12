@@ -73,6 +73,8 @@ class AdoAdapter:
         # Type mapping
         raw_type = (fields.get("System.WorkItemType", "") or "").lower()
         ticket_type = _ADO_TYPE_MAP.get(raw_type, TicketType.TASK)
+        if raw_type and raw_type not in _ADO_TYPE_MAP:
+            logger.warning("ado_unknown_work_item_type", raw_type=raw_type)
 
         # Extract acceptance criteria (HTML field in ADO)
         raw_ac = fields.get("Microsoft.VSTS.Common.AcceptanceCriteria", "") or ""
@@ -243,7 +245,14 @@ class AdoAdapter:
         response = await self._client.post(
             url, json=body, headers={"Content-Type": "application/json"}
         )
-        response.raise_for_status()
+        if response.status_code >= 400:
+            logger.warning(
+                "ado_comment_failed",
+                ticket_id=ticket_id,
+                status=response.status_code,
+                body=response.text[:200],
+            )
+            response.raise_for_status()
         logger.info("ado_comment_posted", ticket_id=ticket_id)
 
     async def update_fields(self, ticket_id: str, fields: dict[str, str]) -> None:
@@ -322,7 +331,13 @@ class AdoAdapter:
         # First, get current tags
         url = f"/{project}/_apis/wit/workItems/{wi_id}?api-version=7.1&$select=System.Tags"
         response = await self._client.get(url)
-        response.raise_for_status()
+        if response.status_code >= 400:
+            logger.warning(
+                "ado_get_tags_failed",
+                ticket_id=ticket_id,
+                status=response.status_code,
+            )
+            response.raise_for_status()
         current_tags = response.json().get("fields", {}).get("System.Tags", "")
 
         # Idempotency guard — case-insensitive exact match on any

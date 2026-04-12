@@ -92,8 +92,8 @@ def fmt_ts(ts: str) -> str:
 
 
 def badge(text: str, cls: str) -> str:
-    """Render a badge span with escaped text."""
-    return f'<span class="badge {cls}">{escape_html(text)}</span>'
+    """Render a badge span with escaped text and class."""
+    return f'<span class="badge {escape_html(cls)}">{escape_html(text)}</span>'
 
 
 def fmt_pct(value: float | None) -> str:

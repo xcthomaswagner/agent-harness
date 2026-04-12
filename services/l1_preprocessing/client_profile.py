@@ -30,22 +30,23 @@ class ClientProfile:
 
     @property
     def ticket_source(self) -> dict[str, Any]:
-        result: dict[str, Any] = self._data.get("ticket_source", {})
-        return result
+        val = self._data.get("ticket_source", {})
+        return val if isinstance(val, dict) else {}
 
     @property
     def source_control(self) -> dict[str, Any]:
-        result: dict[str, Any] = self._data.get("source_control", {})
-        return result
+        val = self._data.get("source_control", {})
+        return val if isinstance(val, dict) else {}
 
     @property
     def ci_pipeline(self) -> dict[str, Any]:
-        result: dict[str, Any] = self._data.get("ci_pipeline", {})
-        return result
+        val = self._data.get("ci_pipeline", {})
+        return val if isinstance(val, dict) else {}
 
     @property
     def client_repo_path(self) -> str:
-        return str(self._data.get("client_repo", {}).get("local_path", ""))
+        val = self._data.get("client_repo", {})
+        return str(val.get("local_path", "")) if isinstance(val, dict) else ""
 
     @property
     def ai_label(self) -> str:

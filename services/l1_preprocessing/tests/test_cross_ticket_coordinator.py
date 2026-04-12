@@ -127,7 +127,7 @@ class TestCrossTicketCoordinator:
         # transition, otherwise all_done can never be True.
         coordinator.update_sub_ticket("S-1", "merged", branch="ai/S-1")
         result = coordinator.update_sub_ticket(
-            "S-2", "pr_created", pr_url="https://pr/2"
+            "S-2", "merged", pr_url="https://pr/2"
         )
         assert result == "P-GHOST"
 
@@ -143,7 +143,7 @@ class TestCrossTicketCoordinator:
     ) -> None:
         coordinator.register_sub_tickets("P-3", ["S-6", "S-7"])
         coordinator.update_sub_ticket("S-6", "merged", branch="ai/S-6")
-        result = coordinator.update_sub_ticket("S-7", "pr_created", pr_url="https://pr/7")
+        result = coordinator.update_sub_ticket("S-7", "merged", pr_url="https://pr/7")
         assert result == "P-3"
 
     def test_update_unknown_sub_ticket(
