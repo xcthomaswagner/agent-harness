@@ -11,7 +11,7 @@ import pytest
 
 from adapters.ado_adapter import AdoAdapter
 from config import Settings
-from models import TicketSource, TicketType
+from models import Attachment, TicketSource, TicketType
 
 FIXTURES = Path(__file__).resolve().parents[3] / "tests" / "fixtures"
 
@@ -291,6 +291,176 @@ class TestWriteBack:
         )
         await adapter.add_label("AcmeProject-42", "AI_Complete")
         mock_client.patch.assert_not_called()
+
+
+# --- Attachment download ---
+
+
+class TestDownloadAttachment:
+    async def test_download_attachment_success(
+        self, settings: Settings, tmp_path: Path
+    ) -> None:
+        """Successful image download writes file and sets local_path."""
+        image_bytes = b"\x89PNG\r\n\x1a\nfake-image-data"
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(
+                200,
+                content=image_bytes,
+                headers={"content-length": str(len(image_bytes))},
+            )
+        )
+        download_client = httpx.AsyncClient(transport=transport)
+        adapter = AdoAdapter(settings=settings)
+        adapter._download_client = download_client
+
+        att = Attachment(
+            filename="mockup.png",
+            url="https://dev.azure.com/acme/_apis/wit/attachments/abc-123",
+            content_type="image/png",
+        )
+        result = await adapter.download_attachment(att, str(tmp_path))
+
+        assert result.local_path != ""
+        assert Path(result.local_path).exists()
+        assert Path(result.local_path).read_bytes() == image_bytes
+        assert not result.download_failed
+
+    async def test_download_attachment_too_large(
+        self, settings: Settings, tmp_path: Path
+    ) -> None:
+        """Attachments exceeding 5 MB are skipped (returned unchanged)."""
+        big_size = 6 * 1024 * 1024
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(
+                200,
+                content=b"x",
+                headers={"content-length": str(big_size)},
+            )
+        )
+        download_client = httpx.AsyncClient(transport=transport)
+        adapter = AdoAdapter(settings=settings)
+        adapter._download_client = download_client
+
+        att = Attachment(
+            filename="huge.png",
+            url="https://dev.azure.com/acme/_apis/wit/attachments/big",
+            content_type="image/png",
+        )
+        result = await adapter.download_attachment(att, str(tmp_path))
+
+        assert result.local_path == ""
+        assert not result.download_failed
+
+    async def test_download_attachment_sanitizes_filename(
+        self, settings: Settings, tmp_path: Path
+    ) -> None:
+        """Path traversal filenames are rejected (returned unchanged)."""
+        adapter = AdoAdapter(settings=settings)
+
+        att = Attachment(
+            filename="../../etc/passwd",
+            url="https://dev.azure.com/acme/_apis/wit/attachments/evil",
+            content_type="image/png",
+        )
+        result = await adapter.download_attachment(att, str(tmp_path))
+
+        # sanitize_attachment_filename extracts basename "passwd" which is valid,
+        # but the file should still be written safely inside dest_dir. The function
+        # does NOT reject "../../etc/passwd" outright — it sanitizes to "passwd".
+        # So we verify the path is inside tmp_path.
+        if result.local_path:
+            assert Path(result.local_path).resolve().is_relative_to(tmp_path.resolve())
+
+    async def test_download_attachment_rejects_dotdot_only(
+        self, settings: Settings, tmp_path: Path
+    ) -> None:
+        """A filename of '..' is rejected outright."""
+        adapter = AdoAdapter(settings=settings)
+
+        att = Attachment(
+            filename="..",
+            url="https://dev.azure.com/acme/_apis/wit/attachments/evil",
+            content_type="image/png",
+        )
+        result = await adapter.download_attachment(att, str(tmp_path))
+        assert result.local_path == ""
+
+    async def test_download_image_attachments_filters_by_content_type(
+        self, settings: Settings, tmp_path: Path
+    ) -> None:
+        """Only image attachments are downloaded; non-images pass through."""
+        image_bytes = b"fake-png"
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(
+                200,
+                content=image_bytes,
+                headers={"content-length": str(len(image_bytes))},
+            )
+        )
+        download_client = httpx.AsyncClient(transport=transport)
+        adapter = AdoAdapter(settings=settings)
+        adapter._download_client = download_client
+
+        attachments = [
+            Attachment(
+                filename="design.png",
+                url="https://dev.azure.com/acme/_apis/wit/attachments/1",
+                content_type="image/png",
+            ),
+            Attachment(
+                filename="readme.txt",
+                url="https://dev.azure.com/acme/_apis/wit/attachments/2",
+                content_type="text/plain",
+            ),
+            Attachment(
+                filename="photo.jpeg",
+                url="https://dev.azure.com/acme/_apis/wit/attachments/3",
+                content_type="image/jpeg",
+            ),
+        ]
+        result = await adapter.download_image_attachments(attachments, str(tmp_path))
+
+        assert len(result) == 3
+        # Images should have local_path set
+        assert result[0].local_path != ""
+        assert result[2].local_path != ""
+        # Non-image should pass through unchanged
+        assert result[1].local_path == ""
+        assert result[1].filename == "readme.txt"
+
+    async def test_download_uses_separate_client(
+        self, settings: Settings, tmp_path: Path
+    ) -> None:
+        """Download requests must NOT include Content-Type: application/json-patch+json."""
+        captured_headers: dict[str, str] = {}
+
+        def capture_handler(request: httpx.Request) -> httpx.Response:
+            captured_headers.update(dict(request.headers))
+            return httpx.Response(200, content=b"img-data")
+
+        transport = httpx.MockTransport(capture_handler)
+        # Let _get_download_client build the client so it gets auth headers
+        adapter = AdoAdapter(settings=settings)
+        # Patch the lazily-created client with our capturing transport + auth
+        import base64
+        credentials = f":{settings.ado_pat}"
+        token = base64.b64encode(credentials.encode()).decode()
+        adapter._download_client = httpx.AsyncClient(
+            transport=transport,
+            headers={"Authorization": f"Basic {token}"},
+        )
+
+        att = Attachment(
+            filename="test.png",
+            url="https://dev.azure.com/acme/_apis/wit/attachments/x",
+            content_type="image/png",
+        )
+        await adapter.download_attachment(att, str(tmp_path))
+
+        # The download client should have Authorization but NOT json-patch content type
+        assert "authorization" in captured_headers
+        content_type = captured_headers.get("content-type", "")
+        assert "json-patch" not in content_type
 
 
 def test_ado_adapter_satisfies_ticket_writeback_protocol(

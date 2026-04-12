@@ -1,14 +1,16 @@
-"""Auto-merge orchestrator. Ties policy + GitHub API + L1 audit together."""
+"""Auto-merge orchestrator. Ties policy + GitHub/ADO API + L1 audit together."""
 from __future__ import annotations
 
 import os
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 import structlog
 
+from ado_api import complete_ado_pr, get_ado_pr_state
 from autonomy_policy import (
     AutoMergeContext,
     evaluate_policy_gates,
@@ -108,10 +110,52 @@ async def evaluate_and_maybe_merge(
     internal_token: str | None = None,
     github_token: str | None = None,
 ) -> dict[str, Any]:
-    """Evaluate auto-merge policy for a PR. Executes the merge if all gates
+    """Evaluate auto-merge policy for a GitHub PR. Executes the merge if all gates
     pass AND global kill switch is on. Otherwise records a dry_run decision.
 
     Idempotent: dedup by (repo, pr_number, head_sha).
+    """
+    async def _fetch() -> dict[str, Any] | None:
+        return await get_pr_state(
+            repo_full_name, pr_number, github_token=github_token
+        )
+
+    async def _merge(sha: str) -> tuple[bool, str]:
+        return await merge_pr(
+            repo_full_name, pr_number, sha, github_token=github_token
+        )
+
+    return await _evaluate_core(
+        pr_fetcher=_fetch,
+        merger=_merge,
+        repo_full_name=repo_full_name,
+        pr_number=pr_number,
+        head_sha=head_sha,
+        ticket_id=ticket_id,
+        ticket_type=ticket_type,
+        trigger_event=trigger_event,
+        l1_url=l1_url,
+        internal_token=internal_token,
+    )
+
+
+async def _evaluate_core(
+    *,
+    pr_fetcher: Callable[[], Awaitable[dict[str, Any] | None]],
+    merger: Callable[[str], Awaitable[tuple[bool, str]]],
+    repo_full_name: str,
+    pr_number: int,
+    head_sha: str,
+    ticket_id: str,
+    ticket_type: str,
+    trigger_event: str,
+    l1_url: str | None = None,
+    internal_token: str | None = None,
+) -> dict[str, Any]:
+    """Shared policy evaluation core for both GitHub and ADO.
+
+    ``pr_fetcher`` returns a normalized PR state dict (or None on failure).
+    ``merger`` accepts a head_sha and returns (success, message).
     """
     l1_url_resolved: str = l1_url or os.getenv(
         "L1_SERVICE_URL"
@@ -128,8 +172,6 @@ async def evaluate_and_maybe_merge(
         logger.info("auto_merge_dedup_skipped", dedup=dedup, prior=prior)
         return {"status": "deduped"}
 
-    # Claim this key immediately so concurrent webhooks for the same
-    # (repo, pr, sha) block while we evaluate + merge.
     _record_outcome(dedup, "in_progress")
 
     log = logger.bind(
@@ -147,10 +189,10 @@ async def evaluate_and_maybe_merge(
 
     # Fetch mode + toggle + PR state
     mode, dq = await fetch_recommended_mode(client_profile, l1_url=l1_url_resolved)
-    profile_enabled = await fetch_auto_merge_enabled(client_profile, l1_url=l1_url_resolved)
-    pr_state = await get_pr_state(
-        repo_full_name, pr_number, github_token=github_token
+    profile_enabled = await fetch_auto_merge_enabled(
+        client_profile, l1_url=l1_url_resolved
     )
+    pr_state = await pr_fetcher()
     if pr_state is None:
         log.warning("auto_merge_pr_state_fetch_failed")
         await _record_decision(
@@ -170,6 +212,22 @@ async def evaluate_and_maybe_merge(
         )
         return {"status": "failed", "reason": "pr_state_fetch_failed"}
 
+    # When the caller didn't know the head_sha (e.g., build.complete
+    # webhook), upgrade the dedup key now that we have the real sha from
+    # the PR state. Without this, all evaluations for the same PR with
+    # head_sha="" collide on a single dedup key and block legitimate
+    # re-evaluations after force-pushes or build reruns.
+    pr_state_sha = pr_state.get("head_sha") or ""
+    if not head_sha and pr_state_sha:
+        old_dedup = dedup
+        head_sha = pr_state_sha
+        dedup = _dedup_key(repo_full_name, pr_number, head_sha)
+        # Transfer the in_progress marker to the real key and remove the
+        # empty-sha placeholder so future empty-sha calls (e.g., after
+        # a force-push + rebuild) don't collide on the old key.
+        _record_outcome(dedup, "in_progress")
+        _recent_merge_outcomes.pop(old_dedup, None)
+
     ctx = AutoMergeContext(
         recommended_mode=mode,
         data_quality_status=dq,
@@ -183,15 +241,9 @@ async def evaluate_and_maybe_merge(
 
     should_merge, reason, gates = evaluate_policy_gates(ctx, pr_state)
 
-    # Execute (or dry-run)
     if should_merge:
         if global_enabled:
-            ok, msg = await merge_pr(
-                repo_full_name,
-                pr_number,
-                pr_state["head_sha"],
-                github_token=github_token,
-            )
+            ok, msg = await merger(pr_state["head_sha"])
             decision = "merged" if ok else "failed"
             reason = msg if not ok else reason
         else:
@@ -223,17 +275,57 @@ async def evaluate_and_maybe_merge(
         dry_run=not global_enabled,
     )
 
-    # Record outcome so "merged" blocks future attempts on same sha.
-    # Also record against the pr_state sha if it differs from the
-    # webhook-delivered head_sha — a force-push between the webhook
-    # and ``get_pr_state`` means the merge actually executed against
-    # ``pr_state["head_sha"]``, not ``head_sha``, and a subsequent
-    # webhook retry for either sha should be deduped.
     _record_outcome(dedup, decision)
-    pr_state_sha = pr_state.get("head_sha") or ""
     if pr_state_sha and pr_state_sha != head_sha:
         _record_outcome(
             _dedup_key(repo_full_name, pr_number, pr_state_sha), decision
         )
 
     return {"status": decision, "reason": reason, "dry_run": not global_enabled}
+
+
+async def evaluate_and_maybe_merge_ado(
+    *,
+    org_url: str,
+    project: str,
+    repo_id: str,
+    pr_id: int,
+    head_sha: str,
+    ticket_id: str,
+    ticket_type: str,
+    trigger_event: str,
+    checks_passed: bool | None = None,
+    l1_url: str | None = None,
+    internal_token: str | None = None,
+    ado_pat: str | None = None,
+) -> dict[str, Any]:
+    """Evaluate auto-merge policy for an ADO PR.
+
+    Parallel to ``evaluate_and_maybe_merge`` but uses ADO APIs for
+    PR state fetching and PR completion.
+    """
+    repo_full_name = f"{project}/{repo_id}"
+
+    async def _fetch() -> dict[str, Any] | None:
+        return await get_ado_pr_state(
+            org_url, project, repo_id, pr_id,
+            checks_passed=checks_passed, ado_pat=ado_pat,
+        )
+
+    async def _merge(sha: str) -> tuple[bool, str]:
+        return await complete_ado_pr(
+            org_url, project, repo_id, pr_id, sha, ado_pat=ado_pat,
+        )
+
+    return await _evaluate_core(
+        pr_fetcher=_fetch,
+        merger=_merge,
+        repo_full_name=repo_full_name,
+        pr_number=pr_id,
+        head_sha=head_sha,
+        ticket_id=ticket_id,
+        ticket_type=ticket_type,
+        trigger_event=trigger_event,
+        l1_url=l1_url,
+        internal_token=internal_token,
+    )

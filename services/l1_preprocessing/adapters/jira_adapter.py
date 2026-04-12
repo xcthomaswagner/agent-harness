@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 import structlog
 
+from adapters.attachment_utils import sanitize_attachment_filename
 from config import Settings
 from models import (
     IMAGE_CONTENT_TYPES,
@@ -22,32 +23,6 @@ from models import (
 )
 
 logger = structlog.get_logger()
-
-def _sanitize_attachment_filename(raw: str) -> str | None:
-    """Turn an untrusted webhook filename into a safe basename or None.
-
-    Rejects empty strings, ``.``, ``..``, anything containing NUL bytes,
-    and (defence in depth) any value whose basename doesn't equal the
-    input after slashes are stripped. The returned value is always a
-    bare filename with no directory components — safe to use as the
-    right-hand side of ``dest / name`` and write to disk.
-
-    The caller should still verify the resolved path is inside the
-    intended destination directory; this helper handles the common
-    cases (path traversal via ``..``, absolute paths, NUL bytes) but
-    isn't a substitute for the resolve()/relative_to() check.
-    """
-    if not isinstance(raw, str) or not raw:
-        return None
-    if "\x00" in raw:
-        return None
-    # Take the last path component. ``Path("/etc/passwd").name`` ->
-    # ``passwd``; ``Path("../foo").name`` -> ``foo``; ``Path("..").name``
-    # -> ``..`` which we reject below.
-    name = Path(raw).name
-    if not name or name in (".", ".."):
-        return None
-    return name
 
 
 # Jira issue type name -> our TicketType
@@ -443,7 +418,7 @@ class JiraAdapter:
         # bytes outside the temp dir. Take only the basename, drop path
         # separators and NUL bytes, reject empty/dot results, and after
         # constructing the path assert it resolves inside ``dest``.
-        safe_name = _sanitize_attachment_filename(attachment.filename)
+        safe_name = sanitize_attachment_filename(attachment.filename)
         if safe_name is None:
             log.warning(
                 "attachment_download_skipped",

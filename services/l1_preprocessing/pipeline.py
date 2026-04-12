@@ -37,7 +37,7 @@ from models import (
     TicketSource,
     classify_analyst_output,
 )
-from tracer import append_trace, generate_trace_id
+from tracer import BILLING_API, append_trace, generate_trace_id
 
 logger = structlog.get_logger()
 
@@ -145,7 +145,8 @@ class Pipeline:
         append_trace(ticket.id, tid, "analyst", "analyst_completed",
                      output_type=output_type,
                      tokens_in=tokens_in if isinstance(tokens_in, int) else 0,
-                     tokens_out=tokens_out if isinstance(tokens_out, int) else 0)
+                     tokens_out=tokens_out if isinstance(tokens_out, int) else 0,
+                     billing=BILLING_API)
 
         # Step 2: Route based on output type
         try:
@@ -204,19 +205,18 @@ class Pipeline:
 
         log.info("downloading_image_attachments", count=len(image_attachments))
 
-        # Route attachment download by source — ADO adapter lacks this method
-        # so we skip for ADO tickets (attachments stay as URL-only references)
+        dest_dir = tempfile.mkdtemp(prefix=f"attachments-{ticket.id}-")
+        temp_dirs.append(dest_dir)
         if ticket.source == TicketSource.ADO:
-            log.info("attachment_download_skipped_ado")
-            downloaded = 0
+            updated = await self._ado_adapter.download_image_attachments(
+                ticket.attachments, dest_dir
+            )
         else:
-            dest_dir = tempfile.mkdtemp(prefix=f"attachments-{ticket.id}-")
-            temp_dirs.append(dest_dir)
             updated = await self._jira_adapter.download_image_attachments(
                 ticket.attachments, dest_dir
             )
-            ticket.attachments = updated
-            downloaded = sum(1 for a in updated if a.local_path)
+        ticket.attachments = updated
+        downloaded = sum(1 for a in updated if a.local_path)
         log.info(
             "image_attachments_downloaded",
             downloaded=downloaded,

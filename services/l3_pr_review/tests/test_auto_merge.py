@@ -8,7 +8,7 @@ import pytest
 
 import auto_merge
 import autonomy_policy as ap
-from auto_merge import evaluate_and_maybe_merge
+from auto_merge import evaluate_and_maybe_merge, evaluate_and_maybe_merge_ado
 
 
 @pytest.fixture(autouse=True)
@@ -350,3 +350,127 @@ async def test_dedup_records_both_webhook_and_pr_state_sha(
         trigger_event="ci_passed",
     )
     assert r3["status"] == "deduped"
+
+
+# --- ADO auto-merge ---
+
+
+def _patch_ado_fetches(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    profile: dict[str, Any] | None = None,
+    mode: tuple[str, str] = ("semi_autonomous", "good"),
+    toggle: bool = True,
+    pr_state: dict[str, Any] | None = None,
+    merge_result: tuple[bool, str] = (True, "merged"),
+) -> dict[str, AsyncMock]:
+    """Patch remote calls for ADO auto-merge tests."""
+    prof = profile if profile is not None else {
+        "client_profile": "acme",
+        "low_risk_ticket_types": ["bug", "chore"],
+        "auto_merge_enabled_yaml": True,
+    }
+    mocks = {
+        "fetch_profile_by_repo": AsyncMock(return_value=prof),
+        "fetch_recommended_mode": AsyncMock(return_value=mode),
+        "fetch_auto_merge_enabled": AsyncMock(return_value=toggle),
+        "get_ado_pr_state": AsyncMock(
+            return_value=pr_state if pr_state is not None else _good_pr_state()
+        ),
+        "complete_ado_pr": AsyncMock(return_value=merge_result),
+        "_record_decision": AsyncMock(return_value=None),
+    }
+    for name, m in mocks.items():
+        monkeypatch.setattr(auto_merge, name, m)
+    return mocks
+
+
+async def test_evaluate_ado_calls_ado_apis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADO path calls get_ado_pr_state and complete_ado_pr, not GitHub equivalents."""
+    monkeypatch.setenv("AUTO_MERGE_ENABLED", "true")
+    mocks = _patch_ado_fetches(monkeypatch)
+
+    result = await evaluate_and_maybe_merge_ado(
+        org_url="https://dev.azure.com/org",
+        project="proj",
+        repo_id="repo-id",
+        pr_id=1,
+        head_sha="abc123",
+        ticket_id="T-1",
+        ticket_type="bug",
+        trigger_event="review_approved",
+    )
+    assert result["status"] == "merged"
+    assert mocks["get_ado_pr_state"].call_count == 1
+    assert mocks["complete_ado_pr"].call_count == 1
+
+
+async def test_evaluate_ado_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADO dry_run behavior matches GitHub path."""
+    monkeypatch.setenv("AUTO_MERGE_ENABLED", "false")
+    mocks = _patch_ado_fetches(monkeypatch)
+
+    result = await evaluate_and_maybe_merge_ado(
+        org_url="https://dev.azure.com/org",
+        project="proj",
+        repo_id="repo-id",
+        pr_id=2,
+        head_sha="sha2",
+        ticket_id="T-2",
+        ticket_type="bug",
+        trigger_event="review_approved",
+    )
+    assert result["status"] == "dry_run"
+    assert result["dry_run"] is True
+    assert mocks["complete_ado_pr"].call_count == 0
+
+
+async def test_evaluate_ado_empty_head_sha_upgrades_dedup_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When head_sha is empty (build.complete), dedup key upgrades to real sha
+    after pr_state is fetched. Two successive calls with empty head_sha but
+    different pr_state shas must NOT collide."""
+    mocks = _patch_ado_fetches(monkeypatch)
+
+    # First call: empty head_sha, pr_state returns "sha_from_pr_1"
+    pr_state_1 = _good_pr_state()
+    pr_state_1["head_sha"] = "sha_from_pr_1"
+    mocks["get_ado_pr_state"].return_value = pr_state_1
+
+    r1 = await evaluate_and_maybe_merge_ado(
+        org_url="https://dev.azure.com/org",
+        project="proj",
+        repo_id="repo-id",
+        pr_id=42,
+        head_sha="",
+        ticket_id="T-42",
+        ticket_type="bug",
+        trigger_event="ci_passed",
+    )
+    assert r1["status"] == "dry_run"
+
+    # Second call: empty head_sha again, but pr_state returns a NEW sha
+    # (simulating a force-push + rebuild). Must NOT be deduped.
+    pr_state_2 = _good_pr_state()
+    pr_state_2["head_sha"] = "sha_from_pr_2"
+    mocks["get_ado_pr_state"].return_value = pr_state_2
+
+    r2 = await evaluate_and_maybe_merge_ado(
+        org_url="https://dev.azure.com/org",
+        project="proj",
+        repo_id="repo-id",
+        pr_id=42,
+        head_sha="",
+        ticket_id="T-42",
+        ticket_type="bug",
+        trigger_event="ci_passed",
+    )
+    assert r2["status"] == "dry_run", (
+        f"Expected dry_run (re-evaluation), got {r2['status']}. "
+        "Empty head_sha dedup collision?"
+    )

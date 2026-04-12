@@ -77,12 +77,55 @@ def _is_ado_human_reviewer(reviewer: dict[str, Any]) -> bool:
     return not any(name and name in denylist for name in (unique, descriptor, display))
 
 
+async def _resolve_checks_passed(
+    org_url: str,
+    project: str,
+    repo_id: str,
+    pr_id: int,
+    *,
+    checks_passed: bool | None,
+    headers: dict[str, str],
+    client: httpx.AsyncClient,
+) -> bool:
+    """Resolve CI status for an ADO PR.
+
+    When ``checks_passed`` is provided (e.g. from a build.complete webhook),
+    use it directly. Otherwise query the ADO build status API for the latest
+    build on the PR's merge ref.
+    """
+    if checks_passed is not None:
+        return checks_passed
+
+    build_url = (
+        f"{org_url.rstrip('/')}/{project}/_apis/build/builds"
+        f"?repositoryId={repo_id}"
+        f"&branchName=refs/pull/{pr_id}/merge"
+        f"&$top=1&api-version=7.1"
+    )
+    try:
+        resp = await client.get(build_url, headers=headers)
+        if resp.status_code != 200:
+            logger.debug(
+                "ado_build_status_fetch_failed",
+                status=resp.status_code, pr_id=pr_id,
+            )
+            return False
+        builds = resp.json().get("value", [])
+        if not builds:
+            return False
+        return str(builds[0].get("result", "")).lower() == "succeeded"
+    except httpx.RequestError:
+        logger.debug("ado_build_status_request_error", pr_id=pr_id)
+        return False
+
+
 async def get_ado_pr_state(
     org_url: str,
     project: str,
     repo_id: str,
     pr_id: int,
     *,
+    checks_passed: bool | None = None,
     ado_pat: str | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any] | None:
@@ -170,12 +213,65 @@ async def get_ado_pr_state(
             # correctly evaluate to False.
             "mergeable": merge_status == "succeeded",
             "mergeable_state": merge_status,
-            "checks_passed": False,  # ADO Pipelines CI not yet integrated
+            "checks_passed": await _resolve_checks_passed(
+                org_url, project, repo_id, pr_id,
+                checks_passed=checks_passed, headers=headers, client=c,
+            ),
             "labels": [label.get("name", "") for label in pr.get("labels", [])],
         }
     except httpx.RequestError:
         logger.exception("ado_api_request_error", pr_id=pr_id)
         return None
+    finally:
+        if owns_client:
+            await c.aclose()
+
+
+async def post_ado_pr_comment(
+    org_url: str,
+    project: str,
+    repo_id: str,
+    pr_id: int,
+    comment_text: str,
+    *,
+    ado_pat: str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> tuple[bool, str]:
+    """Post a comment to an ADO pull request via the threads API.
+
+    Creates a new comment thread with the given text.
+
+    Returns (success, message).
+    """
+    pat = ado_pat or os.getenv("ADO_PAT", "")
+    if not pat:
+        return False, "no_pat"
+
+    headers = _ado_auth_headers(pat)
+    url = (
+        f"{org_url.rstrip('/')}/{project}/_apis/git/repositories/{repo_id}"
+        f"/pullrequests/{pr_id}/threads?api-version=7.1"
+    )
+    body = {
+        "comments": [
+            {
+                "parentCommentId": 0,
+                "content": comment_text,
+                "commentType": 1,
+            }
+        ],
+        "status": 1,
+    }
+
+    owns_client = client is None
+    c = client or httpx.AsyncClient(timeout=10.0)
+    try:
+        resp = await c.post(url, headers=headers, json=body)
+        if resp.status_code in (200, 201):
+            return True, "posted"
+        return False, f"http_{resp.status_code}"
+    except httpx.RequestError as exc:
+        return False, f"request_error:{exc.__class__.__name__}"
     finally:
         if owns_client:
             await c.aclose()

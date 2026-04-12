@@ -25,8 +25,9 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "l1_preprocessing"))
 from tracer import append_trace, generate_trace_id, read_trace
 
+from ado_api import post_ado_pr_comment
 from ado_event_classifier import classify_ado_event
-from auto_merge import evaluate_and_maybe_merge
+from auto_merge import evaluate_and_maybe_merge, evaluate_and_maybe_merge_ado
 from backlog import append_backlog, backlog_status, drain_backlog
 from event_classifier import EventType, classify_event
 from github_api import get_pr_state
@@ -1353,6 +1354,251 @@ async def _handle_ado_pr_opened(payload: dict[str, Any]) -> None:
     log.info("ado_pr_opened_logged", note="spawner integration pending")
 
 
+def _ado_pr_context(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract common ADO PR context fields from a webhook payload."""
+    resource = payload.get("resource", {})
+    repo = resource.get("repository", {})
+    return {
+        "pr_id": resource.get("pullRequestId", 0),
+        "repo_id": repo.get("id", ""),
+        "repo_name": repo.get("name", ""),
+        "project": repo.get("project", {}).get("name", ""),
+        "org_url": _ado_org_url_from_payload(payload),
+        "title": resource.get("title", ""),
+        "head_sha": (resource.get("lastMergeSourceCommit") or {}).get("commitId", ""),
+        "ticket_id": _ticket_id_from_ado_payload(payload),
+        "labels": [label.get("name", "") for label in resource.get("labels", [])],
+    }
+
+
+def _ado_org_url_from_payload(payload: dict[str, Any]) -> str:
+    """Extract the ADO org URL from the webhook payload's resourceContainers."""
+    containers = payload.get("resourceContainers", {})
+    collection = containers.get("collection", {})
+    base_url = collection.get("baseUrl", "")
+    if base_url:
+        return base_url.rstrip("/")
+    # Fallback: use ADO_ORG_URL env var
+    return os.getenv("ADO_ORG_URL", "").rstrip("/")
+
+
+async def _handle_ado_review_approved(payload: dict[str, Any]) -> None:
+    """Handle ADO PR approval — evaluate auto-merge."""
+    ctx = _ado_pr_context(payload)
+    ticket_id = ctx["ticket_id"]
+
+    log = logger.bind(
+        pr_id=ctx["pr_id"],
+        project=ctx["project"],
+        ticket_id=ticket_id,
+        source_control_type="azure-repos",
+    )
+    log.info("handling_ado_review_approved")
+
+    if not ticket_id:
+        log.info(
+            "ado_pr_approved_skipped_non_ai_branch",
+            reason="branch does not match ai/<TICKET>-<N> pattern",
+        )
+        return
+
+    append_trace(
+        ticket_id, _lookup_trace_id(ticket_id),
+        "l3_approval", "ado_review_approved",
+        pr_id=ctx["pr_id"],
+        source_control_type="azure-repos",
+    )
+
+    ticket_type = _ticket_type_from_labels(ctx["labels"])
+
+    try:
+        await evaluate_and_maybe_merge_ado(
+            org_url=ctx["org_url"],
+            project=ctx["project"],
+            repo_id=ctx["repo_id"],
+            pr_id=ctx["pr_id"],
+            head_sha=ctx["head_sha"],
+            ticket_id=ticket_id,
+            ticket_type=ticket_type,
+            trigger_event="review_approved",
+        )
+    except Exception:
+        log.exception("ado_auto_merge_evaluation_failed")
+
+
+async def _handle_ado_review_changes_requested(payload: dict[str, Any]) -> None:
+    """Handle ADO PR rejection — log and post comment."""
+    ctx = _ado_pr_context(payload)
+    ticket_id = ctx["ticket_id"]
+
+    log = logger.bind(
+        pr_id=ctx["pr_id"],
+        project=ctx["project"],
+        ticket_id=ticket_id,
+        source_control_type="azure-repos",
+    )
+    log.info("handling_ado_review_changes_requested")
+
+    if ticket_id:
+        append_trace(
+            ticket_id, _lookup_trace_id(ticket_id),
+            "l3_changes_requested", "ado_changes_requested",
+            pr_id=ctx["pr_id"],
+            source_control_type="azure-repos",
+        )
+
+    if ctx["org_url"] and ctx["repo_id"] and ctx["pr_id"]:
+        ok, msg = await post_ado_pr_comment(
+            ctx["org_url"],
+            ctx["project"],
+            ctx["repo_id"],
+            ctx["pr_id"],
+            "Changes were requested by a reviewer. The agent will address "
+            "feedback once comment response spawning supports Azure Repos.",
+        )
+        if not ok:
+            log.warning("ado_pr_comment_failed", reason=msg)
+
+
+async def _handle_ado_review_comment(payload: dict[str, Any]) -> None:
+    """Handle ADO PR review comment — log trace entry."""
+    ctx = _ado_pr_context(payload)
+    ticket_id = ctx["ticket_id"]
+
+    log = logger.bind(
+        pr_id=ctx["pr_id"],
+        project=ctx["project"],
+        ticket_id=ticket_id,
+        source_control_type="azure-repos",
+    )
+    log.info("handling_ado_review_comment")
+
+    if ticket_id:
+        append_trace(
+            ticket_id, _lookup_trace_id(ticket_id),
+            "l3_comment", "ado_review_comment",
+            pr_id=ctx["pr_id"],
+            source_control_type="azure-repos",
+        )
+
+    # Spawner does not yet support ADO comment response sessions
+    log.info("ado_review_comment_logged", note="spawner integration pending")
+
+
+async def _handle_ado_build_complete(payload: dict[str, Any]) -> None:
+    """Handle ADO build.complete — evaluate auto-merge if CI passed on a PR."""
+    resource = payload.get("resource", {})
+    result = str(resource.get("result", "")).lower()
+
+    # Try to extract PR association
+    trigger_info = resource.get("triggerInfo") or {}
+    pr_number_str = trigger_info.get("pr.number") or (
+        trigger_info.get("pr", {}).get("number", "")
+        if isinstance(trigger_info.get("pr"), dict)
+        else ""
+    )
+    pr_id = int(pr_number_str) if pr_number_str and str(pr_number_str).isdigit() else 0
+    reason = resource.get("reason", "")
+
+    # Extract repo and project info from the build resource
+    repo_info = resource.get("repository", {})
+    repo_id = repo_info.get("id", "")
+    project = resource.get("project", {}).get("name", "")
+    source_branch = resource.get("sourceBranch", "")
+
+    org_url = _ado_org_url_from_payload(payload)
+
+    log = logger.bind(
+        build_result=result,
+        pr_id=pr_id,
+        reason=reason,
+        project=project,
+        source_control_type="azure-repos",
+    )
+    log.info("handling_ado_build_complete")
+
+    if result != "succeeded":
+        log.info("ado_build_not_succeeded", result=result)
+        return
+
+    if not pr_id and reason == "pullRequest":
+        # Build was triggered by a PR but pr.number not in triggerInfo;
+        # we can't reliably associate it. Log and skip.
+        log.info("ado_build_pr_association_missing")
+        return
+
+    if not pr_id:
+        log.info("ado_build_not_pr_triggered")
+        return
+
+    # Extract ticket_id from source branch
+    match = _ADO_BRANCH_PATTERN.match(source_branch or "")
+    ticket_id = match.group(1) if match else ""
+
+    try:
+        await evaluate_and_maybe_merge_ado(
+            org_url=org_url,
+            project=project,
+            repo_id=repo_id,
+            pr_id=pr_id,
+            head_sha="",  # Will be fetched by get_ado_pr_state
+            ticket_id=ticket_id,
+            ticket_type="",
+            trigger_event="ci_passed",
+            checks_passed=True,
+        )
+    except Exception:
+        log.exception("ado_auto_merge_from_build_failed")
+
+
+@app.post("/webhooks/ado-build", status_code=202)
+async def ado_build_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_ado_webhook_token: str | None = Header(
+        default=None, alias="x-ado-webhook-token"
+    ),
+) -> dict[str, str]:
+    """Receive Azure DevOps Service Hook webhooks for build.complete events."""
+    if ADO_WEBHOOK_TOKEN and (
+        not x_ado_webhook_token
+        or not hmac.compare_digest(x_ado_webhook_token, ADO_WEBHOOK_TOKEN)
+    ):
+        raise HTTPException(status_code=401, detail="Invalid ADO webhook token")
+
+    body = await request.body()
+    try:
+        payload: dict[str, Any] = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {exc}") from exc
+
+    event_type = payload.get("eventType", "")
+    if event_type != "build.complete":
+        logger.debug("ado_build_webhook_wrong_event", event_type=event_type)
+        return {"status": "ignored", "event_type": event_type}
+
+    resource = payload.get("resource", {})
+    result = str(resource.get("result", "")).lower()
+
+    logger.info(
+        "ado_build_webhook_received",
+        event_type=event_type,
+        build_result=result,
+        build_id=resource.get("id", ""),
+    )
+
+    if result == "succeeded":
+        background_tasks.add_task(_handle_ado_build_complete, payload)
+        return {"status": "accepted", "event_type": "ci_passed"}
+
+    if result in ("failed", "partiallysucceeded"):
+        # Log CI failure; no auto-fix for ADO yet
+        logger.info("ado_ci_failed", result=result)
+        return {"status": "accepted", "event_type": "ci_failed"}
+
+    return {"status": "ignored", "event_type": event_type}
+
+
 @app.post("/webhooks/ado-pr", status_code=202)
 async def ado_pr_webhook(
     request: Request,
@@ -1396,6 +1642,18 @@ async def ado_pr_webhook(
 
     if event_type == EventType.PR_OPENED:
         background_tasks.add_task(_handle_ado_pr_opened, payload)
+        return {"status": "accepted", "event_type": event_type}
+
+    if event_type == EventType.REVIEW_APPROVED:
+        background_tasks.add_task(_handle_ado_review_approved, payload)
+        return {"status": "accepted", "event_type": event_type}
+
+    if event_type == EventType.REVIEW_CHANGES_REQUESTED:
+        background_tasks.add_task(_handle_ado_review_changes_requested, payload)
+        return {"status": "accepted", "event_type": event_type}
+
+    if event_type == EventType.REVIEW_COMMENT:
+        background_tasks.add_task(_handle_ado_review_comment, payload)
         return {"status": "accepted", "event_type": event_type}
 
     # Other ADO event types — log but don't act yet

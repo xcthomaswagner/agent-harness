@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, ClassVar
 
 import httpx
 import structlog
 
+from adapters.attachment_utils import sanitize_attachment_filename
 from config import Settings
 from models import (
+    IMAGE_CONTENT_TYPES,
+    MAX_IMAGE_ATTACHMENT_BYTES,
     Attachment,
     CallbackConfig,
     LinkedItem,
@@ -44,6 +48,13 @@ class AdoAdapter:
             headers=self._auth_headers(settings),
             timeout=30.0,
         )
+        self._download_client: httpx.AsyncClient | None = None
+
+    async def aclose(self) -> None:
+        """Close owned HTTP clients."""
+        if self._download_client is not None:
+            await self._download_client.aclose()
+            self._download_client = None
 
     @staticmethod
     def _auth_headers(settings: Settings) -> dict[str, str]:
@@ -215,6 +226,114 @@ class AdoAdapter:
                     )
                 )
         return attachments
+
+    # --- Attachment download ---
+
+    def _get_download_client(self) -> httpx.AsyncClient:
+        """Return an httpx client suitable for binary downloads.
+
+        The default ``self._client`` carries ``Content-Type:
+        application/json-patch+json`` which is wrong for binary
+        streams. This lazily-created client uses only the
+        Authorization header.
+        """
+        if self._download_client is None:
+            import base64
+
+            credentials = f":{self._settings.ado_pat}"
+            token = base64.b64encode(credentials.encode()).decode()
+            self._download_client = httpx.AsyncClient(
+                headers={"Authorization": f"Basic {token}"},
+                timeout=30.0,
+            )
+        return self._download_client
+
+    async def download_attachment(
+        self, attachment: Attachment, dest_dir: str
+    ) -> Attachment:
+        """Download an attachment from ADO, returning updated Attachment with local_path.
+
+        Skips if the file is too large (>5 MB) or the download fails.
+        Returns the original attachment unchanged on failure.
+        """
+        log = logger.bind(filename=attachment.filename, url=attachment.url)
+
+        if not attachment.url:
+            log.warning("attachment_download_skipped", reason="empty url")
+            return attachment
+
+        safe_name = sanitize_attachment_filename(attachment.filename)
+        if safe_name is None:
+            log.warning(
+                "attachment_download_skipped",
+                reason="invalid_filename",
+                raw_filename=attachment.filename,
+            )
+            return attachment
+
+        dest = Path(dest_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        file_path = dest / safe_name
+        # Defense in depth: refuse any path that resolves outside dest.
+        try:
+            file_path.resolve().relative_to(dest.resolve())
+        except ValueError:
+            log.warning(
+                "attachment_download_skipped",
+                reason="resolved_outside_dest",
+                raw_filename=attachment.filename,
+            )
+            return attachment
+
+        try:
+            client = self._get_download_client()
+            # ADO attachment URLs are absolute — use them directly.
+            async with client.stream("GET", attachment.url) as response:
+                response.raise_for_status()
+
+                # Check Content-Length before downloading full body
+                content_length = response.headers.get("content-length")
+                try:
+                    cl_size = int(content_length) if content_length else 0
+                except ValueError:
+                    cl_size = 0
+                if cl_size > MAX_IMAGE_ATTACHMENT_BYTES:
+                    log.warning(
+                        "attachment_too_large",
+                        size=content_length,
+                        limit=MAX_IMAGE_ATTACHMENT_BYTES,
+                    )
+                    return attachment
+
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > MAX_IMAGE_ATTACHMENT_BYTES:
+                        log.warning("attachment_too_large_streaming", size=total)
+                        return attachment
+                    chunks.append(chunk)
+
+            file_path.write_bytes(b"".join(chunks))
+            log.info("attachment_downloaded", path=str(file_path), size=total)
+            return attachment.model_copy(update={"local_path": str(file_path)})
+
+        except httpx.HTTPError as exc:
+            log.error("attachment_download_failed", error=str(exc))
+            return attachment.model_copy(update={"download_failed": True})
+
+    async def download_image_attachments(
+        self, attachments: list[Attachment], dest_dir: str
+    ) -> list[Attachment]:
+        """Download all image attachments, returning updated list with local_paths set."""
+        result: list[Attachment] = []
+        for att in attachments:
+            if att.content_type.lower() in IMAGE_CONTENT_TYPES:
+                updated = await self.download_attachment(att, dest_dir)
+                result.append(updated)
+            else:
+                result.append(att)
+        return result
 
     # --- Write-back operations ---
 

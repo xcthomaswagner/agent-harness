@@ -72,6 +72,16 @@ def classify_ado_event(payload: dict[str, Any]) -> EventType:
     event_type = payload.get("eventType", "")
     resource: dict[str, Any] = payload.get("resource", {})
 
+    # --- Build completed ---
+    if event_type == "build.complete":
+        result = str(resource.get("result", "")).lower()
+        if result == "succeeded":
+            return EventType.CI_PASSED
+        if result in ("failed", "partiallysucceeded"):
+            return EventType.CI_FAILED
+        # canceled, other → ignore
+        return EventType.IGNORED
+
     # --- PR created ---
     if event_type == "git.pullrequest.created":
         return EventType.PR_OPENED

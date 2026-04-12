@@ -606,7 +606,12 @@ def _render_detail(ticket_id: str) -> str:
     if qa:
         q_cls = "badge-success" if qa == "PASS" else "badge-error"
         summary_items.append(f'<div><span class="meta">QA</span> {_badge(qa + qa_detail, q_cls)}</div>')
-    summary_items.append(f'<div><span class="meta">Analyst</span> <span style="font-weight:500">{_e(token_str)}</span></div>')
+    summary_items.append(f'<div><span class="meta">Analyst (API)</span> <span style="font-weight:500">{_e(token_str)}</span></div>')
+    max_in = s.get("billing_max_tokens_in", 0)
+    max_out = s.get("billing_max_tokens_out", 0)
+    if max_in or max_out:
+        max_str = f'{max_in:,} in / {max_out:,} out'
+        summary_items.append(f'<div><span class="meta">Agent (Max)</span> <span style="font-weight:500">{_e(max_str)}</span></div>')
     if pr_url:
         summary_items.append(f'<div><span class="meta">PR</span> <a href="{_e(_safe_url(pr_url))}" target="_blank">#{_e(pr_url.split("/")[-1])}</a></div>')
 

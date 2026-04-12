@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from tracer import (
+    _build_summary,
     _compute_run_duration,
     _extract_trace_metadata,
     append_trace,
@@ -1474,3 +1475,77 @@ class TestComputeRunDuration:
             {"timestamp": "2026-01-01T10:00:00+00:00"},
         ]
         assert _compute_run_duration(entries) == ""
+
+
+class TestBillingField:
+    """Token billing tracking — API vs Max subscription."""
+
+    def test_billing_field_in_trace_entry(self, trace_dir: Path) -> None:
+        """append_trace with billing kwarg stores it in the entry."""
+        with patch("tracer.LOGS_DIR", trace_dir):
+            append_trace("B-1", "tid1", "analyst", "analyst_completed",
+                         billing="api", tokens_in=100, tokens_out=200)
+        entry = json.loads((trace_dir / "B-1.jsonl").read_text().strip())
+        assert entry["billing"] == "api"
+
+    def test_consolidate_stamps_max_subscription(
+        self, trace_dir: Path, tmp_path: Path
+    ) -> None:
+        """Consolidated agent entries get billing=max_subscription."""
+        wt = tmp_path / "worktree"
+        logs = wt / ".harness" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "pipeline.jsonl").write_text(
+            json.dumps({"phase": "impl", "event": "step1",
+                        "tokens_in": 500, "tokens_out": 1000}) + "\n"
+            + json.dumps({"phase": "review", "event": "step2",
+                          "tokens_in": 300, "tokens_out": 600}) + "\n"
+        )
+
+        with patch("tracer.LOGS_DIR", trace_dir):
+            consolidate_worktree_logs("B-2", "tid2", str(wt))
+            entries = read_trace("B-2")
+
+        agent_entries = [e for e in entries if e.get("source") == "agent"]
+        assert len(agent_entries) == 2
+        for e in agent_entries:
+            assert e["billing"] == "max_subscription"
+
+    def test_build_summary_separates_billing(self) -> None:
+        """_build_summary produces separate billing_api and billing_max totals."""
+        entries = [
+            {"event": "analyst_completed", "billing": "api",
+             "tokens_in": 100, "tokens_out": 200},
+            {"event": "impl_step", "source": "agent",
+             "billing": "max_subscription",
+             "tokens_in": 500, "tokens_out": 1000},
+            {"event": "review_step", "source": "agent",
+             "billing": "max_subscription",
+             "tokens_in": 500, "tokens_out": 1000},
+        ]
+        summary = _build_summary(entries, [], [])
+        # API billing
+        assert summary["billing_api_tokens_in"] == 100
+        assert summary["billing_api_tokens_out"] == 200
+        # Max billing
+        assert summary["billing_max_tokens_in"] == 1000
+        assert summary["billing_max_tokens_out"] == 2000
+        # Backward compat — tokens_in/out stay analyst-only
+        assert summary["tokens_in"] == 100
+        assert summary["tokens_out"] == 200
+
+    def test_build_summary_no_billing_field_backward_compat(self) -> None:
+        """Old entries without billing field still produce valid summary."""
+        entries = [
+            {"event": "analyst_completed",
+             "tokens_in": 50, "tokens_out": 75},
+        ]
+        summary = _build_summary(entries, [], [])
+        # Backward compat
+        assert summary["tokens_in"] == 50
+        assert summary["tokens_out"] == 75
+        # Billing fields default to 0 for max (no agent entries)
+        assert summary["billing_api_tokens_in"] == 50
+        assert summary["billing_api_tokens_out"] == 75
+        assert summary["billing_max_tokens_in"] == 0
+        assert summary["billing_max_tokens_out"] == 0

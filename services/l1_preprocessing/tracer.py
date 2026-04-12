@@ -117,6 +117,11 @@ def atomic_write_text(path: Path, content: str) -> None:
         raise
 
 
+# Billing source constants for trace entries.
+BILLING_API = "api"
+BILLING_MAX = "max_subscription"
+
+
 def generate_trace_id() -> str:
     """Generate a unique trace ID for a ticket run."""
     return uuid.uuid4().hex[:12]
@@ -908,17 +913,36 @@ def _build_summary(
     summary["review_verdict"] = metadata["review_verdict"]
     summary["qa_result"] = metadata["qa_result"]
 
+    billing_api_in = 0
+    billing_api_out = 0
+    billing_max_in = 0
+    billing_max_out = 0
+
     for e in run_entries:
         if e.get("event") == "analyst_completed":
             ti = e.get("tokens_in", 0)
             to_ = e.get("tokens_out", 0)
             if isinstance(ti, int):
                 summary["tokens_in"] = ti
+                billing_api_in += ti
             if isinstance(to_, int):
                 summary["tokens_out"] = to_
+                billing_api_out += to_
+        if e.get("source") == "agent":
+            ti = e.get("tokens_in", 0)
+            to_ = e.get("tokens_out", 0)
+            if isinstance(ti, int):
+                billing_max_in += ti
+            if isinstance(to_, int):
+                billing_max_out += to_
         if e.get("event") == "QA complete":
             summary["qa_passed"] = e.get("criteria_passed", 0)
             summary["qa_total"] = e.get("criteria_total", 0)
+
+    summary["billing_api_tokens_in"] = billing_api_in
+    summary["billing_api_tokens_out"] = billing_api_out
+    summary["billing_max_tokens_in"] = billing_max_in
+    summary["billing_max_tokens_out"] = billing_max_out
 
     phases_seen: list[str] = []
     for e in l2_phases:
@@ -1087,6 +1111,7 @@ def consolidate_worktree_logs(
                 entry["trace_id"] = trace_id
                 entry["ticket_id"] = ticket_id
                 entry["source"] = "agent"
+                entry["billing"] = BILLING_MAX
                 # One helper call covers every known-risky string pocket
                 # in the entry, so this path cannot drift from the
                 # /admin/re-redact rescan path. ``total_redacted`` is the
