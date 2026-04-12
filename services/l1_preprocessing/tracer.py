@@ -228,9 +228,17 @@ def _compute_run_duration(run_entries: list[dict[str, Any]]) -> str:
     """
     if not run_entries:
         return ""
+    # Use the last non-artifact entry as the end time — artifact
+    # consolidation can happen minutes/hours after the run completes
+    # and would inflate the duration.
+    end_entry = run_entries[-1]
+    for e in reversed(run_entries):
+        if e.get("phase") != "artifact":
+            end_entry = e
+            break
     try:
         start_ts = datetime.fromisoformat(run_entries[0].get("timestamp", ""))
-        end_ts = datetime.fromisoformat(run_entries[-1].get("timestamp", ""))
+        end_ts = datetime.fromisoformat(end_entry.get("timestamp", ""))
         total_secs = (end_ts - start_ts).total_seconds()
     except (ValueError, TypeError):
         return ""
