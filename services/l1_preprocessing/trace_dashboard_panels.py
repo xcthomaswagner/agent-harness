@@ -127,7 +127,7 @@ def _render_tool_usage_panel(artifacts: dict[str, dict[str, Any]]) -> str:
             'available for this trace (older run or consolidation skipped).</div>'
         )
         header = 'Tool Usage <span class="meta" style="font-weight:400">(unavailable)</span>'
-        return _panel_wrapper(header, body, open_by_default=True)
+        return _panel_wrapper(header, body, open_by_default=False)
 
     # tool_index may live in 'content' (JSON string) or 'index' (dict).
     # Shape is authoritative — produced by tool_index.build_tool_index which
@@ -208,7 +208,7 @@ def _render_tool_usage_panel(artifacts: dict[str, dict[str, Any]]) -> str:
             f'at line {_e(line)}{msg_html}</div>'
         )
 
-    return _panel_wrapper(header, grid + warnings_html, open_by_default=True)
+    return _panel_wrapper(header, grid + warnings_html, open_by_default=False)
 
 
 # --- Panel 2: Agent Instructions (injected CLAUDE.md) ---

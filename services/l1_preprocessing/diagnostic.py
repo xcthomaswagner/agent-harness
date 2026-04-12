@@ -474,11 +474,11 @@ def render_diagnostic_checklist(checks: list[dict[str, Any]]) -> str:
         )
 
     return (
-        '<div class="diagnostic-checklist" style="border:1px solid #E2E8F0;'
+        '<details style="border:1px solid #E2E8F0;'
         'border-radius:8px;margin-bottom:20px;background:#FFFFFF;overflow:hidden">'
-        '<div style="padding:8px 12px;background:#F7F9FB;border-bottom:1px solid #E2E8F0;'
+        '<summary style="padding:8px 12px;background:#F7F9FB;border-bottom:1px solid #E2E8F0;'
         'font-size:12px;font-weight:700;color:#0F172A;letter-spacing:0.04em;'
-        'text-transform:uppercase">Diagnostic Checklist</div>'
+        'text-transform:uppercase;cursor:pointer;list-style:none">Diagnostic Checklist</summary>'
         + "".join(rows)
-        + "</div>"
+        + "</details>"
     )
