@@ -1080,8 +1080,22 @@ def consolidate_worktree_logs(
     }
 
     logs_dir = wt / ".harness" / "logs"
+    # Resolve archive root: walk up from the worktree until we find
+    # a directory that contains a ``trace-archive`` sibling (created
+    # by spawn_team.py). Production worktrees live at
+    # ``<root>/worktrees/ai/<ticket>`` (3 levels up), but test fixtures
+    # may use ``<root>/worktrees/ai-<ticket>`` (2 levels up). Walking
+    # avoids hard-coding the depth.
+    archive_root = wt.parent
+    for _ in range(4):
+        if (archive_root / "trace-archive").is_dir():
+            break
+        archive_root = archive_root.parent
+    archive_logs_dir = archive_root / "trace-archive" / ticket_id
     for filename, event_name in artifact_files.items():
         artifact_path = logs_dir / filename
+        if not artifact_path.exists():
+            artifact_path = archive_logs_dir / filename
         if artifact_path.exists():
             append_trace(
                 ticket_id, trace_id,
@@ -1112,8 +1126,10 @@ def consolidate_worktree_logs(
     # session-stream.jsonl is stored by reference — it can be megabytes and
     # is preserved separately in <client_repo.parent>/trace-archive/<ticket>/
     # by the cleanup step in scripts/spawn_team.py. Worktrees live at
-    # <client_repo.parent>/worktrees/<branch>, so wt.parent.parent is
-    # client_repo.parent (two levels up from the worktree, NOT three).
+    # <client_repo.parent>/worktrees/ai/<ticket>, so the archive is THREE
+    # levels up from the worktree (ticket → ai → worktrees → parent),
+    # not two. The previous code used wt.parent.parent which resolved to
+    # the ``worktrees/`` dir, missing the archive entirely.
     #
     # Prefer the archive path when it exists (stable — survives worktree
     # cleanup). For failed/escalated runs the archive may not exist yet
@@ -1121,28 +1137,25 @@ def consolidate_worktree_logs(
     # back to the live worktree path which is still on disk for those runs.
     # If neither exists, skip the reference entry entirely.
     stream_path = logs_dir / "session-stream.jsonl"
-    if stream_path.exists():
+    archive_path = (
+        archive_root / "trace-archive" / ticket_id / "session-stream.jsonl"
+    )
+    # Prefer archive (stable — survives worktree cleanup), fall back to
+    # live worktree path for in-progress or failed runs.
+    effective_stream = (
+        archive_path if archive_path.exists()
+        else stream_path if stream_path.exists()
+        else None
+    )
+    if effective_stream is not None:
         try:
-            size_bytes = stream_path.stat().st_size
-            # Use an explicit ``with`` block — the previous
-            # ``sum(1 for _ in stream_path.open())`` dropped its only
-            # reference to the file object immediately, leaving the
-            # descriptor to be closed on GC (non-deterministic,
-            # produces ResourceWarning, leaks FDs under load).
-            with stream_path.open() as f:
+            size_bytes = effective_stream.stat().st_size
+            with effective_stream.open() as f:
                 line_count = sum(1 for _ in f)
         except OSError:
             size_bytes = 0
             line_count = 0
-        archive_path = (
-            wt.parent.parent / "trace-archive" / ticket_id / "session-stream.jsonl"
-        )
-        if archive_path.exists():
-            stream_ref_path: Path | None = archive_path
-        elif stream_path.exists():
-            stream_ref_path = stream_path
-        else:
-            stream_ref_path = None
+        stream_ref_path: Path | None = effective_stream
 
         if stream_ref_path is not None:
             append_trace(
@@ -1157,7 +1170,7 @@ def consolidate_worktree_logs(
         # Parse the stream once to build a declarative tool-call summary.
         try:
             from tool_index import build_tool_index
-            index = build_tool_index(stream_path)
+            index = build_tool_index(effective_stream)
             # tool_index.first_tool_error.message captures up to 500 chars of
             # raw tool-error output (e.g. `sf org display --json` can echo a
             # live access token into stderr). Redact it in place so the trace
