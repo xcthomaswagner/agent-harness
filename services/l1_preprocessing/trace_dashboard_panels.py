@@ -95,16 +95,26 @@ def _ticket_id_from_entries(entries: list[dict]) -> str:
 
 
 def _panel_wrapper(header_html: str, body_html: str, open_by_default: bool) -> str:
-    """Wrap a header + body in a <details> element with consistent styling."""
-    open_attr = " open" if open_by_default else ""
+    """Wrap a header + body in a collapsible card with SVG chevron.
+
+    Matches the L1/L2 section accordion pattern from trace_dashboard.py
+    so every card on the detail page has the same visual affordance.
+    """
+    display = "" if open_by_default else "display:none;"
+    chevron_rot = "rotate(90deg)" if open_by_default else ""
     return (
-        f'<details{open_attr} style="border:{_PANEL_BORDER};border-radius:8px;'
+        f'<div style="border:{_PANEL_BORDER};border-radius:8px;'
         f'margin-bottom:16px;overflow:hidden">'
-        f'<summary style="padding:10px 16px;background:{_PANEL_HEADER_BG};'
-        f'cursor:pointer;font-weight:600;font-size:13.2px;list-style:none;'
-        f'border-bottom:{_PANEL_BORDER}">{header_html}</summary>'
-        f'<div style="padding:12px 16px">{body_html}</div>'
-        f'</details>'
+        f'<div style="display:flex;align-items:center;gap:8px;padding:10px 16px;'
+        f'background:{_PANEL_HEADER_BG};border-bottom:{_PANEL_BORDER};'
+        f'font-weight:600;font-size:13.2px;cursor:pointer" '
+        f'onclick="var b=this.nextElementSibling;b.style.display=b.style.display===\'none\'?\'\':\' none\';'
+        f'this.querySelector(\'svg\').style.transform=b.style.display===\'none\'?\'\':\' rotate(90deg)\'">'
+        f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#64748B" stroke-width="2" '
+        f'style="transition:transform 0.2s;transform:{chevron_rot}"><path d="M9 18l6-6-6-6"/></svg>'
+        f'{header_html}</div>'
+        f'<div style="padding:12px 16px;{display}">{body_html}</div>'
+        f'</div>'
     )
 
 
