@@ -248,3 +248,104 @@ async def test_global_enabled_merge_failure_records_failed(
     assert result["status"] == "failed"
     assert result["reason"] == "sha_mismatch"
     assert mocks["merge_pr"].call_count == 1
+
+
+# --- Dedup eviction regression ---
+#
+# Bug: _recent_merge_outcomes used `.clear()` when it hit _MAX_RECENT.
+# This wipes every "merged" marker wholesale, re-opening a re-merge
+# window on any delayed webhook retry for a PR whose marker was
+# evicted. The fix uses OrderedDict FIFO eviction so old markers are
+# retired one at a time, preserving recent "merged" entries.
+
+
+async def test_dedup_fifo_eviction_preserves_recent_merged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the cache fills, the oldest entries evict — recent 'merged' stays."""
+    monkeypatch.setenv("AUTO_MERGE_ENABLED", "true")
+    monkeypatch.setattr(auto_merge, "_MAX_RECENT", 3)
+
+    # pr_state returns whatever sha the webhook supplies, so there's
+    # no second "force-push" key recorded per call.
+    async def _fake_get_pr_state(repo: str, pr_number: int, **kw) -> dict:
+        state = _good_pr_state()
+        state["head_sha"] = _last_sha["v"]
+        return state
+
+    _last_sha: dict[str, str] = {"v": ""}
+    _patch_fetches(monkeypatch, merge_result=(True, "merged"))
+    monkeypatch.setattr(auto_merge, "get_pr_state", AsyncMock(side_effect=_fake_get_pr_state))
+
+    async def _merge(sha: str) -> dict:
+        _last_sha["v"] = sha
+        return await evaluate_and_maybe_merge(
+            repo_full_name="acme/repo",
+            pr_number=1,
+            head_sha=sha,
+            ticket_id="T",
+            ticket_type="bug",
+            trigger_event="review_approved",
+        )
+
+    # Fill the cache to capacity with merges on 3 different shas.
+    await _merge("sha1")
+    await _merge("sha2")
+    await _merge("sha3")
+    assert len(auto_merge._recent_merge_outcomes) == 3
+
+    # A 4th merge pushes the cache to cap+1; sha1 (oldest) must evict,
+    # but sha2/sha3/sha4 stay. The old .clear() code would wipe all 3.
+    await _merge("sha4")
+    keys = list(auto_merge._recent_merge_outcomes)
+    assert not any(k.endswith("#sha1") for k in keys), (
+        "sha1 should have evicted (oldest)"
+    )
+    for recent in ("sha2", "sha3", "sha4"):
+        assert any(k.endswith(f"#{recent}") for k in keys), (
+            f"{recent} should still be marked merged"
+        )
+
+
+async def test_dedup_records_both_webhook_and_pr_state_sha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Force-push between webhook and get_pr_state: both shas must dedup."""
+    monkeypatch.setenv("AUTO_MERGE_ENABLED", "true")
+    # pr_state returns a different (newer) head_sha than the webhook's.
+    pr_state = _good_pr_state()
+    pr_state["head_sha"] = "newer_sha"
+    _patch_fetches(monkeypatch, pr_state=pr_state, merge_result=(True, "merged"))
+
+    r1 = await evaluate_and_maybe_merge(
+        repo_full_name="acme/repo",
+        pr_number=1,
+        head_sha="webhook_sha",  # stale sha from the delayed webhook
+        ticket_id="T",
+        ticket_type="bug",
+        trigger_event="review_approved",
+    )
+    assert r1["status"] == "merged"
+
+    # A retry of the same webhook (same stale sha) must be deduped.
+    r2 = await evaluate_and_maybe_merge(
+        repo_full_name="acme/repo",
+        pr_number=1,
+        head_sha="webhook_sha",
+        ticket_id="T",
+        ticket_type="bug",
+        trigger_event="ci_passed",
+    )
+    assert r2["status"] == "deduped"
+
+    # A NEW webhook delivered with the actual pr_state sha must ALSO
+    # be deduped — we recorded against both keys.
+    r3 = await evaluate_and_maybe_merge(
+        repo_full_name="acme/repo",
+        pr_number=1,
+        head_sha="newer_sha",
+        ticket_id="T",
+        ticket_type="bug",
+        trigger_event="ci_passed",
+    )
+    assert r3["status"] == "deduped"

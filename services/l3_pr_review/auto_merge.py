@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from collections import OrderedDict
 from datetime import UTC, datetime
 from typing import Any
 
@@ -19,13 +20,30 @@ from github_api import get_pr_state, merge_pr
 
 logger = structlog.get_logger()
 
-# Track recent merge outcomes to dedup (only block re-evaluation after a merge)
-_recent_merge_outcomes: dict[str, str] = {}  # key -> last decision
-_MAX_RECENT = 200
+# Track recent merge outcomes to dedup "merged" decisions on the same
+# sha. Uses OrderedDict FIFO eviction rather than a full .clear() on
+# cap, which would wipe every valid "merged" marker at once and
+# re-open a re-merge window on delayed webhook retries. Larger cap is
+# safe because per-entry eviction amortises O(1). Pattern mirrors
+# ``_processed_deliveries`` in main.py.
+_recent_merge_outcomes: OrderedDict[str, str] = OrderedDict()
+_MAX_RECENT = 1000
 
 
 def _dedup_key(repo: str, pr_number: int, head_sha: str) -> str:
     return f"{repo}#{pr_number}#{head_sha}"
+
+
+def _record_outcome(dedup: str, decision: str) -> None:
+    """Record a decision and evict oldest entries past the cap.
+
+    Only one ``popitem(last=False)`` per call is needed because the
+    cache grows by one insertion at a time.
+    """
+    _recent_merge_outcomes[dedup] = decision
+    _recent_merge_outcomes.move_to_end(dedup)
+    while len(_recent_merge_outcomes) > _MAX_RECENT:
+        _recent_merge_outcomes.popitem(last=False)
 
 
 def _clear_dedup() -> None:
@@ -110,9 +128,6 @@ async def evaluate_and_maybe_merge(
         # Already merged on this sha — don't re-merge
         logger.info("auto_merge_dedup_skipped", dedup=dedup, prior=prior)
         return {"status": "deduped"}
-    # LRU-ish trim
-    if len(_recent_merge_outcomes) >= _MAX_RECENT:
-        _recent_merge_outcomes.clear()
 
     log = logger.bind(
         repo=repo_full_name, pr=pr_number, ticket=ticket_id, trigger=trigger_event
@@ -205,7 +220,17 @@ async def evaluate_and_maybe_merge(
         dry_run=not global_enabled,
     )
 
-    # Record outcome so "merged" blocks future attempts on same sha
-    _recent_merge_outcomes[dedup] = decision
+    # Record outcome so "merged" blocks future attempts on same sha.
+    # Also record against the pr_state sha if it differs from the
+    # webhook-delivered head_sha — a force-push between the webhook
+    # and ``get_pr_state`` means the merge actually executed against
+    # ``pr_state["head_sha"]``, not ``head_sha``, and a subsequent
+    # webhook retry for either sha should be deduped.
+    _record_outcome(dedup, decision)
+    pr_state_sha = pr_state.get("head_sha") or ""
+    if pr_state_sha and pr_state_sha != head_sha:
+        _record_outcome(
+            _dedup_key(repo_full_name, pr_number, pr_state_sha), decision
+        )
 
     return {"status": decision, "reason": reason, "dry_run": not global_enabled}

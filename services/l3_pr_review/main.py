@@ -11,6 +11,7 @@ import re
 import sys
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -119,10 +120,20 @@ def _ticket_type_from_labels(
     return default
 
 
+def _pr_head_branch(pr: dict[str, Any]) -> str:
+    """Extract the PR head branch (ref) safely from a GitHub PR dict."""
+    return (pr.get("head") or {}).get("ref", "") or ""
+
+
+def _pr_head_sha(pr: dict[str, Any]) -> str:
+    """Extract the PR head sha safely from a GitHub PR dict."""
+    return (pr.get("head") or {}).get("sha", "") or ""
+
+
 def _ticket_id_from_payload(payload: dict[str, Any]) -> str:
     """Extract ticket ID from the PR branch name (e.g., ai/SCRUM-16 → SCRUM-16)."""
     pr = payload.get("pull_request", {})
-    branch = pr.get("head", {}).get("ref", "")
+    branch = _pr_head_branch(pr)
     match = _AI_BRANCH_PATTERN.match(branch)
     return match.group(1) if match else ""
 
@@ -230,81 +241,128 @@ async def _post_to_l1_with_retry(
     return False
 
 
-async def _forward_autonomy_event_once(event: dict[str, Any]) -> bool:
-    """POST event to L1 with retry-once on transient failure."""
+_GITHUB_DEFECT_LINK_PATH = "/api/internal/autonomy/github-defect-link"
+
+
+@dataclass(frozen=True)
+class _ForwarderSpec:
+    """Static config for one L1 forwarder kind.
+
+    Consolidates the path, log-event base name, and the payload keys
+    to harvest for structured logs. Previously every forwarder
+    duplicated ~25 lines of "skip if no token / retry / log / backlog"
+    scaffolding plus its own `_once` wrapper. With this registry the
+    two wrappers collapse to tiny functions that look up the spec.
+    """
+    path: str
+    log_event_base: str  # "l1_autonomy_event_forward" -> "_skipped" / "_failed"
+    skipped_reason: str
+    context_keys: tuple[str, ...]
+
+
+_FORWARDERS: dict[str, _ForwarderSpec] = {
+    "autonomy_event": _ForwarderSpec(
+        path=_AUTONOMY_EVENTS_PATH,
+        log_event_base="l1_autonomy_event_forward",
+        skipped_reason=(
+            "L1_INTERNAL_API_TOKEN unset — autonomy events are being dropped. "
+            "Set L1_INTERNAL_API_TOKEN to enable forwarding."
+        ),
+        context_keys=("event_type", "ticket_id"),
+    ),
+    "human_issue": _ForwarderSpec(
+        path=_HUMAN_ISSUES_PATH,
+        log_event_base="l1_human_issue_forward",
+        skipped_reason=(
+            "L1_INTERNAL_API_TOKEN unset — human review issues are being dropped. "
+            "Set L1_INTERNAL_API_TOKEN to enable forwarding."
+        ),
+        context_keys=("event_type", "ticket_id"),
+    ),
+    "github_defect": _ForwarderSpec(
+        path=_GITHUB_DEFECT_LINK_PATH,
+        log_event_base="l1_github_defect_forward",
+        skipped_reason=(
+            "L1_INTERNAL_API_TOKEN unset — GitHub defect links are being dropped. "
+            "Set L1_INTERNAL_API_TOKEN to enable forwarding."
+        ),
+        context_keys=("issue_number", "pr_number"),
+    ),
+}
+
+
+def _forwarder_context(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+    spec = _FORWARDERS[kind]
+    return {key: payload.get(key) for key in spec.context_keys}
+
+
+async def _forward_to_l1_once(kind: str, payload: dict[str, Any]) -> bool:
+    """POST ``payload`` to the L1 endpoint for ``kind`` with retry-once.
+
+    Assumes ``L1_INTERNAL_API_TOKEN`` is set — callers must short-circuit
+    otherwise. Registry-driven replacement for the three
+    ``_forward_*_once`` helpers.
+    """
+    spec = _FORWARDERS[kind]
     return await _post_to_l1_with_retry(
-        _AUTONOMY_EVENTS_PATH,
-        event,
-        log_event="l1_autonomy_event_forward_failed",
-        log_context={
-            "event_type": event.get("event_type"),
-            "ticket_id": event.get("ticket_id"),
-        },
+        spec.path,
+        payload,
+        log_event=f"{spec.log_event_base}_failed",
+        log_context=_forwarder_context(kind, payload),
     )
+
+
+async def _forward_to_l1(kind: str, payload: dict[str, Any]) -> None:
+    """Forward ``payload`` to L1 and persist to backlog on final failure.
+
+    Short-circuits (without backlog) when ``L1_INTERNAL_API_TOKEN``
+    is unset. Single entry-point for every L1 forwarder — the three
+    old outer wrappers collapse to one function.
+    """
+    spec = _FORWARDERS[kind]
+    context = _forwarder_context(kind, payload)
+    if not L1_INTERNAL_API_TOKEN:
+        logger.warning(
+            f"{spec.log_event_base}_skipped",
+            reason=spec.skipped_reason,
+            **context,
+        )
+        return
+    if not await _forward_to_l1_once(kind, payload):
+        logger.error(
+            f"{spec.log_event_base}_failed",
+            backlogged=True,
+            **context,
+        )
+        await append_backlog(kind, payload)
+
+
+# Back-compat aliases for existing call sites and tests. Eventually
+# every caller should say ``_forward_to_l1("autonomy_event", event)``
+# but keeping these as thin shims avoids a sweeping rename in this
+# commit.
+async def _forward_autonomy_event_once(event: dict[str, Any]) -> bool:
+    return await _forward_to_l1_once("autonomy_event", event)
 
 
 async def _forward_autonomy_event(event: dict[str, Any]) -> None:
-    """Forward autonomy event to L1; persist to backlog on final failure.
-
-    Short-circuits (without backlog) if L1_INTERNAL_API_TOKEN is unset.
-    """
-    if not L1_INTERNAL_API_TOKEN:
-        logger.warning(
-            "l1_autonomy_event_forward_skipped",
-            reason="L1_INTERNAL_API_TOKEN unset — autonomy events are being dropped. "
-            "Set L1_INTERNAL_API_TOKEN to enable forwarding.",
-            event_type=event.get("event_type"),
-        )
-        return
-    ok = await _forward_autonomy_event_once(event)
-    if not ok:
-        logger.error(
-            "l1_autonomy_event_forward_failed",
-            event_type=event.get("event_type"),
-            ticket_id=event.get("ticket_id"),
-            backlogged=True,
-        )
-        await append_backlog("autonomy_event", event)
+    await _forward_to_l1("autonomy_event", event)
 
 
 async def _forward_human_issue_once(payload: dict[str, Any]) -> bool:
-    """POST human issue to L1 with retry-once on transient failure."""
-    return await _post_to_l1_with_retry(
-        _HUMAN_ISSUES_PATH,
-        payload,
-        log_event="l1_human_issue_forward_failed",
-        log_context={
-            "event_type": payload.get("event_type"),
-            "ticket_id": payload.get("ticket_id"),
-        },
-    )
+    return await _forward_to_l1_once("human_issue", payload)
 
 
 async def _forward_human_issue(payload: dict[str, Any]) -> None:
-    """Forward human issue to L1; persist to backlog on final failure.
-
-    Short-circuits (without backlog) if L1_INTERNAL_API_TOKEN is unset.
-    """
-    if not L1_INTERNAL_API_TOKEN:
-        logger.warning(
-            "l1_human_issue_forward_skipped",
-            reason="L1_INTERNAL_API_TOKEN unset — human review issues are being dropped. "
-            "Set L1_INTERNAL_API_TOKEN to enable forwarding.",
-            event_type=payload.get("event_type"),
-        )
-        return
-    ok = await _forward_human_issue_once(payload)
-    if not ok:
-        logger.error(
-            "l1_human_issue_forward_failed",
-            event_type=payload.get("event_type"),
-            ticket_id=payload.get("ticket_id"),
-            backlogged=True,
-        )
-        await append_backlog("human_issue", payload)
+    await _forward_to_l1("human_issue", payload)
 
 
-_GITHUB_DEFECT_LINK_PATH = "/api/internal/autonomy/github-defect-link"
+async def _forward_github_defect_once(payload: dict[str, Any]) -> bool:
+    return await _forward_to_l1_once("github_defect", payload)
+
+
+async def _forward_github_defect(payload: dict[str, Any]) -> None:
+    await _forward_to_l1("github_defect", payload)
 
 # Match (in order): full PR URL, owner/repo#N, bare #N (same-repo).
 _PR_REF_URL_PATTERN = re.compile(
@@ -345,42 +403,6 @@ def _category_from_labels(labels: list[str]) -> str:
     if "feature-request" in lower or "feature_request" in lower or "enhancement" in lower:
         return "feature_request"
     return "escaped"
-
-
-async def _forward_github_defect_once(payload: dict[str, Any]) -> bool:
-    """POST GitHub defect-link to L1 with retry-once on transient failure."""
-    return await _post_to_l1_with_retry(
-        _GITHUB_DEFECT_LINK_PATH,
-        payload,
-        log_event="l1_github_defect_forward_failed",
-        log_context={
-            "issue_number": payload.get("issue_number"),
-            "pr_number": payload.get("pr_number"),
-        },
-    )
-
-
-async def _forward_github_defect(payload: dict[str, Any]) -> None:
-    """Forward GitHub defect-link to L1; persist to backlog on final failure.
-
-    Short-circuits (without backlog) if L1_INTERNAL_API_TOKEN is unset.
-    """
-    if not L1_INTERNAL_API_TOKEN:
-        logger.warning(
-            "l1_github_defect_forward_skipped",
-            reason="L1_INTERNAL_API_TOKEN unset — GitHub defect links are being dropped. "
-            "Set L1_INTERNAL_API_TOKEN to enable forwarding.",
-            issue_number=payload.get("issue_number"),
-        )
-        return
-    ok = await _forward_github_defect_once(payload)
-    if not ok:
-        logger.error(
-            "l1_github_defect_forward_failed",
-            issue_number=payload.get("issue_number"),
-            backlogged=True,
-        )
-        await append_backlog("github_defect", payload)
 
 
 def _is_bot_user(user: dict[str, Any]) -> bool:
@@ -500,7 +522,7 @@ async def _forward_review_body_human_issue(
     human_issue = {
         "repo_full_name": repo_full_name,
         "pr_number": pr.get("number", 0),
-        "head_sha": pr.get("head", {}).get("sha", ""),
+        "head_sha": _pr_head_sha(pr),
         "ticket_id": ticket_id,
         "external_id": str(review.get("id", "")),
         "event_type": event_type,
@@ -541,7 +563,7 @@ async def _handle_pr_opened(payload: dict[str, Any]) -> None:
     if autonomy_event:
         await _forward_autonomy_event(autonomy_event)
 
-    branch = pr.get("head", {}).get("ref", "")
+    branch = _pr_head_branch(pr)
     repo = payload.get("repository", {}).get("full_name", "")
     _get_spawner().spawn_pr_review(
         pr_number=pr_number,
@@ -685,7 +707,7 @@ async def _handle_review_comment(payload: dict[str, Any]) -> None:
                      author=comment_author)
 
     pr = payload.get("pull_request", {})
-    branch = pr.get("head", {}).get("ref", "")
+    branch = _pr_head_branch(pr)
     repo = payload.get("repository", {}).get("full_name", "")
     _get_spawner().spawn_comment_response(
         pr_number=pr_number,
@@ -724,7 +746,7 @@ async def _handle_review_changes_requested(payload: dict[str, Any]) -> None:
                      "changes_requested_spawned", pr_number=pr_number,
                      reviewer=reviewer)
 
-    branch = pr.get("head", {}).get("ref", "")
+    branch = _pr_head_branch(pr)
     repo = payload.get("repository", {}).get("full_name", "")
     _get_spawner().spawn_comment_response(
         pr_number=pr_number,
@@ -739,7 +761,7 @@ async def _handle_review_approved(payload: dict[str, Any]) -> None:
     """Handle PR approval — check if auto-merge is appropriate."""
     pr = payload.get("pull_request", {})
     pr_number = pr.get("number", 0)
-    branch = pr.get("head", {}).get("ref", "")
+    branch = _pr_head_branch(pr)
     reviewer = payload.get("review", {}).get("user", {}).get("login", "unknown")
     repo = pr.get("base", {}).get("repo", {}).get("full_name", "")
 
@@ -808,7 +830,7 @@ async def _handle_review_approved(payload: dict[str, Any]) -> None:
         await evaluate_and_maybe_merge(
             repo_full_name=repo,
             pr_number=pr_number,
-            head_sha=pr.get("head", {}).get("sha", ""),
+            head_sha=_pr_head_sha(pr),
             ticket_id=ticket_id,
             ticket_type=ticket_type,
             trigger_event="review_approved",
@@ -853,7 +875,7 @@ async def _handle_review_comment_created(payload: dict[str, Any]) -> None:
     human_issue = {
         "repo_full_name": repo_full_name,
         "pr_number": pr.get("number", 0),
-        "head_sha": pr.get("head", {}).get("sha", ""),
+        "head_sha": _pr_head_sha(pr),
         "ticket_id": ticket_id,
         "external_id": str(comment.get("id", "")),
         "event_type": "review_comment",

