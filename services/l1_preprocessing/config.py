@@ -1,5 +1,8 @@
 """Application configuration loaded from environment variables."""
 
+import os
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -69,6 +72,16 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+    @field_validator("default_client_repo")
+    @classmethod
+    def _expand_user_default_client_repo(cls, v: str) -> str:
+        """Expand ~ in DEFAULT_CLIENT_REPO so operators can use tilde
+        paths in .env without Path() turning ``~/foo`` into ``<cwd>/~/foo``.
+        Matches the expansion ClientProfile.client_repo_path does for
+        profile-scoped paths.
+        """
+        return os.path.expanduser(v) if v else v
 
 
 settings = Settings()

@@ -43,7 +43,9 @@ test_framework:
   e2e: ""
 
 client_repo:
-  local_path: "/tmp/ado-repo-init/XC-SF-30in30"
+  # ~ is expanded by ClientProfile.client_repo_path at load time.
+  # Under /tmp the repo is wiped on reboot and L1 spawn fails silently.
+  local_path: "~/.harness/clients/XC-SF-30in30"
   github_repo: ""
 
 autonomy:

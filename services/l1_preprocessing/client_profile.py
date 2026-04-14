@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -46,7 +47,12 @@ class ClientProfile:
     @property
     def client_repo_path(self) -> str:
         val = self._data.get("client_repo", {})
-        return str(val.get("local_path", "")) if isinstance(val, dict) else ""
+        raw = str(val.get("local_path", "")) if isinstance(val, dict) else ""
+        # Expand ~ here so every downstream consumer (pipeline, spawn,
+        # _extract_ticket_payload) sees an absolute filesystem path.
+        # Profiles historically used absolute /tmp paths; moving to
+        # ~/.harness/clients/* requires expansion at the source.
+        return os.path.expanduser(raw) if raw else ""
 
     @property
     def ai_label(self) -> str:

@@ -158,19 +158,25 @@ def main() -> None:
     pipeline_mode = args.mode
 
     # --- Validate inputs ---
+    # Errors go to stderr; L1's spawn wrapper captures stderr (stdout is
+    # piped to /dev/null) and surfaces them in structured logs.
+    if not client_repo.exists():
+        print(f"Error: client_repo path does not exist: {client_repo}", file=sys.stderr)
+        sys.exit(1)
+
     if not (client_repo / ".git").exists() and not (client_repo / ".git").is_file():
-        print(f"Error: Not a git repository: {client_repo}")
+        print(f"Error: Not a git repository (no .git at {client_repo})", file=sys.stderr)
         sys.exit(1)
 
     if not ticket_json.exists():
-        print(f"Error: Ticket JSON file not found: {ticket_json}")
+        print(f"Error: Ticket JSON file not found: {ticket_json}", file=sys.stderr)
         sys.exit(1)
 
     with ticket_json.open() as f:
         try:
             json.load(f)
         except json.JSONDecodeError:
-            print(f"Error: Invalid JSON in ticket file: {ticket_json}")
+            print(f"Error: Invalid JSON in ticket file: {ticket_json}", file=sys.stderr)
             sys.exit(1)
 
     # --- Step 0: Pre-flight cleanup — clean prior worktrees for THIS ticket only ---
@@ -198,7 +204,11 @@ def main() -> None:
                 pass
 
         if agent_alive:
-            print(f"[spawn] Agent already running for {branch_name} — skipping")
+            # Stderr (not stdout) so L1's log shows the successful no-op.
+            print(
+                f"[spawn] Agent already running for {branch_name} — skipping",
+                file=sys.stderr,
+            )
             sys.exit(0)
 
         # Worktree exists from a prior run — determine reason and clean up

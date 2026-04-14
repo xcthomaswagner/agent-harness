@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from shared.env_sanitize import sanitized_env
 
 import tracer
-from adapters.ado_adapter import AdoAdapter
+from adapters.ado_adapter import AdoAdapter, extract_tag_transition
 from adapters.jira_adapter import JiraAdapter
 from autonomy_dashboard import router as autonomy_dashboard_router
 from autonomy_ingest import ingest_jira_bug
@@ -244,27 +244,48 @@ def _release_ticket(ticket_id: str) -> None:
         _active_tickets.pop(ticket_id, None)
 
 
-def _check_trigger_edge(ticket_id: str, tag_present_now: bool) -> bool:
+def _check_trigger_edge(
+    ticket_id: str,
+    tag_present_now: bool,
+    was_present_before: bool | None = None,
+) -> bool:
     """Edge-detect the trigger tag for a ticket.
 
-    Returns True if this webhook represents a new trigger (i.e., the tag
-    transitioned from absent on the previous webhook to present on this one,
-    OR we've never seen this ticket before and the tag is present now).
-    Returns False if the tag has been continuously present across the last
-    webhook AND this one, in which case this webhook is almost certainly a
-    non-trigger side effect (PR merge, comment, field edit, etc.) and should
-    not start a new pipeline run.
+    Returns True if this webhook represents a new trigger — i.e., the tag
+    transitioned from absent to present *on this webhook*. Returns False
+    when the tag was already present beforehand, in which case this
+    webhook is almost certainly a non-trigger side effect (PR merge,
+    comment, field edit, etc.) and should not start a new pipeline run.
 
-    Also records the current tag state so the next webhook for the same
-    ticket can compare against it.
+    Two signals are considered, in order:
 
-    Thread-safe via lock.
+    1. **Payload-based** (``was_present_before`` is not ``None``): the
+       ADO ``resource.fields`` delta gave us the prior value directly.
+       This is authoritative for *this* webhook and survives L1 restarts
+       because the signal is embedded in the webhook. Update in-process
+       memory too so a later no-delta webhook has a fresh baseline.
+
+    2. **In-process memory fallback** (``was_present_before`` is ``None``):
+       the delta wasn't in the payload (typical for non-tag field edits,
+       or ``workitem.created``). Compare against the last remembered
+       state; treat a never-seen ticket with the tag present as a fresh
+       edge. NOTE: this path is vulnerable to L1 restarts — the first
+       post-restart webhook for a ticket that had the tag before the
+       restart will be treated as a fresh edge even if it shouldn't be.
+       The payload path above does not have this weakness.
+
+    Thread-safe via lock. Also records the current tag state for the
+    next webhook to compare against.
     """
     with _last_trigger_state_lock:
-        prev = _last_trigger_state.get(ticket_id, False)
+        prev_mem = _last_trigger_state.get(ticket_id, False)
         _last_trigger_state[ticket_id] = tag_present_now
-        # New trigger iff tag is present now AND was NOT present last time.
-        return tag_present_now and not prev
+        if was_present_before is not None:
+            # Payload delta is authoritative for this webhook's transition.
+            return tag_present_now and not was_present_before
+        # Fallback: memory-based dedupe. New trigger iff tag is present
+        # now AND was NOT present on the last webhook we saw.
+        return tag_present_now and not prev_mem
 
 
 def _clear_trigger_state(ticket_id: str) -> None:
@@ -1398,19 +1419,25 @@ async def ado_webhook(
         return {"status": "skipped", "ticket_id": ticket.id, "reason": reason}
 
     # Edge-detect the trigger tag to skip non-dispatching cascade webhooks
-    # (PR merge ArtifactLinks, comments, field edits). See _check_trigger_edge.
-    if not _check_trigger_edge(ticket.id, tag_present):
+    # (PR merge ArtifactLinks, comments, field edits). Prefer the payload's
+    # tag delta when present; fall back to in-process memory otherwise.
+    # See _check_trigger_edge for semantics.
+    was_before, _ = extract_tag_transition(payload, [ai_label, quick_label])
+    if not _check_trigger_edge(ticket.id, tag_present, was_present_before=was_before):
         _bump_webhook_counter(COUNTER_SKIPPED_NOT_EDGE)
+        signal = "payload_delta" if was_before is not None else "process_memory"
         logger.info(
             "ado_webhook_not_edge",
             ticket_id=ticket.id,
-            reason="trigger tag already present on previous webhook",
+            reason="trigger tag already present; not a new edge",
+            signal=signal,
         )
         append_trace(
             ticket.id, generate_trace_id(), "webhook", "ado_webhook_skipped_not_edge",
             ticket_type=ticket.ticket_type, source="ado",
             ticket_title=ticket.title,
-            reason="tag already present on previous webhook",
+            reason="tag already present; not a new edge",
+            signal=signal,
         )
         return {
             "status": "skipped",

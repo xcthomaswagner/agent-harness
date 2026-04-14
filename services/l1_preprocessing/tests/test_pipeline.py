@@ -457,6 +457,7 @@ class TestEnrichedTransitionStatus:
             quick_label="ai-quick",
             client_repo_path="",
             platform_profile="",
+            source_control={},
         )
         enriched = EnrichedTicket(
             **sample_ticket.model_dump(),
@@ -500,6 +501,7 @@ class TestEnrichedTransitionStatus:
             quick_label="ai-quick",
             client_repo_path="",
             platform_profile="",
+            source_control={},
         )
         enriched = EnrichedTicket(
             **sample_ticket.model_dump(),

@@ -8,13 +8,18 @@ This module connects the ticket analyst to the downstream actions:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import structlog
 
@@ -37,6 +42,7 @@ from models import (
     TicketSource,
     classify_analyst_output,
 )
+from redaction import redact
 from tracer import BILLING_API, append_trace, generate_trace_id
 
 logger = structlog.get_logger()
@@ -49,6 +55,220 @@ SPAWN_SCRIPT = HARNESS_ROOT / "scripts" / "spawn_team.py"
 # coroutine and GC could collect it mid-flight — the docs are explicit
 # about this. Tasks remove themselves from the set when they finish.
 _SPAWN_REAPER_TASKS: set[Any] = set()
+
+# Per-repo locks for _ensure_client_repo. Two webhooks landing simultaneously
+# for the same missing path would both try to clone otherwise — git fails
+# the second attempt with "destination exists" and one ticket never spawns.
+# Keyed by the resolved local_path string. Lock objects live for process
+# lifetime which is fine: a handful of distinct client repos at most.
+_REPO_LOCKS: dict[str, threading.Lock] = {}
+_REPO_LOCKS_LOCK = threading.Lock()
+
+
+def _get_repo_lock(local_path: str) -> threading.Lock:
+    """Return the per-path threading.Lock used by _ensure_client_repo.
+
+    Lazy-init under the registry lock so two callers never get different
+    Lock instances for the same path.
+    """
+    with _REPO_LOCKS_LOCK:
+        return _REPO_LOCKS.setdefault(local_path, threading.Lock())
+
+
+def _normalize_remote(url: str) -> str:
+    """Strip credentials and trailing slash from a git remote URL for
+    comparison. ``https://user:pat@host/x/y`` → ``host/x/y``.
+
+    spawn_team rewrites ``origin`` with a PAT-embedded URL on each spawn,
+    so a literal string compare against the profile's plain org URL will
+    always fail. Compare host+path only.
+    """
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    path = parts.path.rstrip("/").removesuffix(".git")
+    return f"{host}{path}"
+
+
+def _cleanup_partial_clone(repo: Path) -> None:
+    """Remove a directory left behind by a failed/timed-out git clone.
+
+    Without this, the next call's "path exists and is a git repo" branch
+    would see the partial .git dir and silently return True with broken
+    state underneath.
+    """
+    with contextlib.suppress(OSError):
+        shutil.rmtree(str(repo))
+
+
+def _build_clone_url(source_control: dict[str, Any]) -> str:
+    """Construct an auth URL for git clone from a profile's source_control.
+
+    Constructed in memory; caller must never log the result. ADO uses
+    ADO_PAT with a dummy username. GitHub uses GITHUB_TOKEN. Returns
+    empty string when creds are missing.
+    """
+    sc_type = str(source_control.get("type", "")).lower()
+    if sc_type == "azure-repos":
+        pat = os.environ.get("ADO_PAT", "")
+        org = str(source_control.get("org", "")).rstrip("/")
+        project = str(source_control.get("ado_project", "")) or str(
+            source_control.get("repo", "")
+        )
+        repo = str(source_control.get("repo", ""))
+        if not (pat and org and project and repo):
+            return ""
+        # ADO accepts any non-empty username; the PAT is what matters.
+        # Preserve the org URL's path prefix so modern dev.azure.com/<org>
+        # URLs work alongside the legacy *.visualstudio.com form.
+        org_parts = urlsplit(org)
+        host = org_parts.hostname or ""
+        org_path = org_parts.path.rstrip("/")
+        return f"https://any:{pat}@{host}{org_path}/{project}/_git/{repo}"
+    if sc_type in ("github", "git"):
+        token = os.environ.get("GITHUB_TOKEN", "") or os.environ.get("GH_TOKEN", "")
+        gh_repo = str(source_control.get("repo", ""))
+        if not (token and gh_repo):
+            return ""
+        return f"https://x-access-token:{token}@github.com/{gh_repo}.git"
+    return ""
+
+
+def _ensure_client_repo(
+    local_path: str,
+    source_control: dict[str, Any],
+    log: Any,
+) -> bool:
+    """Ensure the client repo exists at ``local_path`` as a valid git checkout.
+
+    Returns True when the repo is ready for spawn; False on any failure
+    condition (caller skips spawn with a structured log line, never with a
+    phantom 'spawn_failed' status).
+
+    Behavior:
+    - path missing → clone from source_control config
+    - path exists, not a git repo → skip (do not clobber arbitrary dirs)
+    - path exists, git repo, wrong remote → skip (could be intentional)
+    - path exists, git repo, correct remote → git fetch (NOT reset --hard;
+      worktrees share refs and a reset can corrupt in-flight operations)
+
+    Called under a per-repo lock to prevent concurrent clones racing into
+    the same destination.
+    """
+    lock = _get_repo_lock(local_path)
+    with lock:
+        repo = Path(local_path)
+
+        if not repo.exists():
+            clone_url = _build_clone_url(source_control)
+            if not clone_url:
+                log.warning(
+                    "client_repo_clone_skipped",
+                    reason="missing source_control config or auth token",
+                    local_path=local_path,
+                )
+                return False
+            try:
+                repo.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                log.error(
+                    "client_repo_parent_mkdir_failed",
+                    local_path=local_path,
+                    error=str(exc)[:200],
+                )
+                return False
+
+            log.info("client_repo_cloning", local_path=local_path)
+            # Intentionally do NOT log clone_url — it contains the PAT.
+            try:
+                result = subprocess.run(
+                    ["git", "clone", clone_url, str(repo)],
+                    capture_output=True, text=True, timeout=600,
+                )
+            except subprocess.TimeoutExpired:
+                _cleanup_partial_clone(repo)
+                log.error("client_repo_clone_timeout", local_path=local_path)
+                return False
+            if result.returncode != 0:
+                _cleanup_partial_clone(repo)
+                # Redact any embedded credentials from stderr before logging;
+                # `redact()` handles the `https://user:pat@host/...` shape
+                # and any other secret patterns git may echo.
+                stderr, _ = redact(result.stderr[:500])
+                log.error(
+                    "client_repo_clone_failed",
+                    local_path=local_path,
+                    stderr=stderr,
+                )
+                return False
+            log.info("client_repo_cloned", local_path=local_path)
+            return True
+
+        # Exists — verify it's a git repo.
+        if not (repo / ".git").exists():
+            log.warning(
+                "client_repo_not_git",
+                reason="path exists but has no .git",
+                local_path=local_path,
+            )
+            return False
+
+        # Exists and is a git repo — verify remote if we can compute the
+        # expected one. If source_control is empty we have no way to verify
+        # the remote or fetch updates; trust the local repo and return.
+        # This also keeps tests that set up a fake .git dir without
+        # source_control config from needing to mock subprocess.run.
+        clone_url = _build_clone_url(source_control)
+        if not clone_url:
+            return True
+
+        try:
+            remote_result = subprocess.run(
+                ["git", "-C", str(repo), "remote", "get-url", "origin"],
+                capture_output=True, text=True, check=False,
+            )
+        except OSError as exc:
+            log.warning(
+                "client_repo_remote_check_failed",
+                local_path=local_path,
+                error=str(exc)[:200],
+            )
+            return False
+        actual_remote = remote_result.stdout.strip()
+        if actual_remote:
+            norm_actual = _normalize_remote(actual_remote)
+            norm_expected = _normalize_remote(clone_url)
+            if norm_actual != norm_expected:
+                log.warning(
+                    "client_repo_remote_mismatch",
+                    local_path=local_path,
+                    expected=norm_expected,
+                    actual=norm_actual,
+                )
+                return False
+
+        # Best-effort fetch. We deliberately do NOT `reset --hard`: the base
+        # repo's refs are shared with any live worktrees, and a reset during
+        # an in-flight agent push can corrupt refs.
+        try:
+            fetch_result = subprocess.run(
+                ["git", "-C", str(repo), "fetch", "--quiet", "--no-tags"],
+                capture_output=True, text=True, timeout=120, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            log.warning("client_repo_fetch_timeout", local_path=local_path)
+            # Fetch timeout is non-fatal — spawn can still succeed against
+            # the existing local state.
+        else:
+            if fetch_result.returncode != 0:
+                # Non-fatal — spawn can still succeed against local state,
+                # but operators need visibility (expired PAT, network down).
+                log.warning(
+                    "client_repo_fetch_failed",
+                    local_path=local_path,
+                    returncode=fetch_result.returncode,
+                    stderr=fetch_result.stderr[:200],
+                )
+        return True
 
 
 def _has_sitecore_jss_dep(repo_path: Path) -> bool:
@@ -338,6 +558,7 @@ class Pipeline:
                 pipeline_mode=pipeline_mode, client_repo_override=client_repo,
                 trace_id=tid,
                 client_profile_name=profile.name if profile else "",
+                source_control=profile.source_control if profile else {},
             )
         finally:
             ticket_path.unlink(missing_ok=True)
@@ -513,6 +734,7 @@ class Pipeline:
         client_repo_override: str = "",
         trace_id: str = "",
         client_profile_name: str = "",
+        source_control: dict[str, Any] | None = None,
     ) -> bool:
         """Trigger L2 by calling the spawn script.
 
@@ -525,13 +747,25 @@ class Pipeline:
 
         Returns True if spawn was triggered, False if skipped.
         """
-        import asyncio
-
         client_repo = client_repo_override or self._settings.default_client_repo
         if not client_repo:
             log.warning(
                 "l2_spawn_skipped",
                 reason="No default_client_repo configured in settings",
+            )
+            return False
+
+        # Verify (and auto-provision) the client repo before spawning.
+        # Runs off the event loop: git clone can take minutes for large
+        # Salesforce repos and blocking uvicorn here wedges all webhooks.
+        repo_ready = await asyncio.to_thread(
+            _ensure_client_repo, client_repo, source_control or {}, log,
+        )
+        if not repo_ready:
+            log.warning(
+                "l2_spawn_skipped",
+                reason="client_repo_unavailable",
+                client_repo=client_repo,
             )
             return False
 

@@ -33,6 +33,69 @@ _ADO_TYPE_MAP: dict[str, TicketType] = {
 }
 
 
+def _tags_include(tags_str: str, tag_name: str) -> bool:
+    """Case-insensitive exact-tag match within a semicolon-separated tag string.
+
+    ADO serializes multiple tags as ``"Foo; Bar; Baz"``. Substring matching
+    on the raw string would falsely accept ``"ai-implement-later"`` as a
+    match for ``"ai-implement"`` — a real bug we've hit before. Split and
+    strip first; then compare lowered.
+    """
+    if not tags_str or not tag_name:
+        return False
+    wanted = tag_name.strip().lower()
+    return any(t.strip().lower() == wanted for t in tags_str.split(";"))
+
+
+def extract_tag_transition(
+    webhook_payload: dict[str, Any], tag_names: list[str],
+) -> tuple[bool | None, bool]:
+    """Return ``(was_present_before, is_present_now)`` for any tag in
+    ``tag_names`` from an ADO ``workitem.updated`` (or ``.created``) payload.
+
+    Note: this function intentionally re-parses the raw webhook payload
+    rather than reading ``TicketPayload.labels``. ``normalize()`` produces
+    labels from the *post-state* only; the edge-trigger decision needs the
+    *delta* (``resource.fields``), which ``normalize()`` discards.
+
+    ADO Service Hooks carry two different field blocks:
+      - ``resource.fields`` — the *delta* for ``workitem.updated`` events,
+        shaped ``{"System.Tags": {"oldValue": "...", "newValue": "..."}}``.
+        Only fields that actually changed appear here.
+      - ``resource.revision.fields`` — the full *post-state* of all fields,
+        present on both created and updated events.
+
+    For edge-trigger decisions we want to know whether the trigger tag
+    transitioned absent→present *on this webhook*. If the delta contains
+    ``System.Tags``, we can answer precisely. If not (tag didn't change
+    in this update, or this is a ``workitem.created`` event), we return
+    ``(None, is_present_now)`` — caller falls back to in-process memory.
+
+    Any match across the supplied ``tag_names`` counts (supports both
+    ai_label and quick_label).
+    """
+    resource = webhook_payload.get("resource", {}) or {}
+
+    # Post-state from revision (always present).
+    work_item = resource.get("revision", resource) or {}
+    post_fields = work_item.get("fields", {}) or {}
+    post_tags = str(post_fields.get("System.Tags", "") or "")
+    is_present_now = any(_tags_include(post_tags, t) for t in tag_names)
+
+    # Delta from resource.fields. Only present for workitem.updated and
+    # only when the field actually changed in the update.
+    delta_fields = resource.get("fields", {}) or {}
+    tag_delta = delta_fields.get("System.Tags")
+    if not isinstance(tag_delta, dict):
+        return (None, is_present_now)
+    # ADO emits either {"oldValue": "...", "newValue": "..."} or sometimes
+    # only one side when one is empty. Default to empty string so the
+    # absence of oldValue is treated as "no tag before".
+    old_value = str(tag_delta.get("oldValue", "") or "")
+    was_present_before = any(_tags_include(old_value, t) for t in tag_names)
+    return (was_present_before, is_present_now)
+
+
 class AdoAdapter:
     """Normalizes Azure DevOps Service Hook payloads and writes back via ADO REST API."""
 
