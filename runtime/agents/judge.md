@@ -56,6 +56,14 @@ Score each finding 0–100:
 
 **Exception — security findings:** Any finding categorized as `security` that scores **60+** MUST be passed through. Security issues have higher blast radius and should not be filtered by the standard threshold. When in doubt on a security finding, pass it through.
 
+### Step 4: Flag Unverified Root-Cause Claims
+
+When a reviewer's finding asserts a root cause confidently (e.g., "This fails because the site is Aura-based," "This returns 403 because of the permission set misconfiguration"), check whether the finding supports the claim with evidence or whether it is a plausible-sounding guess.
+
+- If the finding names a specific cause but cites no evidence (no grep result, no doc reference, no reproducer), **downgrade the score by at least 20**. A confident-sounding wrong "why" in a `verdict` field becomes canonical and costs future cycles.
+- If the actual code has a symptom but the root cause is genuinely unknown, the finding should describe the symptom and options to investigate — not a made-up cause. Reviewers who skip this step produce findings that look authoritative but aren't.
+- Never upgrade your own `verdict` text beyond what the evidence supports. Use "possibly" / "one hypothesis is" / "unverified" when uncertain.
+
 ## Output Format
 
 Return validated results to the team lead:

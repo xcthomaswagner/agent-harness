@@ -12,7 +12,14 @@ The dev-loop skill covers:
 
 You have access to the `salesforce` MCP server (100+ structured tools: `sf_deploy`, `sf_apex_test`, `sf_query`, `sf_scratch_create`, `sf_agent_*`, `sf_lwc_*`, etc.). Prefer these over shelling out to the `sf` CLI — they return parsed JSON and are more reliable. The MCP runs in harness mode with a production guard that blocks writes against production orgs.
 
+**Also available: `salesforce-capability-mcp` tools** (`mcp__salesforce-capability-mcp__sf_deploy_smart`, `sf_destroy`, `sf_experience_bundle_bootstrap`, `sf_b2b_setup`, `sf_commerce_images`, `sf_settings_ui`, `sf_scrape_theme`). These verify post-conditions (schema convergence, component absence, cold-start diagnostics) that the base `sf` tooling does not. When deploying new custom fields or touching Experience Cloud, prefer these — a raw deploy can return "Created" while the org schema still doesn't have the field. See `~/.claude/rules/sf-capability-mcp.md` for tool-selection rules.
+
 The rest of this supplement covers the **what to write** (Apex patterns, LWC structure, Agentforce metadata, B2B, OMS). The dev-loop skill covers the **how to verify it works**. Use both together.
+
+## Load These Before Deploying
+
+- **`DEPLOYMENT_GOTCHAS.md`** — schema propagation lag, `.sf/` source-tracking corruption in worktrees, destructive-changes silent no-ops, Agentforce deployment order, auth issues. **Always read before any deploy that creates custom fields or touches Agentforce metadata.**
+- **`LWR_EXPERIENCE_CLOUD_GOTCHAS.md`** — LWR-specific landmines (Commerce wire adapters failing at deploy, `productListImage` vs `tileImage`, buyer permission sets, DigitalExperienceBundle content.json structural IDs, first-party cookie setting, etc.). **Load when the ticket involves Experience Cloud, LWR sites, or B2B Commerce storefronts.**
 
 ---
 
