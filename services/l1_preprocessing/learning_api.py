@@ -221,18 +221,32 @@ async def _load_proposed_lesson(lesson_id: str) -> Any:
     return row
 
 
+_DRAFTER_OUTPUT_KEYS: frozenset[str] = frozenset({
+    "unified_diff", "drafter_origin",
+})
+
+
 def _row_proposed_delta(row: Any) -> dict[str, Any]:
     """Parse the stored proposed_delta_json into a dict.
 
     A candidate with a blank or malformed delta can't be drafted —
     callers turn this into a drafter failure, not a 500.
+
+    Strips drafter-output keys (``unified_diff``, ``drafter_origin``)
+    before returning: the ``draft_ready -> proposed`` transition is
+    legal in the store, so a lesson bounced back to proposed retains
+    the old drafter output on the row. Without stripping, /draft
+    would feed the stale diff into the next LLM prompt — confusing
+    the model about whether the "starter" already includes a draft.
     """
     raw = row["proposed_delta_json"] or ""
     try:
         obj = json.loads(raw) if raw else {}
     except (ValueError, TypeError):
         obj = {}
-    return obj if isinstance(obj, dict) else {}
+    if not isinstance(obj, dict):
+        return {}
+    return {k: v for k, v in obj.items() if k not in _DRAFTER_OUTPUT_KEYS}
 
 
 def _load_evidence_snippets(lesson_id: str) -> list[str]:

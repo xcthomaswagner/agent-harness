@@ -239,6 +239,39 @@ class TestAvailabilityAndResolution:
 # ---- severity bumps --------------------------------------------------
 
 
+class TestRetryDedup:
+    def test_multiple_pr_runs_per_ticket_dedupe(
+        self, conn, trace_dir: Path
+    ) -> None:
+        """Regression: a ticket with multiple pr_runs (retries) used
+        to contribute one observation per pr_run — each counting the
+        SAME bash/mcp totals from the shared trace. That inflated
+        rationale's ``total_bash`` and could flip severity. Now we
+        count one observation per ticket+verb.
+        """
+        # Seed MIN_CLUSTER_SIZE tickets, each with a retry (2 pr_runs).
+        for i in range(MIN_CLUSTER_SIZE):
+            tid = f"TKT-{i}"
+            _seed_run(conn, 100 + i * 2, tid)
+            _seed_run(conn, 101 + i * 2, tid)  # retry — same ticket
+            _write_trace(
+                trace_dir, tid,
+                bash_verb_counts={"sf": 10},
+                mcp_servers_available=["salesforce_capability_mcp"],
+                tool_counts={},
+            )
+        out = McpDriftDetector().scan(conn, window_days=14)
+        assert len(out) == 1
+        proposal = out[0]
+        # Rationale references the unique-ticket count, and total_bash
+        # should be the raw 10 per ticket * 3 tickets = 30, NOT 60.
+        delta = json.loads(proposal.proposed_delta_json)
+        assert "30x" in delta["rationale_md"]
+        assert "60x" not in delta["rationale_md"]
+        # window_frequency tracks unique tickets.
+        assert proposal.window_frequency == MIN_CLUSTER_SIZE
+
+
 class TestSeverity:
     def test_zero_mcp_bumps_severity(self, conn, trace_dir: Path) -> None:
         for i in range(MIN_CLUSTER_SIZE):

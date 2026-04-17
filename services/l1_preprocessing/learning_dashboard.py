@@ -264,6 +264,12 @@ def _format_proposed_delta(raw_json: str) -> str:
     Only the keys humans care about when triaging — target_path,
     edit_type, anchor, rationale_md, after — are shown. Unknown
     shapes render as-is so future detector variants stay visible.
+
+    ``unified_diff`` (added by /draft) is separated out so its
+    multi-line content doesn't break the visual ``key: value``
+    structure of the other fields. Without the split, a follow-on
+    key like ``drafter_origin`` would appear to dangle below the diff
+    as if it were part of the diff's body.
     """
     if not raw_json:
         return ""
@@ -286,11 +292,18 @@ def _format_proposed_delta(raw_json: str) -> str:
         if k in obj:
             val = obj[k]
             lines.append(f"{k}: {val}")
+    # Suppress multi-line diff from the flat key/value block so it
+    # doesn't visually merge with subsequent single-line keys.
+    unified_diff = obj.get("unified_diff")
     for k, v in obj.items():
-        if k not in ordered_keys:
-            lines.append(f"{k}: {v}")
+        if k in ordered_keys or k == "unified_diff":
+            continue
+        lines.append(f"{k}: {v}")
     body = "\n".join(lines)
-    return f'<pre class="delta">{_e(body)}</pre>'
+    out = f'<pre class="delta">{_e(body)}</pre>'
+    if isinstance(unified_diff, str) and unified_diff.strip():
+        out += f'<pre class="delta">{_e(unified_diff)}</pre>'
+    return out
 
 
 def _render_outcome_fragment(outcome: sqlite3.Row) -> str:

@@ -204,6 +204,11 @@ class McpDriftDetector:
 
         # Cluster: _DriftKey -> list[_DriftObservation]
         clusters: dict[_DriftKey, list[_DriftObservation]] = {}
+        # Dedupe per ticket_id + verb: retries create multiple pr_runs
+        # sharing one trace. Without this, the same bash_count / mcp_count
+        # gets summed N times, inflating `total_bash` in the rationale and
+        # possibly flipping severity when MCP usage is actually zero.
+        seen_per_key: set[tuple[str, str]] = set()
 
         for pr in pr_rows:
             platform = _resolve_platform_profile(pr["client_profile"])
@@ -222,6 +227,7 @@ class McpDriftDetector:
             tool_counts = idx.get("tool_counts") or {}
             bash_verb_counts = idx.get("bash_verb_counts") or {}
             observed_at = _run_started_at(entries) or pr["opened_at"] or ""
+            ticket_id = str(pr["ticket_id"])
 
             for raw_verb, raw_count in bash_verb_counts.items():
                 verb = _canonical_verb(raw_verb)
@@ -238,6 +244,11 @@ class McpDriftDetector:
                 if bash_count < RATIO_THRESHOLD * (mcp_count + 1):
                     continue
 
+                dedup_key = (ticket_id, verb)
+                if dedup_key in seen_per_key:
+                    continue
+                seen_per_key.add(dedup_key)
+
                 key = _DriftKey(
                     client_profile=pr["client_profile"],
                     platform_profile=platform,
@@ -247,7 +258,7 @@ class McpDriftDetector:
                 clusters.setdefault(key, []).append(
                     _DriftObservation(
                         pr_run_id=int(pr["id"]),
-                        ticket_id=str(pr["ticket_id"]),
+                        ticket_id=ticket_id,
                         observed_at=observed_at,
                         bash_count=bash_count,
                         mcp_count=mcp_count,

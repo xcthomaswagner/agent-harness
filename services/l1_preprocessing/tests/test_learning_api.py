@@ -30,6 +30,53 @@ def admin_headers(configure_admin_auth: str) -> dict[str, str]:
     return {"X-Autonomy-Admin-Token": configure_admin_auth}
 
 
+class TestRowProposedDelta:
+    """Regression coverage for the drafter-input sanitizer.
+
+    A ``draft_ready -> proposed`` bounce leaves the previous drafter
+    output on the row. /draft reads that row, parses the JSON, and
+    feeds it to the next LLM prompt — without stripping, the stale
+    unified_diff muddies the starter proposal the model sees.
+    """
+
+    def test_strips_unified_diff_and_drafter_origin(self) -> None:
+        import json as _json
+        from unittest.mock import MagicMock
+
+        from learning_api import _row_proposed_delta
+
+        row = MagicMock()
+        row.__getitem__ = lambda self, k: _json.dumps({
+            "target_path": "runtime/skills/x/SKILL.md",
+            "anchor": "## Checklist",
+            "unified_diff": "--- a/x\n+++ b/x\n@@\n+rule",
+            "drafter_origin": "markdown_drafter",
+        }) if k == "proposed_delta_json" else None
+        out = _row_proposed_delta(row)
+        assert "unified_diff" not in out
+        assert "drafter_origin" not in out
+        assert out["target_path"] == "runtime/skills/x/SKILL.md"
+        assert out["anchor"] == "## Checklist"
+
+    def test_empty_delta_returns_empty(self) -> None:
+        from unittest.mock import MagicMock
+
+        from learning_api import _row_proposed_delta
+
+        row = MagicMock()
+        row.__getitem__ = lambda self, k: None
+        assert _row_proposed_delta(row) == {}
+
+    def test_malformed_delta_returns_empty(self) -> None:
+        from unittest.mock import MagicMock
+
+        from learning_api import _row_proposed_delta
+
+        row = MagicMock()
+        row.__getitem__ = lambda self, k: "not json"
+        assert _row_proposed_delta(row) == {}
+
+
 class TestListCandidates:
     def test_returns_empty_list_when_no_candidates(
         self, client: TestClient

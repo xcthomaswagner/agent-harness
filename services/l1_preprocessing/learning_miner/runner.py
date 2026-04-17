@@ -157,7 +157,19 @@ def _persist_proposal(
 
     for item in proposal.evidence:
         try:
-            redacted_snippet, _ = redact(item.snippet)
+            redacted_snippet, redaction_count = redact(item.snippet)
+            if redaction_count > 0:
+                # Observability: flag secret-like payloads caught by
+                # the redactor. Detector evidence should be clean;
+                # a non-zero count means upstream trace contained
+                # credentials and the redactor scrubbed them.
+                logger.info(
+                    "learning_evidence_redacted",
+                    detector_name=proposal.detector_name,
+                    lesson_id=lesson_id,
+                    trace_id=item.trace_id,
+                    redaction_count=redaction_count,
+                )
             inserted = insert_lesson_evidence(
                 conn,
                 lesson_id=lesson_id,
