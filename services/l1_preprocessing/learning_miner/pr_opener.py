@@ -27,6 +27,8 @@ import structlog
 
 from redaction import redact_token_urls
 
+from ._subprocess import build_env, resolve_auth_token, run_bin
+
 logger = structlog.get_logger()
 
 
@@ -64,65 +66,13 @@ def _build_branch_name(lesson_id: str) -> str:
     return name
 
 
-def _resolve_auth_token() -> str:
-    """Return the GitHub PAT for `xcagentrockwell`.
-
-    Precedence: ``AGENT_GH_TOKEN`` > ``GITHUB_TOKEN``. Matches the
-    fallback order in ``services/l3_pr_review/github_api.py``.
-    Returns empty string when neither is set — the caller treats an
-    empty token as a misconfigured deployment (the push will fail
-    loudly rather than silently pushing with whoever's ambient
-    credentials happen to be on the host).
-    """
-    return os.getenv("AGENT_GH_TOKEN") or os.getenv("GITHUB_TOKEN") or ""
-
-
-def _run_bin(
-    binary: str,
-    args: list[str],
-    *,
-    cwd: Path,
-    env: dict[str, str] | None = None,
-    timeout: int = 60,
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [binary, *args],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=env,
-    )
-
-
 # Thin delegates so tests can still monkeypatch ``_gh`` specifically.
 def _git(args: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
-    return _run_bin("git", args, **kw)  # type: ignore[arg-type]
+    return run_bin("git", args, **kw)  # type: ignore[arg-type]
 
 
 def _gh(args: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
-    return _run_bin("gh", args, **kw)  # type: ignore[arg-type]
-
-
-def _build_env(token: str) -> dict[str, str]:
-    """Subprocess env with the agent PAT wired in as ``GH_TOKEN``.
-
-    Allowlist not denylist — keeps ANTHROPIC_API_KEY and other L1
-    secrets out of git/gh. ``GIT_TERMINAL_PROMPT=0`` +
-    ``GIT_ASKPASS=/bin/true`` make auth failures fail instantly
-    instead of hanging on an interactive prompt under
-    ``capture_output=True``.
-    """
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if k in {"PATH", "HOME", "LANG", "LC_ALL", "USER"}
-    }
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    env["GIT_ASKPASS"] = "/bin/true"
-    if token:
-        env["GH_TOKEN"] = token
-    return env
+    return run_bin("gh", args, **kw)  # type: ignore[arg-type]
 
 
 def _set_identity(worktree: Path) -> None:
@@ -272,8 +222,8 @@ def open_pr_for_lesson(inputs: OpenPRInputs) -> PROpenerResult:
     except ValueError as exc:
         return PROpenerResult(success=False, error=str(exc))
 
-    token = _resolve_auth_token()
-    env = _build_env(token)
+    token = resolve_auth_token()
+    env = build_env(token)
 
     scratch_parent = Path(tempfile.mkdtemp(prefix="learning-pr-"))
     clone_dir = scratch_parent / "harness"

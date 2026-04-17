@@ -23,6 +23,7 @@ from fastapi.responses import HTMLResponse
 
 from autonomy_store import (
     autonomy_conn,
+    list_latest_outcomes,
     list_lesson_candidates,
     list_lesson_evidence,
 )
@@ -52,6 +53,17 @@ _SEVERITY_BADGE: dict[str, str] = {
     "info": "badge-secondary",
     "warn": "badge-warning",
     "critical": "badge-error",
+}
+
+# Outcome verdict → badge class. ``pending`` is the default before
+# window elapses; ``human_reedit`` trumps any metric-based verdict
+# because a human edit is a stronger signal than metric drift.
+_VERDICT_BADGE: dict[str, str] = {
+    "pending": "badge-secondary",
+    "confirmed": "badge-success",
+    "no_change": "badge-blue",
+    "regressed": "badge-error",
+    "human_reedit": "badge-error",
 }
 
 
@@ -273,9 +285,47 @@ def _format_proposed_delta(raw_json: str) -> str:
     return f'<pre class="delta">{_e(body)}</pre>'
 
 
+def _render_outcome_fragment(outcome: sqlite3.Row) -> str:
+    """Render a compact verdict badge + pre/post metric tooltip.
+
+    Rendered inline in the scope cell under the PR link so operators
+    can see at a glance whether a merged lesson helped. Full metric
+    detail lives in the ``title`` attribute so only a hover pulls
+    the numbers — keeps the row compact on a long dashboard.
+    """
+    verdict = outcome["verdict"] or "pending"
+
+    def _fmt(value: float | None) -> str:
+        return "—" if value is None else f"{value * 100:.1f}%"
+
+    tooltip = (
+        f"FPA: {_fmt(outcome['pre_fpa'])} → {_fmt(outcome['post_fpa'])}"
+        f" · Escape: {_fmt(outcome['pre_escape_rate'])} → "
+        f"{_fmt(outcome['post_escape_rate'])}"
+        f" · Catch: {_fmt(outcome['pre_catch_rate'])} → "
+        f"{_fmt(outcome['post_catch_rate'])}"
+        f" · reedits: {int(outcome['human_reedit_count'])}"
+    )
+    badge_cls = _VERDICT_BADGE.get(verdict, "badge-secondary")
+    # Regressed / human_reedit rows expose a disabled Revert button so
+    # the operator sees that the option exists; wiring lands in Tier 2.
+    revert_disabled = verdict in {"regressed", "human_reedit"}
+    revert_html = (
+        '<button class="btn btn-reject" disabled '
+        'title="Revert not yet wired (Tier 2)">Revert?</button>'
+        if revert_disabled
+        else ""
+    )
+    return (
+        f'<br><span class="badge {_e(badge_cls)}" title="{_e(tooltip)}">'
+        f"{_e(verdict)}</span> {revert_html}"
+    )
+
+
 def _render_candidate_row(
     candidate: sqlite3.Row,
     evidence: list[sqlite3.Row],
+    outcome: sqlite3.Row | None = None,
 ) -> str:
     status = candidate["status"] or ""
     severity = candidate["severity"] or "info"
@@ -293,6 +343,8 @@ def _render_candidate_row(
             f"<br><a href=\"{_safe_url(pr_url)}\" target=\"_blank\" "
             f"rel=\"noreferrer noopener\">PR →</a>"
         )
+    if outcome is not None:
+        scope_cell += _render_outcome_fragment(outcome)
     first_seen = _fmt_ts(candidate["detected_at"])
     last_seen = _fmt_ts(candidate["last_seen_at"])
     time_cell = f"{_e(last_seen)}<br><span class='meta'>first {_e(first_seen)}</span>"
@@ -319,7 +371,7 @@ def _render_candidate_row(
 
 
 def _render_candidate_table(
-    rows: list[tuple[sqlite3.Row, list[sqlite3.Row]]],
+    rows: list[tuple[sqlite3.Row, list[sqlite3.Row], sqlite3.Row | None]],
 ) -> str:
     if not rows:
         return (
@@ -328,7 +380,9 @@ def _render_candidate_table(
             "Check that <code>LEARNING_MINER_ENABLED</code> is on "
             "and a backfill has run.</p>"
         )
-    body = "".join(_render_candidate_row(c, ev) for c, ev in rows)
+    body = "".join(
+        _render_candidate_row(c, ev, outcome) for c, ev, outcome in rows
+    )
     return (
         "<table>"
         "<thead><tr>"
@@ -371,10 +425,13 @@ async def get_learning_dashboard(
             client_profile=client_profile,
             limit=limit,
         )
-        enriched: list[tuple[Any, list[Any]]] = [
-            (c, list_lesson_evidence(conn, c["lesson_id"]))
-            for c in candidates
-        ]
+        lesson_ids = [str(c["lesson_id"]) for c in candidates]
+        outcomes_by_id = list_latest_outcomes(conn, lesson_ids)
+        enriched: list[tuple[Any, list[Any], Any]] = []
+        for c in candidates:
+            evidence = list_lesson_evidence(conn, c["lesson_id"])
+            outcome = outcomes_by_id.get(str(c["lesson_id"]))
+            enriched.append((c, evidence, outcome))
     selector_html = _render_selector(profiles, client_profile, status)
     table_html = _render_candidate_table(enriched)
     summary = (

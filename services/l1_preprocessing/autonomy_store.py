@@ -649,8 +649,15 @@ def list_pr_runs(
     *,
     client_profile: str | None = None,
     since_iso: str | None = None,
+    until_iso: str | None = None,
 ) -> list[sqlite3.Row]:
-    """List pr_runs rows with optional client_profile and opened_at filters."""
+    """List pr_runs rows with optional client_profile + opened_at filters.
+
+    ``since_iso`` / ``until_iso`` are inclusive/exclusive respectively —
+    matching the half-open window convention the outcomes job uses
+    to avoid double-counting PRs that open at midnight between
+    pre/post windows.
+    """
     clauses: list[str] = []
     params: list[object] = []
     if client_profile is not None:
@@ -659,6 +666,9 @@ def list_pr_runs(
     if since_iso is not None:
         clauses.append("opened_at >= ?")
         params.append(since_iso)
+    if until_iso is not None:
+        clauses.append("opened_at < ?")
+        params.append(until_iso)
     sql = "SELECT * FROM pr_runs"
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
@@ -1873,3 +1883,173 @@ def set_lesson_status_reason(
             "WHERE lesson_id = ?",
             (reason[:500], ts, lesson_id),
         )
+
+
+def set_lesson_merged_commit_sha(
+    conn: sqlite3.Connection,
+    lesson_id: str,
+    merged_commit_sha: str,
+    *,
+    now: str | None = None,
+) -> None:
+    """Record the merge commit sha for an applied lesson.
+
+    Side-channel writer that sits alongside ``set_lesson_status_reason``
+    so outcomes measurement doesn't need raw SQL against
+    ``lesson_candidates``. Applied→applied is not a legal
+    ``update_lesson_status`` transition, and we only ever need to
+    stamp this column once per lesson.
+    """
+    ts = now or _now_iso()
+    with conn:
+        conn.execute(
+            "UPDATE lesson_candidates SET merged_commit_sha = ?, "
+            "updated_at = ? WHERE lesson_id = ?",
+            (merged_commit_sha, ts, lesson_id),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Lesson outcomes (v5 — pre/post metrics + human-reedit signals)
+# ---------------------------------------------------------------------------
+
+
+_TERMINAL_VERDICTS: tuple[str, ...] = ("regressed", "human_reedit", "confirmed")
+
+
+def list_applied_lessons(
+    conn: sqlite3.Connection,
+    *,
+    exclude_terminal_verdicts: bool = False,
+) -> list[sqlite3.Row]:
+    """Return applied lessons in detected_at DESC order.
+
+    With ``exclude_terminal_verdicts=True`` the query LEFT JOINs the
+    latest ``lesson_outcomes`` row per lesson and drops any whose
+    verdict is terminal (regressed / human_reedit / confirmed). The
+    outcomes job uses that filter to avoid re-measuring lessons whose
+    verdict is already final.
+    """
+    if exclude_terminal_verdicts:
+        placeholders = ",".join("?" for _ in _TERMINAL_VERDICTS)
+        sql = f"""
+            SELECT c.* FROM lesson_candidates c
+            LEFT JOIN (
+                SELECT lesson_id, verdict
+                FROM lesson_outcomes
+                WHERE id IN (
+                    SELECT MAX(id) FROM lesson_outcomes GROUP BY lesson_id
+                )
+            ) o ON o.lesson_id = c.lesson_id
+            WHERE c.status = 'applied'
+              AND (o.verdict IS NULL OR o.verdict NOT IN ({placeholders}))
+            ORDER BY c.detected_at DESC
+        """
+        rows = conn.execute(sql, _TERMINAL_VERDICTS).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM lesson_candidates WHERE status = 'applied' "
+            "ORDER BY detected_at DESC"
+        ).fetchall()
+    return list(rows)
+
+
+def get_latest_outcome(
+    conn: sqlite3.Connection, lesson_id: str
+) -> sqlite3.Row | None:
+    """Return the most recent ``lesson_outcomes`` row for a lesson, or None."""
+    row: sqlite3.Row | None = conn.execute(
+        "SELECT * FROM lesson_outcomes WHERE lesson_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (lesson_id,),
+    ).fetchone()
+    return row
+
+
+def list_latest_outcomes(
+    conn: sqlite3.Connection, lesson_ids: list[str]
+) -> dict[str, sqlite3.Row]:
+    """Return ``{lesson_id: latest outcome row}`` for a batch of ids.
+
+    Dashboard row rendering calls this once instead of issuing one
+    SELECT per row (N+1). Lesson ids with no outcome are simply
+    absent from the result dict.
+    """
+    if not lesson_ids:
+        return {}
+    placeholders = ",".join("?" for _ in lesson_ids)
+    sql = f"""
+        SELECT * FROM lesson_outcomes
+        WHERE id IN (
+            SELECT MAX(id) FROM lesson_outcomes
+            WHERE lesson_id IN ({placeholders})
+            GROUP BY lesson_id
+        )
+    """
+    rows = conn.execute(sql, lesson_ids).fetchall()
+    return {str(r["lesson_id"]): r for r in rows}
+
+
+class LessonOutcomeInsert(BaseModel):
+    """Write payload for a ``lesson_outcomes`` row.
+
+    ``verdict`` is one of:
+      - ``pending`` — measurement still within window
+      - ``confirmed`` — post metrics better or equal + no pattern recurrence
+      - ``no_change`` — metrics didn't move meaningfully
+      - ``regressed`` — post metrics worse than pre
+      - ``human_reedit`` — the lesson's anchor was re-edited by a human
+        (direct "this lesson was wrong" signal; trumps metric verdict)
+    """
+
+    lesson_id: str
+    measured_at: str
+    window_days: int
+    pre_fpa: float | None = None
+    post_fpa: float | None = None
+    pre_escape_rate: float | None = None
+    post_escape_rate: float | None = None
+    pre_catch_rate: float | None = None
+    post_catch_rate: float | None = None
+    pattern_recurrence_count: int = 0
+    human_reedit_count: int = 0
+    human_reedit_refs: str = "[]"
+    verdict: str = "pending"
+    notes: str = ""
+
+
+def insert_lesson_outcome(
+    conn: sqlite3.Connection, row: LessonOutcomeInsert
+) -> int:
+    """Insert a ``lesson_outcomes`` row; return the new id."""
+    with conn:
+        cur = conn.execute(
+            """
+            INSERT INTO lesson_outcomes (
+                lesson_id, measured_at, window_days,
+                pre_fpa, post_fpa,
+                pre_escape_rate, post_escape_rate,
+                pre_catch_rate, post_catch_rate,
+                pattern_recurrence_count,
+                human_reedit_count, human_reedit_refs,
+                verdict, notes
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                row.lesson_id,
+                row.measured_at,
+                row.window_days,
+                row.pre_fpa,
+                row.post_fpa,
+                row.pre_escape_rate,
+                row.post_escape_rate,
+                row.pre_catch_rate,
+                row.post_catch_rate,
+                row.pattern_recurrence_count,
+                row.human_reedit_count,
+                row.human_reedit_refs,
+                row.verdict,
+                row.notes,
+            ),
+        )
+    return int(cur.lastrowid or 0)

@@ -118,6 +118,10 @@ async def _validate_config() -> None:
 
     _spawn_background_task(check_reference_urls())
 
+    # Start the self-learning outcomes scheduler when enabled.
+    if settings.learning_outcomes_enabled:
+        _spawn_background_task(_learning_outcomes_loop())
+
 # Hold references to background tasks so they aren't garbage-collected.
 # Tasks are removed from the set via ``_spawn_background_task`` below —
 # without the done-callback the set grows unbounded for every
@@ -140,6 +144,36 @@ def _spawn_background_task(coro: Any) -> asyncio.Task[Any]:
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return task
+
+
+async def _learning_outcomes_loop() -> None:
+    """Periodically run the lesson-outcomes job.
+
+    Runs ``run_outcomes`` in a thread (the job does subprocess calls
+    that would block the event loop otherwise), sleeps the configured
+    interval, repeats. Each iteration is isolated — a raised
+    exception logs and the loop continues.
+    """
+    from learning_miner.outcomes import run_outcomes
+
+    interval_sec = max(
+        60, int(settings.learning_outcomes_interval_hours * 3600)
+    )
+    logger.info(
+        "learning_outcomes_scheduler_started",
+        interval_sec=interval_sec,
+    )
+    while True:
+        try:
+            await asyncio.to_thread(run_outcomes)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "learning_outcomes_loop_iteration_failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        await asyncio.sleep(interval_sec)
 
 _jira_adapter: JiraAdapter | None = None
 _ado_adapter: AdoAdapter | None = None

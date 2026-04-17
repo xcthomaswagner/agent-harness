@@ -80,6 +80,13 @@ class Settings(BaseSettings):
         "https://github.com/xcthomaswagner/agent-harness.git"
     )
     learning_harness_base_branch: str = "main"
+    # Outcomes measurement: polls applied lessons for PR-merge state,
+    # then measures pre/post metrics once the window has elapsed.
+    # OFF by default — flip when the PR opener starts creating real
+    # PRs that merge.
+    learning_outcomes_enabled: bool = False
+    learning_outcomes_interval_hours: int = 24
+    learning_outcomes_window_days: int = 14
 
     # Service
     log_level: str = "INFO"
