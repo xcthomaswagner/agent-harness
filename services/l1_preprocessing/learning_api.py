@@ -345,17 +345,20 @@ async def _open_pr_for_lesson(
 ) -> dict[str, Any]:
     """Run the PR opener for a freshly-approved lesson.
 
-    On success transitions the lesson to ``applied`` with ``pr_url``
-    recorded. On failure leaves the lesson at ``approved`` and writes
-    the error to ``status_reason`` so the dashboard surfaces it —
-    operators can then decide to retry (re-call /approve via API) or
-    reject.
+    On success (real run) transitions the lesson to ``applied`` with
+    ``pr_url`` recorded. On failure leaves the lesson at ``approved``
+    and writes the error to ``status_reason`` so the dashboard
+    surfaces it — operators can then decide to retry (re-call
+    /approve via API) or reject.
 
     The dry-run path does the local clone + commit but never pushes
-    or calls ``gh pr create``. It still transitions to ``applied`` so
-    the flow is observable end-to-end — the dashboard distinguishes
-    real PRs from dry-runs via an empty ``pr_url`` + a
-    ``pr_opener_dry_run=true`` marker in ``status_reason``.
+    or calls ``gh pr create``. The lesson STAYS at ``approved``
+    (not ``applied``) — ``applied`` would be a misleading terminal
+    state for a no-network rehearsal. The status_reason is stamped
+    with ``pr_opener dry-run ok (branch=..., commit=...)`` so the
+    dashboard still surfaces the rehearsal result, and the operator
+    can flip the real-PR flag and retry /approve without needing a
+    separate transition path.
     """
     load = _load_pr_opener_inputs(lesson_id, approved_record)
     if load.inputs is None:

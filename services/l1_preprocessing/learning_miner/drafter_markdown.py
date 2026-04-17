@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -302,8 +303,16 @@ def _extract_all_diff_paths(diff: str) -> list[str]:
     return seen
 
 
-def _validate_diff_internal_paths(diff: str) -> str | None:
+def validate_diff_internal_paths(diff: str) -> str | None:
     """Ensure every path reference in the diff targets an allowlisted file.
+
+    Public entry point — previously only ``_validate_diff_internal_paths``
+    (underscore-prefixed) existed, but pr_opener imported it across
+    modules anyway. Renaming the underscore form to a public alias
+    keeps pr_opener's iter-3 defense-in-depth check on a stable API
+    surface (a private helper rename would silently break that guard).
+    The underscore alias is retained for backwards compatibility with
+    existing callers.
 
     Inspects four families of header lines that ``git apply`` honors:
     ``--- a/<path>``, ``+++ b/<path>``, ``rename from/to <path>``,
@@ -327,6 +336,12 @@ def _validate_diff_internal_paths(diff: str) -> str | None:
     return None
 
 
+# Backwards-compat alias — kept so existing callers (including
+# pr_opener, which imported the underscore form prior to this rename)
+# continue to work without churn.
+_validate_diff_internal_paths = validate_diff_internal_paths
+
+
 def _extract_header_paths(line: str) -> list[str]:
     """Pull git-diff path references out of a single diff line.
 
@@ -341,7 +356,15 @@ def _extract_header_paths(line: str) -> list[str]:
         if line.startswith(header):
             return [line[len(header) :].strip()]
     if line.startswith("diff --git "):
-        tokens = line[len("diff --git ") :].strip().split()
+        # shlex respects double-quote-wrapped tokens so a path with
+        # spaces ("a/file with space.md") stays whole. Plain .split()
+        # would shred it into ["\"a/file", "with", "space.md\""] —
+        # each fragment would fail the allowlist for unrelated reasons
+        # and the real path wouldn't be validated.
+        try:
+            tokens = shlex.split(line[len("diff --git ") :].strip())
+        except ValueError:
+            tokens = line[len("diff --git ") :].strip().split()
         paths: list[str] = []
         for tok in tokens:
             paths.append(tok[2:] if tok.startswith(("a/", "b/")) else tok)

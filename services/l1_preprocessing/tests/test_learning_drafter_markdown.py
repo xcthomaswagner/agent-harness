@@ -213,6 +213,23 @@ class TestValidateDiffInternalPaths:
         assert err is not None
         assert "services/l1" in err
 
+    def test_diff_git_quoted_paths_with_spaces(self) -> None:
+        """Regression: paths with spaces get quoted by git, and
+        plain ``.split()`` shredded them into per-word fragments.
+        Each fragment then failed the allowlist for unrelated reasons
+        and the real path wasn't validated. Now shlex preserves
+        quoted tokens whole.
+        """
+        diff = (
+            'diff --git "a/services/l1/file with space.py" '
+            '"b/services/l1/file with space.py"\n'
+            "@@\n-x\n+y\n"
+        )
+        err = _validate_diff_internal_paths(diff)
+        assert err is not None
+        # Error should name the real disallowed path, not a fragment.
+        assert "services/l1/file with space.py" in err
+
 
 class TestExtractAllDiffPaths:
     """Helper used by the drafter's target-path-match check."""

@@ -1977,10 +1977,14 @@ def set_lesson_merged_commit_sha(
 _TERMINAL_VERDICTS: tuple[str, ...] = ("regressed", "human_reedit", "confirmed")
 
 
+_APPLIED_LESSONS_LIMIT = 10000
+
+
 def list_applied_lessons(
     conn: sqlite3.Connection,
     *,
     exclude_terminal_verdicts: bool = False,
+    limit: int = _APPLIED_LESSONS_LIMIT,
 ) -> list[sqlite3.Row]:
     """Return applied lessons in detected_at DESC order.
 
@@ -1989,6 +1993,12 @@ def list_applied_lessons(
     verdict is terminal (regressed / human_reedit / confirmed). The
     outcomes job uses that filter to avoid re-measuring lessons whose
     verdict is already final.
+
+    ``limit`` caps the return at 10k rows by default. Applied lessons
+    is expected to stay small (< ~100) once terminal verdicts are
+    excluded, but a stray unbounded SELECT in a long-running L1 could
+    eventually pull unbounded memory. The cap is a safety net, not a
+    pagination control.
     """
     if exclude_terminal_verdicts:
         placeholders = ",".join("?" for _ in _TERMINAL_VERDICTS)
@@ -2017,12 +2027,16 @@ def list_applied_lessons(
             WHERE c.status = 'applied'
               AND (o.verdict IS NULL OR o.verdict NOT IN ({placeholders}))
             ORDER BY c.detected_at DESC
+            LIMIT ?
         """
-        rows = conn.execute(sql, _TERMINAL_VERDICTS).fetchall()
+        rows = conn.execute(
+            sql, (*_TERMINAL_VERDICTS, int(limit))
+        ).fetchall()
     else:
         rows = conn.execute(
             "SELECT * FROM lesson_candidates WHERE status = 'applied' "
-            "ORDER BY detected_at DESC"
+            "ORDER BY detected_at DESC LIMIT ?",
+            (int(limit),),
         ).fetchall()
     return list(rows)
 
