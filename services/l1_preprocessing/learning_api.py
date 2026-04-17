@@ -221,8 +221,15 @@ async def _load_proposed_lesson(lesson_id: str) -> Any:
     return row
 
 
+_DRAFTER_UNIFIED_DIFF_KEY = "unified_diff"
+_DRAFTER_ORIGIN_KEY = "drafter_origin"
+_DRAFTER_ORIGIN_MARKDOWN = "markdown_drafter"
+
+# Keys that /draft writes into proposed_delta_json, and /draft strips
+# back out when reloading. Keep writer and reader pointing at the same
+# set so a new drafter-side key can't silently escape the strip.
 _DRAFTER_OUTPUT_KEYS: frozenset[str] = frozenset({
-    "unified_diff", "drafter_origin",
+    _DRAFTER_UNIFIED_DIFF_KEY, _DRAFTER_ORIGIN_KEY,
 })
 
 
@@ -298,8 +305,8 @@ def _merge_diff_into_delta(
     starter from a drafter-promoted one.
     """
     merged = dict(proposed_delta)
-    merged["unified_diff"] = unified_diff
-    merged["drafter_origin"] = "markdown_drafter"
+    merged[_DRAFTER_UNIFIED_DIFF_KEY] = unified_diff
+    merged[_DRAFTER_ORIGIN_KEY] = _DRAFTER_ORIGIN_MARKDOWN
     return merged
 
 

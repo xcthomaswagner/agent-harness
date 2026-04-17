@@ -542,6 +542,20 @@ class TestUpdateLessonStatus:
         with pytest.raises(ValueError, match="invalid transition"):
             update_lesson_status(conn, lid, "proposed")
 
+    def test_truncates_long_reason_to_cap(self, conn) -> None:
+        """Regression: set_lesson_status_reason truncated to 500 but
+        update_lesson_status didn't — so a verbose pr_opener error
+        could survive one writer and not the other. Both now apply
+        the same LESSON_REASON_MAX_LEN cap.
+        """
+        from autonomy_store import LESSON_REASON_MAX_LEN
+        lid = self._seed(conn)
+        long = "x" * (LESSON_REASON_MAX_LEN + 200)
+        update_lesson_status(conn, lid, "draft_ready", reason=long)
+        row = get_lesson_by_id(conn, lid)
+        assert row is not None
+        assert len(row["status_reason"]) == LESSON_REASON_MAX_LEN
+
     def test_snooze_cycle_allowed(self, conn) -> None:
         lid = self._seed(conn)
         update_lesson_status(

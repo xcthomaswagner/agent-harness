@@ -30,8 +30,18 @@ def resolve_auth_token() -> str:
     when neither is set — callers treat that as a misconfigured
     deployment (push fails loudly instead of silently using ambient
     credentials).
+
+    Treat whitespace-only values as missing. A ``.env`` file with
+    ``AGENT_GH_TOKEN=" "`` (or a trailing-space export) previously
+    overrode GITHUB_TOKEN with whitespace — gh then rejected the
+    token with a cryptic error, and the ``if not token:`` push
+    guard let the whitespace through because the string is truthy.
     """
-    return os.getenv("AGENT_GH_TOKEN") or os.getenv("GITHUB_TOKEN") or ""
+    raw = os.getenv("AGENT_GH_TOKEN", "").strip()
+    if raw:
+        return raw
+    raw = os.getenv("GITHUB_TOKEN", "").strip()
+    return raw
 
 
 def build_env(token: str | None = None) -> dict[str, str]:

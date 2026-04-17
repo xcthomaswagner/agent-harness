@@ -71,6 +71,59 @@ class TestEditedPathsFromDiff:
         assert out == ["foo.md", "bar.md"]
 
 
+class TestResolveAuthToken:
+    """resolve_auth_token precedence + whitespace handling."""
+
+    def test_agent_token_preferred_over_github_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from learning_miner._subprocess import resolve_auth_token
+
+        monkeypatch.setenv("AGENT_GH_TOKEN", "agent-tok")
+        monkeypatch.setenv("GITHUB_TOKEN", "github-tok")
+        assert resolve_auth_token() == "agent-tok"
+
+    def test_falls_back_to_github_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from learning_miner._subprocess import resolve_auth_token
+
+        monkeypatch.delenv("AGENT_GH_TOKEN", raising=False)
+        monkeypatch.setenv("GITHUB_TOKEN", "github-tok")
+        assert resolve_auth_token() == "github-tok"
+
+    def test_whitespace_agent_token_falls_through(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: a .env with ``AGENT_GH_TOKEN=" "`` used to win
+        precedence over GITHUB_TOKEN because whitespace is truthy.
+        gh would then reject the bogus token with a cryptic error and
+        the ``if not token:`` push guard let it through.
+        """
+        from learning_miner._subprocess import resolve_auth_token
+
+        monkeypatch.setenv("AGENT_GH_TOKEN", "   ")
+        monkeypatch.setenv("GITHUB_TOKEN", "github-tok")
+        assert resolve_auth_token() == "github-tok"
+
+    def test_both_empty_or_whitespace_returns_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from learning_miner._subprocess import resolve_auth_token
+
+        monkeypatch.setenv("AGENT_GH_TOKEN", "   ")
+        monkeypatch.setenv("GITHUB_TOKEN", "")
+        assert resolve_auth_token() == ""
+
+    def test_strips_surrounding_whitespace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from learning_miner._subprocess import resolve_auth_token
+
+        monkeypatch.setenv("AGENT_GH_TOKEN", "  ghp_real\n")
+        assert resolve_auth_token() == "ghp_real"
+
+
 class TestRedactTokenUrls:
     def test_strips_user_token_from_github_url(self) -> None:
         from redaction import redact_token_urls

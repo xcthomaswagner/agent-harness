@@ -105,12 +105,20 @@ def _gh(args: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
     return run_bin("gh", args, **kw)  # type: ignore[arg-type]
 
 
-def _set_identity(worktree: Path) -> None:
-    """Configure commit author for this clone (worktree-local, never global)."""
+def _set_identity(worktree: Path, env: dict[str, str] | None = None) -> None:
+    """Configure commit author for this clone (worktree-local, never global).
+
+    ``env`` mirrors what the rest of the flow passes so ``git config``
+    runs under the same filtered environment as clone/apply/push —
+    without it, ``os.environ`` (including ANTHROPIC_API_KEY and other
+    L1 secrets) leaks into the subprocess. Also keeps
+    GIT_TERMINAL_PROMPT=0 / GIT_ASKPASS=/bin/true active if a future
+    change makes ``git config`` touch auth machinery.
+    """
     name = os.environ.get("AGENT_GIT_NAME", _DEFAULT_AUTHOR_NAME)
     email = os.environ.get("AGENT_GIT_EMAIL", _DEFAULT_AUTHOR_EMAIL)
-    _git(["config", "user.name", name], cwd=worktree)
-    _git(["config", "user.email", email], cwd=worktree)
+    _git(["config", "user.name", name], cwd=worktree, env=env)
+    _git(["config", "user.email", email], cwd=worktree, env=env)
 
 
 def _stamp_lesson_id(file_path: Path, lesson_id: str) -> bool:
@@ -291,7 +299,7 @@ def open_pr_for_lesson(inputs: OpenPRInputs) -> PROpenerResult:
         if clone_err is not None:
             return PROpenerResult(success=False, error=clone_err)
 
-        _set_identity(clone_dir)
+        _set_identity(clone_dir, env=env)
 
         checkout_err = _run(
             _git(["checkout", "-b", branch], cwd=clone_dir, env=env),
@@ -640,7 +648,7 @@ def open_revert_pr_for_lesson(inputs: RevertPRInputs) -> PROpenerResult:
         if clone_err is not None:
             return PROpenerResult(success=False, error=clone_err)
 
-        _set_identity(clone_dir)
+        _set_identity(clone_dir, env=env)
 
         checkout_err = _run(
             _git(["checkout", "-b", branch], cwd=clone_dir, env=env),

@@ -1556,6 +1556,13 @@ LESSON_EVIDENCE_CAP = 20
 # splitting a redaction marker in half.
 LESSON_SNIPPET_MAX_LEN = 500
 
+# Max length of a ``lesson_candidates.status_reason``. Applied by both
+# ``update_lesson_status`` and ``set_lesson_status_reason`` so reason
+# length is predictable across the two writers — previously only
+# set_lesson_status_reason truncated, letting a verbose pr_opener
+# error survive one path and not the other.
+LESSON_REASON_MAX_LEN = 500
+
 
 class LessonCandidateUpsert(BaseModel):
     """Patch-style upsert for a detected lesson candidate.
@@ -1889,7 +1896,7 @@ def update_lesson_status(
         )
 
     sets = ["status = ?", "status_reason = ?", "updated_at = ?"]
-    params: list[Any] = [new_status, reason, ts]
+    params: list[Any] = [new_status, reason[:LESSON_REASON_MAX_LEN], ts]
     if pr_url is not None:
         sets.append("pr_url = ?")
         params.append(pr_url)
@@ -1934,7 +1941,7 @@ def set_lesson_status_reason(
         conn.execute(
             "UPDATE lesson_candidates SET status_reason = ?, updated_at = ? "
             "WHERE lesson_id = ?",
-            (reason[:500], ts, lesson_id),
+            (reason[:LESSON_REASON_MAX_LEN], ts, lesson_id),
         )
 
 
