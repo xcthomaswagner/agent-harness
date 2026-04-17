@@ -375,6 +375,35 @@ class TestOpenPrFailurePaths:
         assert result.success is False
         assert "git apply" in result.error
 
+    def test_disallowed_diff_path_rejected_before_clone(
+        self, origin_repo: Path
+    ) -> None:
+        """Defense in depth: a tampered proposed_delta that slips a
+        services/ or .github/ target past the drafter must still be
+        rejected at the pr_opener boundary. Drafter validates at draft
+        time; pr_opener revalidates so a hand-edited DB row can't
+        write arbitrary paths during apply.
+        """
+        bad = OpenPRInputs(
+            lesson_id="LSN-tampered",
+            unified_diff=(
+                "--- a/services/l1_preprocessing/main.py\n"
+                "+++ b/services/l1_preprocessing/main.py\n"
+                "@@ -1 +1 @@\n-old\n+new\n"
+            ),
+            scope_key="s",
+            detector_name="d",
+            rationale_md="",
+            evidence_trace_ids=[],
+            harness_repo_url=str(origin_repo),
+            dry_run=True,
+        )
+        result = open_pr_for_lesson(bad)
+        assert result.success is False
+        # Must fail BEFORE anything touches disk — the error is the
+        # drafter's path-allowlist message, not a git error.
+        assert "disallowed" in result.error or "allowed" in result.error
+
     def test_unsafe_lesson_id_rejected_before_clone(
         self, origin_repo: Path
     ) -> None:

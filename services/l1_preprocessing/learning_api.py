@@ -399,10 +399,12 @@ def _load_pr_opener_inputs(
     rationale = str(delta.get("rationale_md") or "")
 
     trace_ids: list[str] = []
+    seen: set[str] = set()
     with autonomy_conn() as conn:
         for row in list_lesson_evidence(conn, lesson_id):
             tid = row["trace_id"] or ""
-            if tid and tid not in trace_ids:
+            if tid and tid not in seen:
+                seen.add(tid)
                 trace_ids.append(tid)
 
     return _PROpenerInputLoad(

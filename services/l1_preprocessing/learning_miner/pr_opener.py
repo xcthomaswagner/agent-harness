@@ -29,6 +29,7 @@ import structlog
 from redaction import redact_token_urls
 
 from ._subprocess import build_env, resolve_auth_token, run_bin
+from .drafter_markdown import _validate_diff_internal_paths
 
 logger = structlog.get_logger()
 
@@ -251,6 +252,16 @@ def open_pr_for_lesson(inputs: OpenPRInputs) -> PROpenerResult:
         branch = _build_branch_name(inputs.lesson_id)
     except ValueError as exc:
         return PROpenerResult(success=False, error=str(exc))
+
+    # Re-validate diff paths before any clone/apply. Defense in depth:
+    # the drafter validates paths at draft-time, but an operator who
+    # edits proposed_delta_json directly in the DB could slip a diff
+    # with services/ or .github/ targets past the approve endpoint.
+    # Re-checking here means the pr_opener can't be tricked into
+    # applying a disallowed patch even if the DB was tampered with.
+    path_err = _validate_diff_internal_paths(inputs.unified_diff)
+    if path_err is not None:
+        return PROpenerResult(success=False, error=path_err)
 
     token = resolve_auth_token()
     env = build_env(token)

@@ -281,6 +281,28 @@ class TestExtractBashVerb:
     def test_strips_sudo_with_flag(self) -> None:
         assert extract_bash_verb("sudo -u svc gh auth login") == "gh"
 
+    def test_sudo_toggle_flag_does_not_consume_next_token(self) -> None:
+        """Regression: ``-E`` (preserve env) takes no value.
+
+        Previously the short-flag branch consumed any non-flag token
+        after a short flag, so ``sudo -E sf deploy`` returned ``deploy``.
+        """
+        assert extract_bash_verb("sudo -E sf deploy") == "sf"
+        assert extract_bash_verb("sudo -n sf deploy") == "sf"
+        assert extract_bash_verb("sudo -i sf deploy") == "sf"
+
+    def test_env_toggle_flag_does_not_consume_next_token(self) -> None:
+        assert extract_bash_verb("env -i sf deploy") == "sf"
+
+    def test_sudo_mixed_value_and_toggle_flags(self) -> None:
+        """``-u svc`` takes a value; ``-E`` does not. Both in one command."""
+        assert extract_bash_verb("sudo -u svc -E sf deploy") == "sf"
+        assert extract_bash_verb("sudo -E -u svc sf deploy") == "sf"
+
+    def test_timeout_signal_flag_consumes_value(self) -> None:
+        """``timeout -s SIGNAL`` — ``-s`` takes a value."""
+        assert extract_bash_verb("timeout -s TERM 30 sf deploy") == "sf"
+
     def test_strips_nohup(self) -> None:
         assert extract_bash_verb("nohup sf org list") == "sf"
 

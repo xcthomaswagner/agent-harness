@@ -8,6 +8,7 @@ Keeping this in one place prevents policy drift between them.
 from __future__ import annotations
 
 import asyncio
+import random
 from dataclasses import dataclass
 
 import anthropic
@@ -20,6 +21,12 @@ logger = structlog.get_logger()
 # need a different policy pass ``max_retries=`` explicitly; changing
 # the default moves everyone at once.
 MAX_RETRIES_DEFAULT = 3
+
+# Full-jitter fraction: waits are ``base * uniform(1 - JITTER, 1)``.
+# Without jitter every process retrying against the same upstream
+# outage stampedes at 2 / 4 / 8s exactly; spreading by up to 25%
+# de-synchronizes the fleet at negligible cost.
+_RETRY_JITTER = 0.25
 
 
 def is_retryable_anthropic_error(exc: anthropic.APIError) -> bool:
@@ -81,11 +88,12 @@ async def call_with_retry(
                     error=f"{type(exc).__name__}: {exc}", retryable=False
                 )
             last_exc = exc
-            wait = 2**attempt
+            base = 2**attempt
+            wait = base * (1 - random.random() * _RETRY_JITTER)
             logger.warning(
                 log_event,
                 attempt=attempt,
-                wait=wait,
+                wait=round(wait, 2),
                 error_kind=type(exc).__name__,
             )
             if attempt < max_retries:

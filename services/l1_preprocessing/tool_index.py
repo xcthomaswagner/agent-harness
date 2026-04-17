@@ -32,6 +32,20 @@ _BASH_SPLIT_RE = re.compile(r"&&|\|\||;")
 # outside that shape is a real command token we shouldn't eat.
 _TIMEOUT_DURATION_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
 
+# Short flags that DO take a separate value per wrapper. Everything
+# else is a toggle — we must NOT consume the next token as a value,
+# or ``sudo -E sf deploy`` returns ``deploy`` instead of ``sf``.
+# Long-form ``--flag=value`` always self-contains; only short-form
+# with a separate value needs the extra hop.
+_WRAPPER_VALUE_FLAGS: dict[str, frozenset[str]] = {
+    "sudo": frozenset({"-u", "-g", "-p", "-h", "-U", "-C", "-t", "-r"}),
+    "env": frozenset({"-u", "-C", "-S", "-L", "-P"}),
+    "timeout": frozenset({"-s", "-k"}),
+    "nohup": frozenset(),
+    "time": frozenset(),
+    "exec": frozenset({"-a", "-c"}),
+}
+
 
 def extract_bash_verb(command: str) -> str:
     """Return the first meaningful verb from a Bash command string, or ''.
@@ -82,7 +96,11 @@ def _first_verb_after_preamble(command: str) -> str:
         if base in _BASH_WRAPPER_VERBS:
             # Strip the wrapper itself, its numeric duration (timeout),
             # and any leading -flags including the value that follows a
-            # separate-token option like ``sudo -u user``.
+            # separate-token option like ``sudo -u user``. A short flag
+            # only consumes the next token as a value when it is in the
+            # wrapper's known value-taking set — otherwise ``sudo -E sf
+            # deploy`` would eat ``sf`` and return ``deploy``.
+            value_flags = _WRAPPER_VALUE_FLAGS.get(base, frozenset())
             tokens = tokens[1:]
             while tokens:
                 nxt = tokens[0]
@@ -91,11 +109,8 @@ def _first_verb_after_preamble(command: str) -> str:
                     continue
                 if nxt.startswith("-"):
                     tokens = tokens[1:]
-                    # If the flag was short-form (``-u`` not ``--user=x``)
-                    # and didn't embed ``=``, consume its value too.
                     if (
-                        len(nxt) <= 2
-                        and "=" not in nxt
+                        nxt in value_flags
                         and tokens
                         and not tokens[0].startswith("-")
                     ):
