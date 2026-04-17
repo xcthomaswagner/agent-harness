@@ -102,9 +102,13 @@ def count_pattern_recurrence(
 
     Catches the narrow set of errors we expect from well-formed
     detectors — SQL schema mismatch, bad row access, bad pattern_key
-    split. Non-data bugs (import errors, assertion failures) propagate
-    so operators see real regressions in the miner rather than
-    having them silently downgrade a lesson's verdict.
+    split. ``ValueError`` is included because a detector that does
+    ``a, b = pattern_key.split("|", 1)`` on a malformed key raises
+    ValueError from tuple unpacking; the docstring explicitly promises
+    that case degrades to 0 rather than erroring the whole outcome.
+    Non-data bugs (import errors, assertion failures) propagate so
+    operators see real regressions in the miner rather than having
+    them silently downgrade a lesson's verdict.
     """
     fn = getattr(detector, "recurrence_for", None)
     if fn is None:
@@ -113,7 +117,7 @@ def count_pattern_recurrence(
         result = fn(
             conn, lesson=lesson, since_iso=since_iso, until_iso=until_iso
         )
-    except (sqlite3.DatabaseError, KeyError, IndexError) as exc:
+    except (sqlite3.DatabaseError, KeyError, IndexError, ValueError) as exc:
         logger.warning(
             "learning_pattern_recurrence_failed",
             detector=getattr(detector, "name", ""),

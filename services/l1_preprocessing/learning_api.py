@@ -38,6 +38,7 @@ from autonomy_store import (
     autonomy_conn,
     get_latest_outcome,
     get_lesson_by_id,
+    list_evidence_for_lessons,
     list_lesson_candidates,
     list_lesson_evidence,
     set_lesson_status_reason,
@@ -119,11 +120,20 @@ async def get_learning_candidates(
             detector_name=detector_name,
             limit=limit,
         )
+        # Batch the evidence lookup — a per-row ``list_lesson_evidence``
+        # loop issued one SELECT per candidate, so include_evidence=true
+        # on limit=500 was up to 500 SQL round-trips. list_evidence_for_lessons
+        # fetches all rows in one WHERE IN query and buckets client-side.
+        evidence_by_id: dict[str, list[Any]] = {}
+        if include_evidence and rows:
+            ids = [str(r["lesson_id"]) for r in rows]
+            raw = list_evidence_for_lessons(conn, ids)
+            evidence_by_id = {k: list(v) for k, v in raw.items()}
         out: list[dict[str, Any]] = []
         for row in rows:
             record = _candidate_to_dict(row)
             if include_evidence:
-                ev = list_lesson_evidence(conn, record["lesson_id"])
+                ev = evidence_by_id.get(str(record["lesson_id"]), [])
                 record["evidence"] = [dict(e) for e in ev]
             out.append(record)
         return {"candidates": out, "count": len(out)}

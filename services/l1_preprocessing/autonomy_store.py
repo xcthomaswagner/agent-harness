@@ -1638,6 +1638,13 @@ def upsert_lesson_candidate(
             )
         return int(cur.lastrowid or 0)
 
+    # Preserve proposed_delta_json once the lesson has advanced past
+    # ``proposed``: the /draft endpoint merges the Claude-drafted
+    # ``unified_diff`` into the delta, and a nightly rescan must not
+    # overwrite that with the mechanical starter — losing the drafted
+    # diff would force a re-draft (and re-spend Anthropic tokens) on
+    # every scan. The CASE expression keeps the existing delta on any
+    # non-``proposed`` status.
     with conn:
         conn.execute(
             """
@@ -1646,7 +1653,10 @@ def upsert_lesson_candidate(
                 last_seen_at = ?,
                 updated_at = ?,
                 severity = ?,
-                proposed_delta_json = ?,
+                proposed_delta_json = CASE
+                    WHEN status = 'proposed' THEN ?
+                    ELSE proposed_delta_json
+                END,
                 detector_version = ?
             WHERE id = ?
             """,
@@ -1975,13 +1985,26 @@ def list_applied_lessons(
     """
     if exclude_terminal_verdicts:
         placeholders = ",".join("?" for _ in _TERMINAL_VERDICTS)
+        # Narrow the MAX(id) subquery to outcomes of applied lessons.
+        # Without the join + filter the optimizer has to compute MAX(id)
+        # GROUP BY lesson_id across EVERY row in lesson_outcomes, even
+        # when only a handful of lessons are currently applied. Scales
+        # with total historical outcomes, not active work. The
+        # ``applied`` filter here + the outer ``status='applied'``
+        # filter are redundant semantically but the inner one lets
+        # SQLite prune early.
         sql = f"""
             SELECT c.* FROM lesson_candidates c
             LEFT JOIN (
                 SELECT lesson_id, verdict
                 FROM lesson_outcomes
                 WHERE id IN (
-                    SELECT MAX(id) FROM lesson_outcomes GROUP BY lesson_id
+                    SELECT MAX(lo.id)
+                    FROM lesson_outcomes lo
+                    JOIN lesson_candidates lc
+                      ON lc.lesson_id = lo.lesson_id
+                    WHERE lc.status = 'applied'
+                    GROUP BY lo.lesson_id
                 )
             ) o ON o.lesson_id = c.lesson_id
             WHERE c.status = 'applied'

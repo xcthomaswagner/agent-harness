@@ -791,3 +791,38 @@ class TestPatternRecurrence:
             until_iso="2026-02-01T00:00:00+00:00",
         )
         assert out == 0
+
+    def test_detector_raising_value_error_degrades_to_zero(
+        self, learning_conn
+    ) -> None:
+        """Regression: count_pattern_recurrence's except list used to
+        omit ValueError, so a detector with a bad pattern_key split
+        (tuple-unpack failure) would propagate and error the whole
+        outcome measurement instead of degrading to 0 as the docstring
+        promised.
+        """
+        from learning_miner.detectors.base import count_pattern_recurrence
+
+        class _BrokenDetector:
+            name = "broken"
+            version = 1
+
+            def scan(self, *_a, **_k):
+                return []
+
+            def recurrence_for(
+                self, conn, *, lesson, since_iso, until_iso
+            ):
+                # Mimics a detector that does
+                # ``a, b = pattern_key.split("|", 1)`` on a malformed
+                # pattern_key — tuple unpack raises ValueError.
+                raise ValueError("synthetic unpack failure")
+
+        out = count_pattern_recurrence(
+            _BrokenDetector(),
+            learning_conn,
+            lesson=self._make_lesson(),
+            since_iso="2026-01-01T00:00:00+00:00",
+            until_iso="2026-02-01T00:00:00+00:00",
+        )
+        assert out == 0

@@ -166,6 +166,89 @@ class TestUpsertLessonCandidate:
         assert row["pr_url"] == "https://github.com/x/y/pull/1"
         assert row["frequency"] == 5
 
+    def test_upsert_preserves_drafted_delta_past_proposed(
+        self, conn
+    ) -> None:
+        """Regression: once /draft has merged a ``unified_diff`` into
+        ``proposed_delta_json``, a nightly rescan must NOT overwrite
+        it with the mechanical starter. Losing the drafted diff would
+        force the operator to re-draft (and re-spend Anthropic tokens)
+        on every scan.
+        """
+        import json
+
+        # Initial detection — mechanical starter delta.
+        upsert_lesson_candidate(
+            conn,
+            _base_candidate(window_frequency=3),
+            now="2026-04-10T00:00:00+00:00",
+        )
+        lid = compute_lesson_id(
+            "human_issue_cluster",
+            "security|*.cls",
+            "xcsf30|salesforce|security|foo.cls",
+        )
+        # Simulate /draft merging a Claude-drafted diff into the delta,
+        # then transitioning to draft_ready.
+        drafted = json.dumps({
+            "target_path": "runtime/platform-profiles/salesforce/CODE_REVIEW_SUPPLEMENT.md",
+            "unified_diff": "--- a/x\n+++ b/x\n@@\n+rule\n",
+            "drafter_origin": "markdown_drafter",
+        }, sort_keys=True)
+        update_lesson_status(
+            conn, lid, "draft_ready",
+            reason="drafter done",
+            proposed_delta_json=drafted,
+            now="2026-04-10T01:00:00+00:00",
+        )
+        # Nightly rescan with the fresh mechanical delta (no unified_diff).
+        upsert_lesson_candidate(
+            conn,
+            _base_candidate(window_frequency=5),
+            now="2026-04-11T00:00:00+00:00",
+        )
+        row = get_lesson_by_id(conn, lid)
+        assert row is not None
+        # Drafted delta (with unified_diff) must survive the rescan.
+        stored = json.loads(row["proposed_delta_json"])
+        assert "unified_diff" in stored
+        assert stored["drafter_origin"] == "markdown_drafter"
+        # frequency still widens — only the delta is frozen.
+        assert row["frequency"] == 5
+
+    def test_upsert_refreshes_delta_while_proposed(self, conn) -> None:
+        """For a still-``proposed`` lesson, the mechanical delta MUST
+        refresh on rescan so an evolved detector output shows up.
+        """
+        import json
+
+        upsert_lesson_candidate(
+            conn,
+            _base_candidate(
+                window_frequency=3,
+                proposed_delta_json='{"anchor": "v1"}',
+            ),
+            now="2026-04-10T00:00:00+00:00",
+        )
+        lid = compute_lesson_id(
+            "human_issue_cluster",
+            "security|*.cls",
+            "xcsf30|salesforce|security|foo.cls",
+        )
+        # Second scan emits a refined delta.
+        upsert_lesson_candidate(
+            conn,
+            _base_candidate(
+                window_frequency=4,
+                proposed_delta_json='{"anchor": "v2"}',
+            ),
+            now="2026-04-11T00:00:00+00:00",
+        )
+        row = get_lesson_by_id(conn, lid)
+        assert row is not None
+        assert row["status"] == "proposed"
+        assert json.loads(row["proposed_delta_json"]) == {"anchor": "v2"}
+
 
 class TestInsertLessonEvidence:
     def _seed_lesson(self, conn) -> str:
