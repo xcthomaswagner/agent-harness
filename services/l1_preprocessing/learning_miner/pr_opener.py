@@ -61,24 +61,28 @@ class PROpenerResult:
     error: str = ""
 
 
-def _build_branch_name(lesson_id: str) -> str:
-    """Return the branch name for a lesson, validating shape.
+def _build_prefixed_branch_name(prefix: str, lesson_id: str) -> str:
+    """Shared validator for ``_build_branch_name`` / ``_build_revert_branch_name``.
 
-    ``..`` is rejected explicitly (not caught by the regex character
-    class) because git ref resolution treats it specially — a branch
-    named ``learning/lesson-a..b`` could reach sibling refs.
+    Rejects ``..`` explicitly (git ref resolution treats it specially
+    — a branch named ``learning/lesson-a..b`` could reach sibling
+    refs) and disallowed chars via _SAFE_BRANCH_RE. Centralizes the
+    validation so a future rule (e.g. rejecting leading ``-``, or
+    consecutive ``//``) only needs to be added in one place instead
+    of two near-identical copies.
     """
-    name = f"{_BRANCH_PREFIX}{lesson_id}"
+    name = f"{prefix}{lesson_id}"
     if ".." in name or not _SAFE_BRANCH_RE.fullmatch(name):
         raise ValueError(f"unsafe branch name derived from lesson_id: {name!r}")
     return name
 
 
+def _build_branch_name(lesson_id: str) -> str:
+    return _build_prefixed_branch_name(_BRANCH_PREFIX, lesson_id)
+
+
 def _build_revert_branch_name(lesson_id: str) -> str:
-    name = f"{_REVERT_BRANCH_PREFIX}{lesson_id}"
-    if ".." in name or not _SAFE_BRANCH_RE.fullmatch(name):
-        raise ValueError(f"unsafe revert branch name: {name!r}")
-    return name
+    return _build_prefixed_branch_name(_REVERT_BRANCH_PREFIX, lesson_id)
 
 
 def _reviewer_flags(reviewers: tuple[str, ...]) -> list[str]:
@@ -109,7 +113,9 @@ def _gh(args: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
     return run_bin("gh", args, **kw)  # type: ignore[arg-type]
 
 
-def _set_identity(worktree: Path, env: dict[str, str] | None = None) -> None:
+def _set_identity(
+    worktree: Path, env: dict[str, str] | None = None
+) -> str | None:
     """Configure commit author for this clone (worktree-local, never global).
 
     ``env`` mirrors what the rest of the flow passes so ``git config``
@@ -118,11 +124,27 @@ def _set_identity(worktree: Path, env: dict[str, str] | None = None) -> None:
     L1 secrets) leaks into the subprocess. Also keeps
     GIT_TERMINAL_PROMPT=0 / GIT_ASKPASS=/bin/true active if a future
     change makes ``git config`` touch auth machinery.
+
+    Returns an error string if either ``git config`` call failed,
+    else None. Previously the return values were ignored and a
+    failed identity write would let ``git commit`` fall back to
+    git's default identity (or fail cryptically if unconfigured) —
+    either way the resulting commit author wouldn't be the agent's,
+    and downstream human-reedit detection (which keys on
+    ``AGENT_GIT_EMAIL``) would misclassify agent commits as human.
     """
     name = os.environ.get("AGENT_GIT_NAME", _DEFAULT_AUTHOR_NAME)
     email = os.environ.get("AGENT_GIT_EMAIL", _DEFAULT_AUTHOR_EMAIL)
-    _git(["config", "user.name", name], cwd=worktree, env=env)
-    _git(["config", "user.email", email], cwd=worktree, env=env)
+    err = _run(
+        _git(["config", "user.name", name], cwd=worktree, env=env),
+        label="git config user.name",
+    )
+    if err is not None:
+        return err
+    return _run(
+        _git(["config", "user.email", email], cwd=worktree, env=env),
+        label="git config user.email",
+    )
 
 
 def _stamp_lesson_id(file_path: Path, lesson_id: str) -> bool:
@@ -357,7 +379,9 @@ def open_pr_for_lesson(inputs: OpenPRInputs) -> PROpenerResult:
         if clone_err is not None:
             return PROpenerResult(success=False, error=clone_err)
 
-        _set_identity(clone_dir, env=env)
+        identity_err = _set_identity(clone_dir, env=env)
+        if identity_err is not None:
+            return PROpenerResult(success=False, error=identity_err)
 
         # Branch off `origin/<base_branch>` explicitly. Without this,
         # ``git checkout -b <branch>`` forks from the remote default
@@ -729,7 +753,9 @@ def open_revert_pr_for_lesson(inputs: RevertPRInputs) -> PROpenerResult:
         if clone_err is not None:
             return PROpenerResult(success=False, error=clone_err)
 
-        _set_identity(clone_dir, env=env)
+        identity_err = _set_identity(clone_dir, env=env)
+        if identity_err is not None:
+            return PROpenerResult(success=False, error=identity_err)
 
         # Same rationale as the approve flow: fork off
         # origin/<base_branch> explicitly so the revert PR's diff

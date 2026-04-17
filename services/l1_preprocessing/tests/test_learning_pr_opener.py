@@ -1041,7 +1041,7 @@ class TestBuildRevertBranchName:
         )
 
     def test_unsafe_id_raises(self) -> None:
-        with pytest.raises(ValueError, match="unsafe revert branch"):
+        with pytest.raises(ValueError, match="unsafe branch name"):
             _build_revert_branch_name("LSN-; rm -rf /")
 
     def test_double_dot_rejected(self) -> None:
