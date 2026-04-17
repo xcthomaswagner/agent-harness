@@ -268,6 +268,72 @@ def _base_inputs(origin: Path, *, dry_run: bool = True) -> OpenPRInputs:
     )
 
 
+class TestBaseBranchForking:
+    """Regression: approve + revert flows used to ``git checkout -b
+    <branch>`` without naming a start point, so the new branch forked
+    off the remote default HEAD regardless of inputs.base_branch.
+    A non-default base produced PR diffs that included unrelated
+    default-branch commits.
+    """
+
+    def test_dry_run_forks_from_named_base_branch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        origin = tmp_path / "origin"
+        origin.mkdir()
+        # Default branch = main; add a `release/candidate` branch
+        # that diverges by one commit. The PR should fork from
+        # release/candidate, not main.
+        subprocess.run(
+            ["git", "init", "-b", "main"],
+            cwd=origin, check=True, capture_output=True,
+        )
+        skills = origin / "runtime" / "skills" / "code-review"
+        skills.mkdir(parents=True)
+        (skills / "SKILL.md").write_text(
+            "# Code Review\n\n## Review Checklist\n\n"
+            "- Check docstrings.\n"
+            "- Verify tests.\n"
+        )
+        subprocess.run(["git", "add", "."], cwd=origin, check=True, capture_output=True)
+        subprocess.run(
+            ["git",
+             "-c", "user.email=init@test", "-c", "user.name=init",
+             "commit", "-m", "init"],
+            cwd=origin, check=True, capture_output=True,
+        )
+        # Branch off for the release/candidate line.
+        subprocess.run(
+            ["git", "checkout", "-b", "release/candidate"],
+            cwd=origin, check=True, capture_output=True,
+        )
+        # Same file content on the branch — the dry-run's commit
+        # must apply cleanly to this base.
+        subprocess.run(
+            ["git", "checkout", "main"],
+            cwd=origin, check=True, capture_output=True,
+        )
+
+        inputs = OpenPRInputs(
+            lesson_id="LSN-basebr01",
+            unified_diff=_valid_diff(),
+            scope_key="xcsf30|salesforce|security|*.cls",
+            detector_name="human_issue_cluster",
+            rationale_md="r",
+            evidence_trace_ids=[],
+            harness_repo_url=str(origin),
+            base_branch="release/candidate",
+            dry_run=True,
+        )
+        result = open_pr_for_lesson(inputs)
+        assert result.success is True, result.error
+        assert result.dry_run is True
+        # Commit sha is now reachable from release/candidate + one
+        # revert/edit commit. The --branch clone flag made the
+        # checkout origin/release/candidate resolvable.
+        assert result.branch == "learning/lesson-LSN-basebr01"
+
+
 class TestOpenPrDryRun:
     def test_dry_run_commits_without_pushing(
         self, origin_repo: Path, monkeypatch: pytest.MonkeyPatch

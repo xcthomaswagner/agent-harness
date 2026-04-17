@@ -210,10 +210,20 @@ def _compose_pr_body(
 
 
 def _write_patch_file(scratch: Path, diff: str) -> Path:
+    """Write the drafter's unified diff to ``lesson.patch``.
+
+    Pins encoding + newline so the patch content hits disk byte-for-byte
+    as the drafter emitted it. Default ``write_text`` does universal
+    newline translation (on Windows, ``\\n`` becomes ``\\r\\n``) and
+    uses the platform's preferred encoding — both can make ``git
+    apply`` reject an otherwise-valid diff with "whitespace errors"
+    or encoding confusion. Pinning keeps the fix behavior consistent
+    regardless of where L1 is hosted.
+    """
     patch_path = scratch / "lesson.patch"
     if not diff.endswith("\n"):
         diff = diff + "\n"
-    patch_path.write_text(diff)
+    patch_path.write_text(diff, encoding="utf-8", newline="")
     return patch_path
 
 
@@ -287,9 +297,19 @@ def open_pr_for_lesson(inputs: OpenPRInputs) -> PROpenerResult:
     clone_dir = scratch_parent / "harness"
     success = False
     try:
+        # `--branch` pins the clone's default to base_branch so the
+        # subsequent ``checkout -B <branch> origin/<base_branch>``
+        # finds the ref even when base_branch isn't the remote default.
+        # Without --branch, a non-default base_branch produces an
+        # origin/<base_branch> ref that doesn't exist in the shallow
+        # clone and checkout fails.
         clone_err = _run(
             _git(
-                ["clone", "--depth", "10", inputs.harness_repo_url, str(clone_dir)],
+                [
+                    "clone", "--depth", "10",
+                    "--branch", inputs.base_branch,
+                    inputs.harness_repo_url, str(clone_dir),
+                ],
                 cwd=scratch_parent,
                 env=env,
                 timeout=120,
@@ -301,9 +321,17 @@ def open_pr_for_lesson(inputs: OpenPRInputs) -> PROpenerResult:
 
         _set_identity(clone_dir, env=env)
 
+        # Branch off `origin/<base_branch>` explicitly. Without this,
+        # ``git checkout -b <branch>`` forks from the remote default
+        # HEAD — so a non-default ``base_branch`` (e.g. ``develop``)
+        # produces a PR whose diff includes all commits from default
+        # that aren't on base_branch. The `-B` form creates or resets.
         checkout_err = _run(
-            _git(["checkout", "-b", branch], cwd=clone_dir, env=env),
-            label="git checkout -b",
+            _git(
+                ["checkout", "-B", branch, f"origin/{inputs.base_branch}"],
+                cwd=clone_dir, env=env,
+            ),
+            label="git checkout -B",
         )
         if checkout_err is not None:
             return PROpenerResult(success=False, error=checkout_err)
@@ -650,9 +678,18 @@ def open_revert_pr_for_lesson(inputs: RevertPRInputs) -> PROpenerResult:
 
         _set_identity(clone_dir, env=env)
 
+        # Same rationale as the approve flow: fork off
+        # origin/<base_branch> explicitly so the revert PR's diff
+        # stays scoped to the revert commit, not a mix with unrelated
+        # default-branch commits when base_branch differs from the
+        # remote default. ``--no-single-branch`` above gave us all
+        # remote refs so origin/<base_branch> is available.
         checkout_err = _run(
-            _git(["checkout", "-b", branch], cwd=clone_dir, env=env),
-            label="git checkout -b",
+            _git(
+                ["checkout", "-B", branch, f"origin/{inputs.base_branch}"],
+                cwd=clone_dir, env=env,
+            ),
+            label="git checkout -B",
         )
         if checkout_err is not None:
             return PROpenerResult(success=False, error=checkout_err)

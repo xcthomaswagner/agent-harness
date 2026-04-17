@@ -63,6 +63,11 @@ async def call_with_retry(
     caller decides how to map the failure into their own result type.
     Sleeps 2**attempt seconds between tries (2, 4, 8 at the default).
     """
+    # Normalize: max_retries <= 0 used to silently skip the loop and
+    # return ``failed after retries: None`` — a useless error message.
+    # Force at least one attempt so the return shape is meaningful.
+    if max_retries < 1:
+        max_retries = 1
     last_exc: Exception | None = None
     for attempt in range(1, max_retries + 1):
         try:

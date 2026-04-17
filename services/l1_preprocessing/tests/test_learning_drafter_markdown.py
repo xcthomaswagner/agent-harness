@@ -96,6 +96,20 @@ class TestCheckTargetPath:
         err = check_target_path("services/l1_preprocessing/main.py") or ""
         assert "outside allowed" in err
 
+    def test_null_byte_rejected(self) -> None:
+        """Regression: null bytes pass the allowlist + extension checks
+        but ``pathlib.Path.read_text`` then raises ValueError when
+        the path hits C-level file APIs. The API handler only catches
+        OSError, so unhandled ValueError surfaces as a 500. Reject at
+        the gate.
+        """
+        err = check_target_path("runtime/skills/x\x00.md") or ""
+        assert "control character" in err
+
+    def test_newline_in_path_rejected(self) -> None:
+        err = check_target_path("runtime/skills/x\n.md") or ""
+        assert "control character" in err
+
 
 # ---- git apply check -------------------------------------------------
 

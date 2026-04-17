@@ -52,9 +52,19 @@ def check_target_path(target_path: str) -> str | None:
     proposed_delta slips the repo_root prefix via pathlib's `/` operator
     (which discards the LHS when RHS is absolute). Mirrors the precheck
     the drafter runs internally; the API needs the same check earlier.
+
+    Also rejects control characters (null byte, CR, LF, tab) embedded
+    in the path. A null byte in particular — ``runtime/skills/x\\0.md``
+    — passes allowlist + extension checks, but ``pathlib.Path`` later
+    raises ValueError when such a path reaches C-level file APIs; the
+    API handler only catches OSError, so the unhandled ValueError
+    surfaces as a 500 instead of a graceful 200 with drafter_success
+    false.
     """
     if not target_path:
         return "proposed_delta.target_path missing"
+    if any(c in target_path for c in ("\x00", "\n", "\r", "\t")):
+        return f"target_path {target_path!r} contains a control character"
     if target_path.startswith("/") or ".." in target_path.split("/"):
         return (
             f"target_path {target_path!r} is absolute or contains .."
