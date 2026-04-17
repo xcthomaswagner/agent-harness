@@ -148,8 +148,15 @@ def _stamp_lesson_id(file_path: Path, lesson_id: str) -> bool:
         replaced = False
         for line in lines:
             if line.startswith("lesson_id:"):
-                new_head_lines.append(f"lesson_id: {lesson_id}")
-                replaced = True
+                # Collapse duplicates: only the FIRST lesson_id line is
+                # replaced; subsequent duplicates are dropped. Without
+                # this, a file whose frontmatter already had two
+                # ``lesson_id:`` lines (from a prior stamping bug)
+                # would end up with two ``lesson_id: LSN-NEW`` lines.
+                if not replaced:
+                    new_head_lines.append(f"lesson_id: {lesson_id}")
+                    replaced = True
+                # else: skip — the duplicate is absorbed.
             else:
                 new_head_lines.append(line)
         if not replaced:

@@ -224,6 +224,25 @@ class TestStampLessonId:
         assert "lesson_id: LSN-new" in text
         assert "lesson_id: LSN-old" not in text
 
+    def test_collapses_duplicate_lesson_id_lines(self, tmp_path: Path) -> None:
+        """Regression: a file whose frontmatter already had two
+        ``lesson_id:`` lines (from a prior stamping bug) used to end up
+        with two ``lesson_id: LSN-NEW`` lines after re-stamping.
+        Collapse to one.
+        """
+        f = tmp_path / "x.md"
+        f.write_text(
+            "---\nname: foo\n"
+            "lesson_id: LSN-OLD1\n"
+            "lesson_id: LSN-OLD2\n"
+            "---\n\nbody"
+        )
+        _stamp_lesson_id(f, "LSN-NEW")
+        text = f.read_text()
+        # Exactly one lesson_id line — not two.
+        assert text.count("lesson_id:") == 1
+        assert "lesson_id: LSN-NEW" in text
+
     def test_skips_non_markdown(self, tmp_path: Path) -> None:
         f = tmp_path / "config.yaml"
         f.write_text("client: x")

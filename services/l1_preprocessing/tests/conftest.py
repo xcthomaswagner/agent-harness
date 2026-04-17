@@ -214,7 +214,7 @@ def mock_anthropic_client():
 
 def seed_draft_ready_candidate(
     *,
-    unified_diff: str = "--- a/x\n+++ b/x\n@@\n+rule",
+    unified_diff: str | None = None,
     target_path: str = "runtime/skills/code-review/SKILL.md",
     rationale: str = "r",
 ) -> str:
@@ -223,7 +223,20 @@ def seed_draft_ready_candidate(
     Shared by PR-opener tests that need a lesson poised for
     /approve. Callers may override the unified_diff when they want
     a specific scope or the drafter-emission to fail a path check.
+
+    Default unified_diff now references ``target_path`` instead of a
+    bogus ``a/x`` placeholder — without that alignment, the iter-3
+    _validate_diff_internal_paths check in the pr_opener rejects
+    the seed if tests ever stop mocking ``open_pr_for_lesson``. The
+    existing mocked tests don't exercise the validator, but the seed
+    should still produce a realistic record.
     """
+    if unified_diff is None:
+        unified_diff = (
+            f"--- a/{target_path}\n"
+            f"+++ b/{target_path}\n"
+            "@@\n+rule\n"
+        )
     import json
 
     from autonomy_store import autonomy_conn, update_lesson_status

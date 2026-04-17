@@ -104,6 +104,16 @@ async def call_with_retry(
             if attempt < max_retries:
                 await asyncio.sleep(wait)
                 continue
+    # Exhausted retries — emit a distinct log so ops can distinguish
+    # "we're still retrying" (warning) from "we gave up" (error).
+    # Without this, the last retry's "retrying attempt=N" warning is
+    # the last message, leaving the actual failure silent.
+    logger.error(
+        "learning_anthropic_retry_exhausted",
+        max_retries=max_retries,
+        error_kind=type(last_exc).__name__ if last_exc else "None",
+        error=str(last_exc) if last_exc else "",
+    )
     return RetryFailure(
         error=f"failed after retries: {last_exc}", retryable=True
     )

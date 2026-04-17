@@ -244,14 +244,23 @@ def _render_action_buttons(lesson_id: str, status: str) -> str:
     ]
     out: list[str] = ['<div class="actions">']
     for label, action, cls, disabled in buttons:
-        endpoint = f"/api/learning/candidates/{_e(lesson_id)}/{_e(action)}"
+        # Build endpoint as a raw URL, THEN ``_e()`` for each HTML
+        # context. The previous code baked ``_e()`` into the endpoint
+        # string and then ``_e()``-ed the title (which embedded the
+        # endpoint) a second time — double-escaping ``&lt;`` to
+        # ``&amp;lt;`` in the tooltip while leaving data-endpoint
+        # single-escaped. Inconsistent rendering for any lesson_id
+        # with HTML-special chars. In practice lesson_ids are
+        # LSN-<hex> so this never manifested, but the fix is
+        # defense-in-depth against a future id scheme.
+        endpoint = f"/api/learning/candidates/{lesson_id}/{action}"
         if disabled:
             tooltip = f"Disabled — current status is {status}"
         else:
             tooltip = f"POST {endpoint} (requires X-Autonomy-Admin-Token)"
         out.append(
             f'<button class="{_e(cls)}" disabled '
-            f'data-endpoint="{endpoint}" '
+            f'data-endpoint="{_e(endpoint)}" '
             f'title="{_e(tooltip)}">{_e(label)}</button>'
         )
     out.append("</div>")
@@ -343,11 +352,12 @@ def _render_outcome_fragment(
     revert_html = ""
     if verdict in {"regressed", "human_reedit"} and candidate_status != "reverted":
         lesson_id = str(outcome["lesson_id"] or "")
-        endpoint = f"/api/learning/candidates/{_e(lesson_id)}/revert"
+        # Raw endpoint; let the HTML attribute contexts escape once.
+        endpoint = f"/api/learning/candidates/{lesson_id}/revert"
         revert_html = (
             f'<button class="btn btn-reject" disabled '
-            f'data-endpoint="{endpoint}" '
-            f'title="POST {endpoint} (requires X-Autonomy-Admin-Token)">'
+            f'data-endpoint="{_e(endpoint)}" '
+            f'title="{_e(f"POST {endpoint} (requires X-Autonomy-Admin-Token)")}">'
             "Revert</button>"
         )
     return (
