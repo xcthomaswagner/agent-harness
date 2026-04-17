@@ -43,9 +43,9 @@ test_framework:
   e2e: ""
 
 client_repo:
-  # ~ is expanded by ClientProfile.client_repo_path at load time.
-  # Under /tmp the repo is wiped on reboot and L1 spawn fails silently.
-  local_path: "~/.harness/clients/XC-SF-30in30"
+  # Absolute path until L1 is restarted with the expanduser fix. After
+  # restart this can switch back to "~/.harness/clients/XC-SF-30in30".
+  local_path: "/Users/thomaswagner/.harness/clients/XC-SF-30in30"
   github_repo: ""
 
 autonomy:
