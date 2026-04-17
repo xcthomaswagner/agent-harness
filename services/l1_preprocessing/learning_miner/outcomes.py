@@ -158,9 +158,15 @@ def _prepare_scratch_root(
         tempfile.mkdtemp(prefix="learning-outcomes-")
     ) / "harness"
     env = build_env()
+    # No --depth: _detect_human_reedits walks `{merged_commit_sha}..HEAD`,
+    # and the merge sha can be arbitrarily old for lessons whose outcomes
+    # window hasn't elapsed yet. A shallow clone that doesn't include the
+    # merge sha makes git log exit non-zero and silently disables human-
+    # reedit detection — the "lesson was wrong" signal that trumps metric
+    # verdicts per _classify_verdict.
     proc = run_bin(
         "git",
-        ["clone", "--depth", "50", url, str(scratch)],
+        ["clone", url, str(scratch)],
         timeout=120,
         env=env,
     )
@@ -584,7 +590,10 @@ def _detect_human_reedits(
 
     env = build_env()
     refs: list[dict[str, str]] = []
-    count = 0
+    # Dedup by sha: a single commit touching multiple edited files must
+    # count once, not once per file. Without this, human_reedit_count
+    # inflates with |edited_paths| and refs lists the same commit twice.
+    seen_shas: set[str] = set()
     for rel in parsed:
         proc = run_bin(
             "git",
@@ -608,7 +617,9 @@ def _detect_human_reedits(
             sha, email, name, committed_at, message = parts[:5]
             if email.lower() == _AGENT_EMAIL_LOWER:
                 continue
-            count += 1
+            if sha in seen_shas:
+                continue
+            seen_shas.add(sha)
             if len(refs) < 10:
                 refs.append({
                     "sha": sha,
@@ -616,7 +627,7 @@ def _detect_human_reedits(
                     "committed_at": committed_at,
                     "message": message[:200],
                 })
-    return count, refs
+    return len(seen_shas), refs
 
 
 def _lesson_edited_paths(lesson: sqlite3.Row) -> list[str]:

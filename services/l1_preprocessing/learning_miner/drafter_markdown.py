@@ -322,10 +322,16 @@ def _extract_unified_diff(text: str) -> str:
 
 
 def _extract_added_lines(diff: str) -> list[str]:
-    """Lines added by the diff (skipping the ``+++`` header)."""
+    """Lines added by the diff (skipping the ``+++`` header).
+
+    Only ``+++ `` (with whitespace) is a header — a content line like
+    ``+++suspicious`` must NOT be elided from the added-lines count,
+    or MAX_ADDED_LINES validation under-counts and the drafter can
+    sneak past the cap.
+    """
     out: list[str] = []
     for line in diff.splitlines():
-        if line.startswith("+++"):
+        if line.startswith("+++") and (len(line) == 3 or line[3] in " \t"):
             continue
         if line.startswith("+"):
             out.append(line[1:])

@@ -53,6 +53,16 @@ class TestExtractAddedLines:
         diff = "+++ a\n+line one\n+line two\n @ context\n+line three\n"
         assert _extract_added_lines(diff) == ["line one", "line two", "line three"]
 
+    def test_content_line_starting_with_triple_plus_counts(self) -> None:
+        """A content line whose body starts with ``++`` is a real added line.
+
+        Only ``+++`` followed by whitespace is a header; without this
+        guard a drafter could smuggle content past MAX_ADDED_LINES by
+        prefixing suspicious lines with ``++``.
+        """
+        diff = "+++ b/foo.md\n+++keep me\n+normal add\n"
+        assert _extract_added_lines(diff) == ["++keep me", "normal add"]
+
 
 # ---- git apply check -------------------------------------------------
 

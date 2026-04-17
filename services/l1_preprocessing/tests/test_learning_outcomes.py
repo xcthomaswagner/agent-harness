@@ -344,6 +344,64 @@ class TestDetectHumanReedits:
         assert count == 1
         assert refs[0]["author"].startswith("Alice")
 
+    def test_dedupes_commit_touching_multiple_edited_files(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A single human commit touching N edited files must count once.
+
+        Regression guard: the loop iterates per-file, so without sha
+        dedup a cross-file commit inflates human_reedit_count and
+        pollutes refs.
+        """
+        origin = tmp_path / "origin"
+        origin.mkdir()
+        subprocess.run(
+            ["git", "init", "-b", "main"],
+            cwd=origin, check=True, capture_output=True,
+        )
+        a = origin / "runtime" / "skills" / "a.md"
+        b = origin / "runtime" / "skills" / "b.md"
+        a.parent.mkdir(parents=True)
+        a.write_text("a1\n")
+        b.write_text("b1\n")
+        subprocess.run(["git", "add", "."], cwd=origin, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=xcagent.rockwell@xcentium.com",
+             "-c", "user.name=A", "commit", "-m", "agent merge"],
+            cwd=origin, check=True, capture_output=True,
+        )
+        merge_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=origin,
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        # One human commit modifying BOTH files.
+        a.write_text("a2\n")
+        b.write_text("b2\n")
+        subprocess.run(["git", "add", "."], cwd=origin, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=bob@example.com", "-c", "user.name=Bob",
+             "commit", "-m", "cross-file human fix"],
+            cwd=origin, check=True, capture_output=True,
+        )
+        lesson = _lesson_with_diff(
+            target="runtime/skills/a.md",
+            diff=(
+                "--- a/runtime/skills/a.md\n"
+                "+++ b/runtime/skills/a.md\n"
+                "@@\n+x\n"
+                "--- a/runtime/skills/b.md\n"
+                "+++ b/runtime/skills/b.md\n"
+                "@@\n+y\n"
+            ),
+        )
+        count, refs = _detect_human_reedits(
+            lesson=lesson, merged_commit_sha=merge_sha, scratch_root=origin,
+        )
+        assert count == 1
+        assert len(refs) == 1
+        assert refs[0]["author"].startswith("Bob")
+
     def test_ignores_agent_only_commits(
         self,
         tmp_path: Path,

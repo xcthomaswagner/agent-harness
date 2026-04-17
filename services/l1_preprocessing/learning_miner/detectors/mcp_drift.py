@@ -29,6 +29,7 @@ from learning_miner.detectors.base import CandidateProposal, EvidenceItem
 from learning_miner.detectors.human_issue_cluster import (
     _resolve_platform_profile,
 )
+from tool_index import _canonical_server
 from tracer import ARTIFACT_TOOL_INDEX, latest_artifacts, read_trace
 
 logger = structlog.get_logger()
@@ -90,7 +91,8 @@ def _count_mcp_calls_for_server(
 
     Tool names are ``mcp__<server>__<tool>``. ``server`` here is
     already canonicalized; we recanonicalize the prefix so hyphenated
-    original names match.
+    original names match. Shared with tool_index._canonical_server so
+    the two canonicalization paths can't drift.
     """
     total = 0
     for name, count in (tool_counts or {}).items():
@@ -100,14 +102,7 @@ def _count_mcp_calls_for_server(
         sep = rest.find("__")
         if sep <= 0:
             continue
-        srv_raw = rest[:sep]
-        srv = (
-            srv_raw.replace(" ", "_")
-            .replace(".", "_")
-            .replace(":", "_")
-            .replace("-", "_")
-        )
-        if srv == server:
+        if _canonical_server(rest[:sep]) == server:
             total += int(count) if isinstance(count, int | float) else 0
     return total
 
