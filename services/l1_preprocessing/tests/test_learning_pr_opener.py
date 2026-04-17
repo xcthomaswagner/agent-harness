@@ -1155,3 +1155,16 @@ class TestReviewerFlags:
             "--reviewer", "b",
             "--reviewer", "c",
         ]
+
+    def test_dedupes_duplicates(self) -> None:
+        """Regression: a misconfigured env (e.g. ``a,b,a``) passed
+        duplicates straight to ``gh``, which some versions reject
+        with "already requested review from @a" — failing the whole
+        PR create. Dedup while preserving first-seen order.
+        """
+        from learning_miner.pr_opener import _reviewer_flags
+        assert _reviewer_flags(("a", "b", "a", "c", "b")) == [
+            "--reviewer", "a",
+            "--reviewer", "b",
+            "--reviewer", "c",
+        ]

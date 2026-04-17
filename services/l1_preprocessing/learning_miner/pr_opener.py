@@ -86,12 +86,16 @@ def _reviewer_flags(reviewers: tuple[str, ...]) -> list[str]:
 
     Falsy entries are dropped defensively — a comma-split with a
     trailing comma leaves an empty string that would make ``gh``
-    complain.
+    complain. Duplicates are dropped too (order-preserving): some
+    ``gh`` versions reject duplicate ``--reviewer`` flags with
+    "already requested review from @X", failing the whole PR create.
     """
     out: list[str] = []
+    seen: set[str] = set()
     for handle in reviewers:
         handle = (handle or "").strip()
-        if handle:
+        if handle and handle not in seen:
+            seen.add(handle)
             out.extend(["--reviewer", handle])
     return out
 

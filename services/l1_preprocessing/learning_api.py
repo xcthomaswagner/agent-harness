@@ -26,12 +26,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
 import structlog
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from autonomy_ingest import _guard_admin_request
 from autonomy_store import (
@@ -82,6 +83,24 @@ class RejectIn(BaseModel):
 class SnoozeIn(BaseModel):
     reason: str = ""
     next_review_at: str  # ISO 8601; required so callers can't "forever snooze"
+
+    @field_validator("next_review_at")
+    @classmethod
+    def _parseable_iso(cls, v: str) -> str:
+        """Reject non-ISO values — the comment says ISO 8601 is required
+        but without this validator, any string (``"tomorrow"``, ``""``,
+        ``"never"``) sailed through and landed in the DB, defeating
+        the "forever snooze" prevention the comment claims.
+        """
+        if not v:
+            raise ValueError("next_review_at is required")
+        try:
+            datetime.fromisoformat(v)
+        except ValueError as exc:
+            raise ValueError(
+                f"next_review_at must be ISO 8601: {exc}"
+            ) from exc
+        return v
 
 
 class RevertIn(BaseModel):
@@ -460,11 +479,23 @@ def _configured_reviewers() -> tuple[str, ...]:
     Kept as a small helper so both approve (PR) and revert (PR) flow
     pull from the same source of truth — if an operator updates the
     env, both paths pick it up without a redeploy.
+
+    Dedupes while preserving insertion order: a misconfigured env
+    like ``"a,b,a"`` would otherwise produce ``--reviewer a
+    --reviewer b --reviewer a``, which some ``gh`` versions reject
+    with "already requested review from @a" (fails the PR creation).
     """
     raw = (settings.learning_pr_opener_reviewers or "").strip()
     if not raw:
         return ()
-    return tuple(h.strip() for h in raw.split(",") if h.strip())
+    seen: set[str] = set()
+    out: list[str] = []
+    for h in raw.split(","):
+        handle = h.strip()
+        if handle and handle not in seen:
+            seen.add(handle)
+            out.append(handle)
+    return tuple(out)
 
 
 @router.post("/api/learning/candidates/{lesson_id}/approve")

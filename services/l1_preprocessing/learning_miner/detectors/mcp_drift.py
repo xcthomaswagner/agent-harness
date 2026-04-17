@@ -204,11 +204,12 @@ class McpDriftDetector:
 
         # Cluster: _DriftKey -> list[_DriftObservation]
         clusters: dict[_DriftKey, list[_DriftObservation]] = {}
-        # Dedupe per ticket_id + verb: retries create multiple pr_runs
-        # sharing one trace. Without this, the same bash_count / mcp_count
-        # gets summed N times, inflating `total_bash` in the rationale and
-        # possibly flipping severity when MCP usage is actually zero.
-        seen_per_key: set[tuple[str, str]] = set()
+        # Dedupe per ticket_id + verb + server: retries create multiple
+        # pr_runs sharing one trace. Without this, the same bash_count /
+        # mcp_count gets summed N times, inflating `total_bash` in the
+        # rationale and possibly flipping severity when MCP usage is
+        # actually zero.
+        seen_per_key: set[tuple[str, str, str]] = set()
 
         for pr in pr_rows:
             platform = _resolve_platform_profile(pr["client_profile"])
@@ -244,7 +245,12 @@ class McpDriftDetector:
                 if bash_count < RATIO_THRESHOLD * (mcp_count + 1):
                     continue
 
-                dedup_key = (ticket_id, verb)
+                # Include ``server`` alongside ``verb`` for robustness —
+                # if _BASH_VERB_TO_MCP_SERVER ever becomes many-to-one
+                # (aliases for the same server) or one-to-many (a verb
+                # mapping to multiple servers), this dedup would still
+                # collapse correctly rather than silently merging.
+                dedup_key = (ticket_id, verb, server)
                 if dedup_key in seen_per_key:
                     continue
                 seen_per_key.add(dedup_key)

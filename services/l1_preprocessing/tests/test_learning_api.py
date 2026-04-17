@@ -278,6 +278,63 @@ class TestSnooze:
         )
         assert r.status_code == 422
 
+    def test_snooze_rejects_non_iso_next_review_at(
+        self, client: TestClient, admin_headers: dict[str, str]
+    ) -> None:
+        """Regression: the comment on SnoozeIn.next_review_at says
+        'required so callers can't forever snooze', but without a
+        validator, ``"tomorrow"`` or ``"never"`` sailed through and
+        got stored verbatim — defeating the intent.
+        """
+        lid = _seed_candidate()
+        r = client.post(
+            f"/api/learning/candidates/{lid}/snooze",
+            json={"reason": "x", "next_review_at": "tomorrow"},
+            headers=admin_headers,
+        )
+        assert r.status_code == 422
+        assert "ISO 8601" in r.text or "next_review_at" in r.text
+
+    def test_snooze_rejects_empty_next_review_at(
+        self, client: TestClient, admin_headers: dict[str, str]
+    ) -> None:
+        lid = _seed_candidate()
+        r = client.post(
+            f"/api/learning/candidates/{lid}/snooze",
+            json={"reason": "x", "next_review_at": ""},
+            headers=admin_headers,
+        )
+        assert r.status_code == 422
+
+
+class TestConfiguredReviewers:
+    """The helper that parses LEARNING_PR_OPENER_REVIEWERS env."""
+
+    def test_dedupes_and_preserves_order(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from learning_api import _configured_reviewers
+        monkeypatch.setattr(
+            settings, "learning_pr_opener_reviewers", "a,b,a,c,b"
+        )
+        assert _configured_reviewers() == ("a", "b", "c")
+
+    def test_empty_env_returns_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from learning_api import _configured_reviewers
+        monkeypatch.setattr(settings, "learning_pr_opener_reviewers", "")
+        assert _configured_reviewers() == ()
+
+    def test_whitespace_and_trailing_commas_cleaned(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from learning_api import _configured_reviewers
+        monkeypatch.setattr(
+            settings, "learning_pr_opener_reviewers", " a , , b ,"
+        )
+        assert _configured_reviewers() == ("a", "b")
+
 
 class TestAuth:
     def test_503_when_admin_token_unset(
