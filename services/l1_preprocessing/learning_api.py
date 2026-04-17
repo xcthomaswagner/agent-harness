@@ -459,6 +459,17 @@ def _load_pr_opener_inputs(
 ) -> _PROpenerInputLoad:
     """Pull the fields the PR opener needs off the stored candidate."""
     delta = approved_record.get("proposed_delta") or {}
+    # _candidate_to_dict stamps _parse_error when proposed_delta_json
+    # is malformed. Surface that explicitly — otherwise the
+    # downstream "unified_diff missing" message would incorrectly
+    # blame /draft when the real issue is DB corruption.
+    if isinstance(delta, dict) and delta.get("_parse_error"):
+        return _PROpenerInputLoad(
+            error=(
+                "pr_opener: proposed_delta_json is malformed in the "
+                "store — cannot build PR inputs"
+            )
+        )
     unified_diff = str(delta.get("unified_diff") or "")
     if not unified_diff.strip():
         return _PROpenerInputLoad(

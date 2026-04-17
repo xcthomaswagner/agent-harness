@@ -207,14 +207,25 @@ class MarkdownDrafter:
         current_content: str,
         evidence_snippets: list[str],
     ) -> str:
+        snippet_cap = 20
+        total = len(evidence_snippets)
         evidence_block = "\n".join(
-            f"- {s}" for s in evidence_snippets[:20]
+            f"- {s}" for s in evidence_snippets[:snippet_cap]
         ) or "(no evidence snippets captured)"
+        # Only say "truncated" when we actually dropped snippets —
+        # previously the prompt always said "truncated" even when
+        # all snippets fit, which was a minor prompt-accuracy smell
+        # that LLMs occasionally commented on in their reasoning.
+        count_suffix = (
+            f"{total} total, showing first {snippet_cap}"
+            if total > snippet_cap
+            else f"{total} total"
+        )
         return (
             "The harness emitted this mechanical starter proposal:\n\n"
             f"```json\n{json.dumps(proposed_delta, indent=2, sort_keys=True)}\n```\n\n"
             "Evidence snippets the detector collected "
-            f"({len(evidence_snippets)} total, truncated):\n\n"
+            f"({count_suffix}):\n\n"
             f"{evidence_block}\n\n"
             "Current content of the target file "
             f"(`{proposed_delta.get('target_path')}`):\n\n"

@@ -67,6 +67,13 @@ logger = structlog.get_logger()
 # measured as decreases, not increases.
 _METRIC_EPSILON = 0.02
 
+# Pattern-recurrence threshold for flipping the verdict to REGRESSED.
+# Matches the detector-side ``MIN_CLUSTER_SIZE`` — if the same pattern
+# re-cluster at the trigger threshold post-merge, the lesson's edit
+# didn't help. Named constant so a change here + in each detector's
+# MIN_CLUSTER_SIZE doesn't silently go out of sync.
+_RECURRENCE_REGRESS_THRESHOLD = 3
+
 # Fallback when ``AGENT_GIT_EMAIL`` is unset. Must match the default in
 # ``pr_opener._DEFAULT_AUTHOR_EMAIL`` — if pr_opener stamped a commit
 # with email X, outcomes must recognize X as agent-authored or every
@@ -595,7 +602,7 @@ def _classify_verdict(
 
     aggregate = fpa_delta + escape_delta + catch_delta
 
-    if pattern_recurrence >= 3 or aggregate < -_METRIC_EPSILON:
+    if pattern_recurrence >= _RECURRENCE_REGRESS_THRESHOLD or aggregate < -_METRIC_EPSILON:
         return Verdict.REGRESSED
     if aggregate > _METRIC_EPSILON:
         return Verdict.CONFIRMED
