@@ -134,11 +134,22 @@ def run_outcomes(*, repo_root: Path | None = None) -> OutcomesRunStats:
     start = time.perf_counter()
     scratch_root: Path | None = None
     cleanup_scratch = False
+    provision_attempted = False
 
     def provision_scratch() -> Path | None:
-        nonlocal scratch_root, cleanup_scratch
-        if scratch_root is not None or cleanup_scratch:
+        nonlocal scratch_root, cleanup_scratch, provision_attempted
+        # Cache the provision ATTEMPT (success or failure). Without
+        # ``provision_attempted``, a failed ``_prepare_scratch_root``
+        # (e.g. clone failure) returns ``(None, False)`` — both nonlocal
+        # sentinels stay False, so the next lesson's call re-enters
+        # ``_prepare_scratch_root`` and re-attempts the clone. For a
+        # tick with 100 applied lessons, that's up to 100 clone
+        # retries (each costing up to a 120s timeout). Cache the
+        # attempt so a failure means "skip human-reedit detection
+        # for the rest of the tick" instead.
+        if provision_attempted:
             return scratch_root
+        provision_attempted = True
         scratch_root, cleanup_scratch = _prepare_scratch_root(repo_root)
         return scratch_root
 
@@ -152,9 +163,25 @@ def run_outcomes(*, repo_root: Path | None = None) -> OutcomesRunStats:
             return stats
 
         for lesson in applied:
-            _process_one_lesson(
-                lesson, stats, scratch_provider=provision_scratch
-            )
+            # Per-lesson try so one bad row doesn't abort the tick.
+            # _process_one_lesson wraps _measure_lesson internally,
+            # but paths before that (merge-poll, window-ready check,
+            # conn-open for sha writes) aren't guarded — a hiccup
+            # there shouldn't prevent the next lesson from being
+            # processed on the same tick.
+            try:
+                _process_one_lesson(
+                    lesson, stats, scratch_provider=provision_scratch
+                )
+            except Exception as exc:
+                logger.exception(
+                    "learning_outcomes_lesson_failed",
+                    lesson_id=str(lesson["lesson_id"]),
+                )
+                stats.errors.append(
+                    f"{lesson['lesson_id']!s}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
     except Exception as exc:
         logger.exception("learning_outcomes_run_failed")
         stats.errors.append(f"{type(exc).__name__}: {exc}")

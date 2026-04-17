@@ -32,6 +32,7 @@ from dashboard_common import badge as _badge
 from dashboard_common import escape_html as _e
 from dashboard_common import fmt_ts as _fmt_ts
 from dashboard_common import safe_url as _safe_url
+from learning_miner.outcomes import Verdict
 
 router = APIRouter()
 
@@ -58,12 +59,15 @@ _SEVERITY_BADGE: dict[str, str] = {
 # Outcome verdict → badge class. ``pending`` is the default before
 # window elapses; ``human_reedit`` trumps any metric-based verdict
 # because a human edit is a stronger signal than metric drift.
+# Keys sourced from the Verdict StrEnum so an enum rename/addition
+# in outcomes.py surfaces here as a missing-key instead of silently
+# falling through to ``badge-secondary`` via ``_mapped_badge``.
 _VERDICT_BADGE: dict[str, str] = {
-    "pending": "badge-secondary",
-    "confirmed": "badge-success",
-    "no_change": "badge-blue",
-    "regressed": "badge-error",
-    "human_reedit": "badge-error",
+    Verdict.PENDING.value: "badge-secondary",
+    Verdict.CONFIRMED.value: "badge-success",
+    Verdict.NO_CHANGE.value: "badge-blue",
+    Verdict.REGRESSED.value: "badge-error",
+    Verdict.HUMAN_REEDIT.value: "badge-error",
 }
 
 
@@ -355,7 +359,8 @@ def _render_outcome_fragment(
     # would hit 409 since the store's transition table marks
     # ``reverted`` terminal.
     revert_html = ""
-    if verdict in {"regressed", "human_reedit"} and candidate_status != "reverted":
+    _revertable = {Verdict.REGRESSED.value, Verdict.HUMAN_REEDIT.value}
+    if verdict in _revertable and candidate_status != "reverted":
         lesson_id = str(outcome["lesson_id"] or "")
         # Raw endpoint; let the HTML attribute contexts escape once.
         endpoint = f"/api/learning/candidates/{lesson_id}/revert"
