@@ -115,6 +115,15 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
             )
         version = 4
         logger.info("autonomy_schema_migrated", version=version)
+    if version < 5:
+        with conn:
+            _migrate_to_v5(conn)
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (5, _now_iso()),
+            )
+        version = 5
+        logger.info("autonomy_schema_migrated", version=version)
     return version
 
 
@@ -315,6 +324,119 @@ def _migrate_to_v4(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_pr_commits_pr_run_committed_at "
         "ON pr_commits (pr_run_id, committed_at)"
+    )
+
+
+def _migrate_to_v5(conn: sqlite3.Connection) -> None:
+    """v5: self-learning lesson tables.
+
+    Adds three tables for the self-learning miner: ``lesson_candidates``
+    (one row per detected pattern, upserted on detector+pattern+scope),
+    ``lesson_evidence`` (pointers to the traces/pr_runs supporting each
+    candidate), and ``lesson_outcomes`` (pre/post metrics + human-reedit
+    signals written by the outcomes job after merge).
+
+    The hot-read index ``(client_profile, status, detected_at DESC)``
+    supports the dashboard's main query. ``status`` enumerates
+    ``proposed|draft_ready|approved|rejected|applied|reverted|stale|snoozed``.
+    See ``docs/self-learning-plan.md`` §3 for the full design.
+    """
+    conn.execute(
+        """
+        CREATE TABLE lesson_candidates (
+            id INTEGER PRIMARY KEY,
+            lesson_id TEXT NOT NULL UNIQUE,
+            detector_name TEXT NOT NULL,
+            detector_version INTEGER NOT NULL DEFAULT 1,
+            pattern_key TEXT NOT NULL,
+            client_profile TEXT NOT NULL DEFAULT '',
+            platform_profile TEXT NOT NULL DEFAULT '',
+            scope_key TEXT NOT NULL DEFAULT '',
+            frequency INTEGER NOT NULL DEFAULT 1,
+            severity TEXT NOT NULL DEFAULT 'info',
+            detected_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            proposed_delta_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'proposed',
+            status_reason TEXT NOT NULL DEFAULT '',
+            next_review_at TEXT NOT NULL DEFAULT '',
+            pr_url TEXT NOT NULL DEFAULT '',
+            merged_commit_sha TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (detector_name, pattern_key, scope_key)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX idx_lesson_candidates_status "
+        "ON lesson_candidates (status)"
+    )
+    conn.execute(
+        "CREATE INDEX idx_lesson_candidates_profile "
+        "ON lesson_candidates (client_profile, platform_profile)"
+    )
+    conn.execute(
+        "CREATE INDEX idx_lesson_candidates_detector "
+        "ON lesson_candidates (detector_name)"
+    )
+    conn.execute(
+        "CREATE INDEX idx_lesson_candidates_profile_status_seen "
+        "ON lesson_candidates (client_profile, status, detected_at DESC)"
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE lesson_evidence (
+            id INTEGER PRIMARY KEY,
+            lesson_id TEXT NOT NULL REFERENCES lesson_candidates(lesson_id)
+                ON DELETE CASCADE,
+            pr_run_id INTEGER REFERENCES pr_runs(id),
+            trace_id TEXT NOT NULL DEFAULT '',
+            observed_at TEXT NOT NULL,
+            source_ref TEXT NOT NULL DEFAULT '',
+            snippet TEXT NOT NULL DEFAULT '',
+            UNIQUE (lesson_id, trace_id, source_ref)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX idx_lesson_evidence_lesson_id "
+        "ON lesson_evidence (lesson_id)"
+    )
+    conn.execute(
+        "CREATE INDEX idx_lesson_evidence_trace_id "
+        "ON lesson_evidence (trace_id)"
+    )
+    conn.execute(
+        "CREATE INDEX idx_lesson_evidence_pr_run_id "
+        "ON lesson_evidence (pr_run_id)"
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE lesson_outcomes (
+            id INTEGER PRIMARY KEY,
+            lesson_id TEXT NOT NULL REFERENCES lesson_candidates(lesson_id),
+            measured_at TEXT NOT NULL,
+            window_days INTEGER NOT NULL,
+            pre_fpa REAL,
+            post_fpa REAL,
+            pre_escape_rate REAL,
+            post_escape_rate REAL,
+            pre_catch_rate REAL,
+            post_catch_rate REAL,
+            pattern_recurrence_count INTEGER NOT NULL DEFAULT 0,
+            human_reedit_count INTEGER NOT NULL DEFAULT 0,
+            human_reedit_refs TEXT NOT NULL DEFAULT '[]',
+            verdict TEXT NOT NULL DEFAULT 'pending',
+            notes TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX idx_lesson_outcomes_lesson_id "
+        "ON lesson_outcomes (lesson_id)"
     )
 
 
@@ -1409,3 +1531,322 @@ def list_recent_auto_merge_decisions(
     )
     params.append(limit)
     return list(conn.execute(sql, params).fetchall())
+
+
+# ---------------------------------------------------------------------------
+# Self-learning lesson tables (v5)
+# ---------------------------------------------------------------------------
+
+# Cap per lesson. Evidence rows past this are trimmed oldest-first on insert
+# so the dashboard stays responsive and the ``evidence`` JOIN stays bounded.
+LESSON_EVIDENCE_CAP = 20
+
+# Max length of a ``lesson_evidence.snippet``. Enforced here (not by the
+# detector) so truncation happens AFTER redaction — which prevents
+# splitting a redaction marker in half.
+LESSON_SNIPPET_MAX_LEN = 500
+
+
+class LessonCandidateUpsert(BaseModel):
+    """Patch-style upsert for a detected lesson candidate.
+
+    Keyed on ``(detector_name, pattern_key, scope_key)`` so rescans
+    refresh the existing row instead of duplicating. See
+    ``upsert_lesson_candidate`` for MAX-frequency semantics and
+    fields that are preserved across rescans.
+    """
+
+    lesson_id: str
+    detector_name: str
+    detector_version: int = 1
+    pattern_key: str
+    client_profile: str = ""
+    platform_profile: str = ""
+    scope_key: str = ""
+    proposed_delta_json: str = "{}"
+    severity: str = "info"
+    window_frequency: int = 1
+
+
+def upsert_lesson_candidate(
+    conn: sqlite3.Connection,
+    row: LessonCandidateUpsert,
+    *,
+    now: str | None = None,
+) -> int:
+    """Insert or refresh a lesson_candidates row.
+
+    On first detection: inserts with ``status='proposed'`` and
+    ``frequency=window_frequency``.
+
+    On repeat detection: refreshes ``severity``,
+    ``proposed_delta_json``, ``detector_version``, and
+    ``last_seen_at``; sets ``frequency = MAX(current,
+    window_frequency)`` so a narrower later scan doesn't regress
+    the count. Does NOT touch ``status``, ``status_reason``,
+    ``next_review_at``, ``pr_url``, or ``merged_commit_sha`` —
+    those are driven by the approval flow.
+
+    Returns the candidate id.
+    """
+    ts = now or _now_iso()
+    initial_freq = max(1, int(row.window_frequency))
+    existing = conn.execute(
+        "SELECT id FROM lesson_candidates "
+        "WHERE detector_name = ? AND pattern_key = ? AND scope_key = ?",
+        (row.detector_name, row.pattern_key, row.scope_key),
+    ).fetchone()
+
+    if existing is None:
+        with conn:
+            cur = conn.execute(
+                """
+                INSERT INTO lesson_candidates (
+                    lesson_id, detector_name, detector_version, pattern_key,
+                    client_profile, platform_profile, scope_key,
+                    frequency, severity, detected_at, last_seen_at,
+                    proposed_delta_json, status, created_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    row.lesson_id,
+                    row.detector_name,
+                    row.detector_version,
+                    row.pattern_key,
+                    row.client_profile,
+                    row.platform_profile,
+                    row.scope_key,
+                    initial_freq,
+                    row.severity,
+                    ts,
+                    ts,
+                    row.proposed_delta_json,
+                    "proposed",
+                    ts,
+                    ts,
+                ),
+            )
+        return int(cur.lastrowid or 0)
+
+    with conn:
+        conn.execute(
+            """
+            UPDATE lesson_candidates
+            SET frequency = MAX(frequency, ?),
+                last_seen_at = ?,
+                updated_at = ?,
+                severity = ?,
+                proposed_delta_json = ?,
+                detector_version = ?
+            WHERE id = ?
+            """,
+            (
+                initial_freq,
+                ts,
+                ts,
+                row.severity,
+                row.proposed_delta_json,
+                row.detector_version,
+                int(existing["id"]),
+            ),
+        )
+    return int(existing["id"])
+
+
+def insert_lesson_evidence(
+    conn: sqlite3.Connection,
+    *,
+    lesson_id: str,
+    trace_id: str,
+    source_ref: str,
+    observed_at: str,
+    snippet: str = "",
+    pr_run_id: int | None = None,
+    cap: int | None = None,
+) -> int | None:
+    """Insert an evidence row, trimming oldest beyond ``cap``.
+
+    Returns the new id, or ``None`` on UNIQUE collision (which is
+    the normal no-op path when a rescan revisits an existing
+    trace). Snippets longer than ``LESSON_SNIPPET_MAX_LEN`` are
+    truncated with an ellipsis.
+    """
+    effective_cap = cap if cap is not None else LESSON_EVIDENCE_CAP
+    if effective_cap < 1:
+        raise ValueError(
+            f"insert_lesson_evidence: cap must be >= 1, got {effective_cap}"
+        )
+    if len(snippet) > LESSON_SNIPPET_MAX_LEN:
+        snippet = snippet[: LESSON_SNIPPET_MAX_LEN - 3] + "..."
+    try:
+        with conn:
+            cur = conn.execute(
+                """
+                INSERT INTO lesson_evidence
+                    (lesson_id, pr_run_id, trace_id, observed_at,
+                     source_ref, snippet)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lesson_id,
+                    pr_run_id,
+                    trace_id,
+                    observed_at,
+                    source_ref,
+                    snippet,
+                ),
+            )
+    except sqlite3.IntegrityError:
+        return None
+    new_id = int(cur.lastrowid or 0)
+
+    with conn:
+        conn.execute(
+            """
+            DELETE FROM lesson_evidence
+            WHERE lesson_id = ?
+              AND id NOT IN (
+                  SELECT id FROM lesson_evidence
+                  WHERE lesson_id = ?
+                  ORDER BY id DESC
+                  LIMIT ?
+              )
+            """,
+            (lesson_id, lesson_id, effective_cap),
+        )
+    return new_id
+
+
+def list_lesson_evidence(
+    conn: sqlite3.Connection,
+    lesson_id: str,
+    *,
+    limit: int = LESSON_EVIDENCE_CAP,
+) -> list[sqlite3.Row]:
+    """Return evidence rows for a lesson, newest first."""
+    rows = conn.execute(
+        "SELECT * FROM lesson_evidence WHERE lesson_id = ? "
+        "ORDER BY id DESC LIMIT ?",
+        (lesson_id, limit),
+    ).fetchall()
+    return list(rows)
+
+
+def get_lesson_by_id(
+    conn: sqlite3.Connection, lesson_id: str
+) -> sqlite3.Row | None:
+    """Fetch a lesson_candidates row by its ``LSN-<hex>`` id."""
+    row: sqlite3.Row | None = conn.execute(
+        "SELECT * FROM lesson_candidates WHERE lesson_id = ?",
+        (lesson_id,),
+    ).fetchone()
+    return row
+
+
+def list_lesson_candidates(
+    conn: sqlite3.Connection,
+    *,
+    status: str | None = None,
+    client_profile: str | None = None,
+    detector_name: str | None = None,
+    limit: int = 100,
+) -> list[sqlite3.Row]:
+    """List lesson_candidates with optional filters.
+
+    Ordered by ``detected_at DESC`` so the most recent patterns
+    appear first — matches the dashboard's default sort order and
+    rides the ``idx_lesson_candidates_profile_status_seen`` index
+    when ``status`` and ``client_profile`` are both specified.
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if status is not None:
+        clauses.append("status = ?")
+        params.append(status)
+    if client_profile is not None:
+        clauses.append("client_profile = ?")
+        params.append(client_profile)
+    if detector_name is not None:
+        clauses.append("detector_name = ?")
+        params.append(detector_name)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    sql = (
+        f"SELECT * FROM lesson_candidates {where} "
+        "ORDER BY detected_at DESC LIMIT ?"
+    )
+    params.append(limit)
+    return list(conn.execute(sql, params).fetchall())
+
+
+# Allowed (current -> {next}) transitions. Linear approval flow
+# (proposed -> draft_ready -> approved -> applied) with snooze
+# cycles and rejected/reverted/stale as terminal states.
+_LESSON_STATUS_TRANSITIONS: dict[str, set[str]] = {
+    "proposed": {"draft_ready", "rejected", "snoozed", "stale"},
+    "draft_ready": {"approved", "proposed", "rejected"},
+    "snoozed": {"proposed", "rejected", "stale"},
+    "approved": {"applied", "rejected"},
+    "applied": {"reverted"},
+    "rejected": set(),
+    "reverted": set(),
+    "stale": set(),
+}
+
+
+def update_lesson_status(
+    conn: sqlite3.Connection,
+    lesson_id: str,
+    new_status: str,
+    *,
+    reason: str = "",
+    pr_url: str | None = None,
+    merged_commit_sha: str | None = None,
+    next_review_at: str | None = None,
+    proposed_delta_json: str | None = None,
+    now: str | None = None,
+) -> sqlite3.Row:
+    """Transition a lesson's status, validating against the allowed
+    transition table. Raises ``ValueError`` on unknown lesson or
+    disallowed transition. Side-channel fields (``pr_url``,
+    ``merged_commit_sha``, ``next_review_at``, ``proposed_delta_json``)
+    only get written when the caller supplies a non-None value.
+    """
+    ts = now or _now_iso()
+    row = get_lesson_by_id(conn, lesson_id)
+    if row is None:
+        raise ValueError(f"unknown lesson_id: {lesson_id}")
+    current = str(row["status"])
+    allowed = _LESSON_STATUS_TRANSITIONS.get(current)
+    if allowed is None:
+        raise ValueError(f"unknown current status: {current}")
+    if new_status not in allowed:
+        raise ValueError(
+            f"invalid transition {current} -> {new_status} "
+            f"for lesson {lesson_id}"
+        )
+
+    sets = ["status = ?", "status_reason = ?", "updated_at = ?"]
+    params: list[Any] = [new_status, reason, ts]
+    if pr_url is not None:
+        sets.append("pr_url = ?")
+        params.append(pr_url)
+    if merged_commit_sha is not None:
+        sets.append("merged_commit_sha = ?")
+        params.append(merged_commit_sha)
+    if next_review_at is not None:
+        sets.append("next_review_at = ?")
+        params.append(next_review_at)
+    if proposed_delta_json is not None:
+        sets.append("proposed_delta_json = ?")
+        params.append(proposed_delta_json)
+    params.append(lesson_id)
+
+    with conn:
+        conn.execute(
+            f"UPDATE lesson_candidates SET {', '.join(sets)} "
+            "WHERE lesson_id = ?",
+            params,
+        )
+    updated = get_lesson_by_id(conn, lesson_id)
+    assert updated is not None  # just updated
+    return updated

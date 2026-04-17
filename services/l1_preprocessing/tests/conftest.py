@@ -2,11 +2,19 @@
 
 import os
 from collections.abc import AsyncGenerator, Generator
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 import main
+from autonomy_store import (
+    PrRunUpsert,
+    ensure_schema,
+    insert_review_issue,
+    open_connection,
+    upsert_pr_run,
+)
 from main import app
 
 
@@ -59,3 +67,70 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+
+
+# ---------------------------------------------------------------------------
+# Self-learning miner fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def learning_conn(tmp_path: Path):
+    """A fresh autonomy.db with the v5 schema applied.
+
+    Used by every self-learning test — consolidates the identical
+    open / ensure_schema / close pattern that the four Phase A
+    test modules each had inline.
+    """
+    c = open_connection(tmp_path / "autonomy.db")
+    try:
+        ensure_schema(c)
+        yield c
+    finally:
+        c.close()
+
+
+def seed_pr_run_for_learning(
+    conn,
+    *,
+    pr_number: int,
+    ticket_id: str,
+    client_profile: str,
+    opened_at: str = "",
+) -> int:
+    """Insert a pr_runs row shaped for Detector 2's JOIN.
+
+    Shared between human_issue_cluster tests and the backfill
+    script's end-to-end test.
+    """
+    return upsert_pr_run(
+        conn,
+        PrRunUpsert(
+            ticket_id=ticket_id,
+            pr_number=pr_number,
+            repo_full_name="acme/app",
+            head_sha=f"sha-{pr_number}",
+            client_profile=client_profile,
+            opened_at=opened_at,
+        ),
+    )
+
+
+def seed_human_issue_for_learning(
+    conn,
+    *,
+    pr_run_id: int,
+    category: str,
+    file_path: str,
+    summary: str = "human-flagged issue",
+) -> int:
+    """Insert a human_review review_issues row with is_valid=1."""
+    return insert_review_issue(
+        conn,
+        pr_run_id=pr_run_id,
+        source="human_review",
+        file_path=file_path,
+        category=category,
+        summary=summary,
+        is_valid=1,
+    )
