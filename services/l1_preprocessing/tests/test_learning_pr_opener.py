@@ -193,6 +193,15 @@ class TestParsePrUrl:
         )
         assert _parse_pr_url(text) == "https://github.com/x/y/pull/42"
 
+    def test_comma_joined_urls_match_separately(self) -> None:
+        """Regression: ``[^\\s]+`` was too greedy and matched across
+        commas — two comma-joined URLs parsed as ONE concatenated
+        "URL". Tighten the char class so adjacent URLs separate.
+        """
+        text = "https://github.com/x/y/pull/1,https://github.com/x/z/pull/2"
+        # After the tightening, should pick the LAST discrete URL.
+        assert _parse_pr_url(text) == "https://github.com/x/z/pull/2"
+
 
 # ---- frontmatter stamping --------------------------------------------
 

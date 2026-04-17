@@ -602,3 +602,40 @@ class TestSetLessonStatusReason:
         row = get_lesson_by_id(conn, lid)
         assert row is not None
         assert len(row["status_reason"]) == 500
+
+
+class TestSetLessonMergedCommitSha:
+    """Guards against empty sha — writing empty would CLEAR existing
+    merge state and force outcomes.py to re-poll gh. Raise on misuse
+    instead of silently reverting merge state.
+    """
+
+    def _seed(self, conn) -> str:
+        from autonomy_store import update_lesson_status
+        upsert_lesson_candidate(
+            conn, _base_candidate(), now="2026-04-10T00:00:00+00:00"
+        )
+        lid = compute_lesson_id(
+            "human_issue_cluster",
+            "security|*.cls",
+            "xcsf30|salesforce|security|foo.cls",
+        )
+        # Walk to applied so the sha write semantically makes sense.
+        update_lesson_status(conn, lid, "draft_ready", reason="ok")
+        update_lesson_status(conn, lid, "approved", reason="ok")
+        update_lesson_status(conn, lid, "applied", reason="ok")
+        return lid
+
+    def test_rejects_empty_sha(self, conn) -> None:
+        from autonomy_store import set_lesson_merged_commit_sha
+        lid = self._seed(conn)
+        with pytest.raises(ValueError, match="non-empty"):
+            set_lesson_merged_commit_sha(conn, lid, "")
+
+    def test_writes_valid_sha(self, conn) -> None:
+        from autonomy_store import set_lesson_merged_commit_sha
+        lid = self._seed(conn)
+        set_lesson_merged_commit_sha(conn, lid, "abcdef12")
+        row = get_lesson_by_id(conn, lid)
+        assert row is not None
+        assert row["merged_commit_sha"] == "abcdef12"

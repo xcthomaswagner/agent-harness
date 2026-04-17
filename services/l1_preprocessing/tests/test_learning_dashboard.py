@@ -265,6 +265,34 @@ class TestNavigation:
         assert 'href="/traces"' in r.text
 
 
+class TestRevertButtonSuppression:
+    """When a lesson is already reverted, the Revert button is a
+    dead link — clicking it would hit 409 (reverted is terminal).
+    The fragment should omit it.
+    """
+
+    def test_fragment_hides_revert_when_already_reverted(self) -> None:
+        from unittest.mock import MagicMock
+
+        from learning_dashboard import _render_outcome_fragment
+
+        outcome = MagicMock()
+        outcome.__getitem__ = lambda self, k: {
+            "verdict": "regressed",
+            "pre_fpa": 0.9, "post_fpa": 0.8,
+            "pre_escape_rate": 0.0, "post_escape_rate": 0.0,
+            "pre_catch_rate": 0.5, "post_catch_rate": 0.5,
+            "human_reedit_count": 0,
+            "lesson_id": "LSN-x",
+        }[k]
+        # Status=reverted → button suppressed.
+        out = _render_outcome_fragment(outcome, candidate_status="reverted")
+        assert "Revert</button>" not in out
+        # Default (applied) → button present.
+        out2 = _render_outcome_fragment(outcome, candidate_status="applied")
+        assert "Revert</button>" in out2
+
+
 class TestProposedDeltaRendering:
     def test_empty_delta_renders_without_error(
         self, client: TestClient

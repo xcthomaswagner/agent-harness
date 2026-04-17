@@ -1959,7 +1959,17 @@ def set_lesson_merged_commit_sha(
     ``lesson_candidates``. Applied→applied is not a legal
     ``update_lesson_status`` transition, and we only ever need to
     stamp this column once per lesson.
+
+    Rejects empty sha values — writing empty would CLEAR an existing
+    sha and force outcomes.py to re-poll gh. Callers that have
+    nothing to write should not call this function; raising makes the
+    misuse obvious instead of silently reverting merge state.
     """
+    if not merged_commit_sha:
+        raise ValueError(
+            "set_lesson_merged_commit_sha: sha must be non-empty; "
+            "empty would clear existing merge state"
+        )
     ts = now or _now_iso()
     with conn:
         conn.execute(

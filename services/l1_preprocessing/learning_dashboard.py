@@ -306,13 +306,19 @@ def _format_proposed_delta(raw_json: str) -> str:
     return out
 
 
-def _render_outcome_fragment(outcome: sqlite3.Row) -> str:
+def _render_outcome_fragment(
+    outcome: sqlite3.Row, *, candidate_status: str = ""
+) -> str:
     """Render a compact verdict badge + pre/post metric tooltip.
 
     Rendered inline in the scope cell under the PR link so operators
     can see at a glance whether a merged lesson helped. Full metric
     detail lives in the ``title`` attribute so only a hover pulls
     the numbers — keeps the row compact on a long dashboard.
+
+    The Revert button is suppressed when ``candidate_status`` is
+    already ``reverted`` — a second /revert would return 409 since
+    ``reverted`` is terminal, so the button was confusing UX.
     """
     verdict = outcome["verdict"] or "pending"
 
@@ -331,8 +337,11 @@ def _render_outcome_fragment(outcome: sqlite3.Row) -> str:
     # Regressed / human_reedit rows expose a Revert button with the
     # POST endpoint in the tooltip — same curl-only UX as the other
     # action buttons (no JS to read the admin token client-side).
+    # Suppressed when the lesson is already reverted: a second /revert
+    # would hit 409 since the store's transition table marks
+    # ``reverted`` terminal.
     revert_html = ""
-    if verdict in {"regressed", "human_reedit"}:
+    if verdict in {"regressed", "human_reedit"} and candidate_status != "reverted":
         lesson_id = str(outcome["lesson_id"] or "")
         endpoint = f"/api/learning/candidates/{_e(lesson_id)}/revert"
         revert_html = (
@@ -369,7 +378,9 @@ def _render_candidate_row(
             f"rel=\"noreferrer noopener\">PR →</a>"
         )
     if outcome is not None:
-        scope_cell += _render_outcome_fragment(outcome)
+        scope_cell += _render_outcome_fragment(
+            outcome, candidate_status=status
+        )
     first_seen = _fmt_ts(candidate["detected_at"])
     last_seen = _fmt_ts(candidate["last_seen_at"])
     time_cell = f"{_e(last_seen)}<br><span class='meta'>first {_e(first_seen)}</span>"

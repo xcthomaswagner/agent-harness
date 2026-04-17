@@ -29,7 +29,7 @@ import structlog
 from redaction import redact_token_urls
 
 from ._subprocess import build_env, resolve_auth_token, run_bin, safe_stderr_tail
-from .drafter_markdown import _validate_diff_internal_paths
+from .drafter_markdown import validate_diff_internal_paths
 
 logger = structlog.get_logger()
 
@@ -308,7 +308,7 @@ def open_pr_for_lesson(inputs: OpenPRInputs) -> PROpenerResult:
     # with services/ or .github/ targets past the approve endpoint.
     # Re-checking here means the pr_opener can't be tricked into
     # applying a disallowed patch even if the DB was tampered with.
-    path_err = _validate_diff_internal_paths(inputs.unified_diff)
+    path_err = validate_diff_internal_paths(inputs.unified_diff)
     if path_err is not None:
         return PROpenerResult(success=False, error=path_err)
 
@@ -562,7 +562,11 @@ def open_pr_for_lesson(inputs: OpenPRInputs) -> PROpenerResult:
             )
 
 
-_PR_URL_RE = re.compile(r"https://[^\s]+/pull/\d+")
+# URL characters. The `[^\s]+` form is too greedy — a comma-joined
+# output like ``a/pull/1,b/pull/2`` matched as ONE "URL" spanning both.
+# Restrict to RFC-3986-ish path chars (drop ``,``, ``;``, brackets,
+# whitespace) so back-to-back URLs get matched separately.
+_PR_URL_RE = re.compile(r"https://[A-Za-z0-9._~\-/%?=&#]+/pull/\d+")
 
 
 def _parse_pr_url(gh_output: str) -> str:
