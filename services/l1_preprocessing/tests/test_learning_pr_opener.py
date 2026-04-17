@@ -106,6 +106,24 @@ class TestParsePrUrl:
     def test_empty_on_no_url(self) -> None:
         assert _parse_pr_url("something went wrong") == ""
 
+    def test_extracts_embedded_url(self) -> None:
+        """Some gh versions emit ``Opened: <url>`` on a single line.
+
+        Regression: the previous implementation required the URL to
+        start the line, so an embedded URL was missed and callers fell
+        back to the pr-list recovery path.
+        """
+        text = "Opened: https://github.com/x/y/pull/99 successfully.\n"
+        assert _parse_pr_url(text) == "https://github.com/x/y/pull/99"
+
+    def test_picks_last_url_when_multiple(self) -> None:
+        """Multiple URLs — take the final one (the newly-created PR)."""
+        text = (
+            "Referencing previous: https://github.com/x/y/pull/5\n"
+            "Created: https://github.com/x/y/pull/42\n"
+        )
+        assert _parse_pr_url(text) == "https://github.com/x/y/pull/42"
+
 
 # ---- frontmatter stamping --------------------------------------------
 
@@ -420,6 +438,96 @@ class TestOpenPrFailurePaths:
         result = open_pr_for_lesson(bad)
         assert result.success is False
         assert "unsafe branch" in result.error
+
+    def test_gh_create_exit_nonzero_deletes_branch(
+        self, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: gh pr create exit-nonzero used to return an error
+        WITHOUT deleting the pushed remote branch. The retry then hit
+        "branch already exists" at git push --set-upstream and the
+        lesson could never recover. We now attempt URL recovery first,
+        and fall back to deleting the branch on failure.
+        """
+        real_git = __import__(
+            "learning_miner.pr_opener", fromlist=["_git"]
+        )._git
+        delete_calls: list[list[str]] = []
+
+        def fake_git(args, **kw):
+            if args[:1] == ["push"] and "--delete" in args:
+                delete_calls.append(list(args))
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            if args[:1] == ["push"]:
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            return real_git(args, **kw)
+
+        def fake_gh(args, **kw):
+            if args[:2] == ["pr", "create"]:
+                return subprocess.CompletedProcess(
+                    args, 1,
+                    stdout="", stderr="upstream error: 500 from api\n",
+                )
+            if args[:2] == ["pr", "list"]:
+                # No PR found — forces the delete-branch fallback.
+                return subprocess.CompletedProcess(
+                    args, 0, stdout="[]\n", stderr="",
+                )
+            raise AssertionError(f"unexpected gh args: {args}")
+
+        monkeypatch.setattr("learning_miner.pr_opener._git", fake_git)
+        monkeypatch.setattr("learning_miner.pr_opener._gh", fake_gh)
+        monkeypatch.setenv("AGENT_GH_TOKEN", "fake-token")
+
+        inputs = _base_inputs(origin_repo, dry_run=False)
+        result = open_pr_for_lesson(inputs)
+        assert result.success is False
+        assert "gh pr create" in result.error
+        # Branch delete fired so retries don't trip on "branch exists".
+        assert len(delete_calls) == 1
+        assert "--delete" in delete_calls[0]
+        assert result.branch in delete_calls[0]
+
+    def test_gh_create_exit_nonzero_recovers_when_pr_exists(
+        self, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If gh pr create fails because the PR already exists, recovery
+        via pr list should return the existing URL as a success.
+
+        Common case: a prior attempt pushed + created the PR but the
+        process died before the response was captured; a retry runs the
+        same push (no-op) + create (fails "already exists"), and
+        recovery finds the existing PR.
+        """
+        real_git = __import__(
+            "learning_miner.pr_opener", fromlist=["_git"]
+        )._git
+
+        def fake_git(args, **kw):
+            if args[:1] == ["push"]:
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            return real_git(args, **kw)
+
+        def fake_gh(args, **kw):
+            if args[:2] == ["pr", "create"]:
+                return subprocess.CompletedProcess(
+                    args, 1,
+                    stdout="", stderr="a pull request for branch already exists",
+                )
+            if args[:2] == ["pr", "list"]:
+                return subprocess.CompletedProcess(
+                    args, 0,
+                    stdout='[{"url": "https://github.com/x/y/pull/55"}]\n',
+                    stderr="",
+                )
+            raise AssertionError(f"unexpected gh args: {args}")
+
+        monkeypatch.setattr("learning_miner.pr_opener._git", fake_git)
+        monkeypatch.setattr("learning_miner.pr_opener._gh", fake_gh)
+        monkeypatch.setenv("AGENT_GH_TOKEN", "fake-token")
+
+        result = open_pr_for_lesson(_base_inputs(origin_repo, dry_run=False))
+        assert result.success is True
+        assert result.pr_url == "https://github.com/x/y/pull/55"
 
 
 # ---- PR body content -------------------------------------------------

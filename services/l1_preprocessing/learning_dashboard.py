@@ -221,18 +221,26 @@ def _render_action_buttons(lesson_id: str, status: str) -> str:
     endpoint off the ``title``/``data-endpoint`` attributes and hits
     it via curl (or a tool that injects the admin header). Plain
     ``<a>`` tags would invite clicks that issue a GET (405).
+
+    Per-button enablement mirrors the store's transition table
+    (``_LESSON_STATUS_TRANSITIONS`` in autonomy_store). The previous
+    blanket ``terminal`` check disabled Reject on ``approved`` even
+    though the store allows ``approved -> rejected``, and disabled
+    Approve on ``approved`` even though /approve is re-entrable for
+    PR-opener retry (see learning_api.post_approve).
     """
-    terminal = status in {
-        "applied", "rejected", "reverted", "stale", "approved"
-    }
-    # Draft is only applicable at `proposed` — the drafter transitions
-    # proposed -> draft_ready and a lesson already past proposed can't
-    # re-draft in place.
+    # Explicit per-action enablement mirrors _LESSON_STATUS_TRANSITIONS
+    # + the re-entrable approve contract. Mis-disabling is worse than
+    # wrongly-enabling: the API still validates and returns 409, but
+    # a disabled button hides a legal action.
+    approve_ok_from = {"draft_ready", "approved"}
+    reject_ok_from = {"proposed", "draft_ready", "snoozed", "approved"}
+    snooze_ok_from = {"proposed"}
     buttons: list[tuple[str, str, str, bool]] = [
         ("Draft diff", "draft", "btn btn-draft", status != "proposed"),
-        ("Approve", "approve", "btn btn-approve", status != "draft_ready"),
-        ("Reject", "reject", "btn btn-reject", terminal),
-        ("Snooze", "snooze", "btn btn-snooze", terminal),
+        ("Approve", "approve", "btn btn-approve", status not in approve_ok_from),
+        ("Reject", "reject", "btn btn-reject", status not in reject_ok_from),
+        ("Snooze", "snooze", "btn btn-snooze", status not in snooze_ok_from),
     ]
     out: list[str] = ['<div class="actions">']
     for label, action, cls, disabled in buttons:

@@ -164,6 +164,55 @@ class TestPopulated:
         r = client.get("/autonomy/learning")
         assert "Disabled — current status is rejected" in r.text
 
+    def test_approved_shows_reject_enabled(
+        self, client: TestClient
+    ) -> None:
+        """Regression: approved used to be lumped into the terminal set
+        so the Reject button was disabled. But the store transition
+        table allows ``approved -> rejected`` — the dashboard now
+        reflects that.
+        """
+        lid = _seed()
+        from autonomy_store import update_lesson_status
+
+        with autonomy_conn() as conn:
+            update_lesson_status(conn, lid, "draft_ready", reason="d")
+            update_lesson_status(conn, lid, "approved", reason="a")
+        r = client.get("/autonomy/learning")
+        # The Reject button's tooltip must NOT be the disabled-reason text
+        # (which reads "Disabled — current status is X"). Instead it
+        # should show the POST endpoint, signalling the action is live.
+        # Locate the reject button specifically.
+        import re
+        m = re.search(
+            r'<button[^>]*data-endpoint="[^"]*/reject"[^>]*title="([^"]*)"',
+            r.text,
+        )
+        assert m is not None
+        assert m.group(1).startswith("POST ")
+
+    def test_approved_shows_approve_enabled_for_reentry(
+        self, client: TestClient
+    ) -> None:
+        """Regression: /approve is re-entrable from approved (PR-opener
+        retry path) — the dashboard must not disable the Approve button
+        at that status.
+        """
+        lid = _seed()
+        from autonomy_store import update_lesson_status
+
+        with autonomy_conn() as conn:
+            update_lesson_status(conn, lid, "draft_ready", reason="d")
+            update_lesson_status(conn, lid, "approved", reason="a")
+        r = client.get("/autonomy/learning")
+        import re
+        m = re.search(
+            r'<button[^>]*data-endpoint="[^"]*/approve"[^>]*title="([^"]*)"',
+            r.text,
+        )
+        assert m is not None
+        assert m.group(1).startswith("POST ")
+
 
 class TestProfileSelector:
     def test_only_profiles_with_candidates_listed(

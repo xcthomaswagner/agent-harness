@@ -214,10 +214,19 @@ def _run(
     *,
     label: str,
 ) -> str | None:
-    """Return an error string if the subprocess failed, else None."""
+    """Return an error string if the subprocess failed, else None.
+
+    Redacts BEFORE truncating — if the 400-char tail clips through a
+    ``https://user:token@...`` URL, the regex wouldn't match on the
+    truncated slice and the partial token would leak. Redacting on
+    the full output first means a half-URL at the boundary has
+    already been scrubbed when we clip.
+    """
     if cmd.returncode != 0:
-        raw = (cmd.stderr or cmd.stdout or "")[-400:].strip()
-        return f"{label} failed (exit {cmd.returncode}): {redact_token_urls(raw)}"
+        raw = cmd.stderr or cmd.stdout or ""
+        redacted = redact_token_urls(raw)
+        tail = redacted[-400:].strip()
+        return f"{label} failed (exit {cmd.returncode}): {tail}"
     return None
 
 
@@ -414,6 +423,28 @@ def open_pr_for_lesson(inputs: OpenPRInputs) -> PROpenerResult:
         )
         pr_err = _run(pr_proc, label="gh pr create")
         if pr_err is not None:
+            # gh pr create exit-nonzero could mean the PR already
+            # exists (eg. branch was reused). Try to recover the URL
+            # before deleting the branch; if recovery finds a PR, the
+            # push+create succeeded semantically and we return it.
+            recovered = _recover_pr_url_by_branch(clone_dir, branch, env)
+            if recovered:
+                logger.info(
+                    "learning_pr_opener_recovered_after_create_err",
+                    lesson_id=inputs.lesson_id,
+                    branch=branch,
+                    pr_url=recovered,
+                )
+                success = True
+                return PROpenerResult(
+                    success=True,
+                    pr_url=recovered,
+                    branch=branch,
+                    commit_sha=commit_sha,
+                )
+            # No PR found — delete the remote branch so /approve retry
+            # doesn't trip on "branch already exists" at git push.
+            _best_effort_delete_remote_branch(clone_dir, branch, env)
             return PROpenerResult(
                 success=False,
                 branch=branch,
@@ -469,18 +500,20 @@ def open_pr_for_lesson(inputs: OpenPRInputs) -> PROpenerResult:
             )
 
 
+_PR_URL_RE = re.compile(r"https://[^\s]+/pull/\d+")
+
+
 def _parse_pr_url(gh_output: str) -> str:
     """Pick the ``https://github.com/.../pull/N`` URL out of ``gh`` output.
 
     ``gh pr create`` prints the URL as its last non-empty line on the
     happy path, but some versions also print a ``Creating pull
-    request...`` preamble.
+    request...`` preamble or embed the URL in a message like
+    ``Opened: https://...``. Regex-match so an embedded URL is still
+    picked up rather than only bare-URL lines.
     """
-    for line in reversed(gh_output.splitlines()):
-        line = line.strip()
-        if line.startswith("https://") and "/pull/" in line:
-            return line
-    return ""
+    matches = _PR_URL_RE.findall(gh_output)
+    return matches[-1] if matches else ""
 
 
 def _recover_pr_url_by_branch(
@@ -694,6 +727,25 @@ def open_revert_pr_for_lesson(inputs: RevertPRInputs) -> PROpenerResult:
         )
         pr_err = _run(pr_proc, label="gh pr create")
         if pr_err is not None:
+            # Mirror the approve flow: recover URL first in case the
+            # PR already exists; otherwise delete the pushed branch so
+            # retries don't trip on "branch exists".
+            recovered = _recover_pr_url_by_branch(clone_dir, branch, env)
+            if recovered:
+                logger.info(
+                    "learning_pr_opener_revert_recovered_after_create_err",
+                    lesson_id=inputs.lesson_id,
+                    branch=branch,
+                    pr_url=recovered,
+                )
+                success = True
+                return PROpenerResult(
+                    success=True,
+                    pr_url=recovered,
+                    branch=branch,
+                    commit_sha=commit_sha,
+                )
+            _best_effort_delete_remote_branch(clone_dir, branch, env)
             return PROpenerResult(
                 success=False,
                 branch=branch,
