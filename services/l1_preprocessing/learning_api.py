@@ -24,6 +24,7 @@ failing open.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -378,8 +379,6 @@ async def _open_pr_for_lesson(
             "pr_opener_success": False,
             "error": load.error,
         }
-
-    import asyncio
 
     result = await asyncio.to_thread(open_pr_for_lesson, load.inputs)
     if not result.success:
@@ -781,8 +780,6 @@ async def post_revert(
         dry_run=settings.learning_pr_opener_dry_run,
         reviewers=_configured_reviewers(),
     )
-
-    import asyncio
 
     result = await asyncio.to_thread(open_revert_pr_for_lesson, inputs)
     if not result.success:

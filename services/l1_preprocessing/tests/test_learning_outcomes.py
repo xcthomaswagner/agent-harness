@@ -604,6 +604,71 @@ class TestRunOutcomes:
         }
         assert outcome["human_reedit_count"] == 0
 
+    def test_one_lesson_exception_doesnt_abort_tick(
+        self,
+        learning_conn,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Regression: a failure in _process_one_lesson used to propagate
+        up to the outer try/except in run_outcomes, aborting the rest
+        of the tick. A tick with 50 applied lessons would stop at the
+        first hiccup. Now wrapped per-lesson so subsequent lessons
+        still process.
+        """
+        from config import settings
+        from learning_miner.detectors.base import compute_lesson_id
+
+        monkeypatch.setattr(
+            settings, "autonomy_db_path", str(tmp_path / "a.db")
+        )
+
+        # Seed two applied lessons.
+        def _seed(lid_key: str) -> str:
+            lid = compute_lesson_id("det", "p", lid_key)
+            with autonomy_conn() as conn:
+                upsert_lesson_candidate(
+                    conn,
+                    LessonCandidateUpsert(
+                        lesson_id=lid,
+                        detector_name="det",
+                        pattern_key="p",
+                        client_profile="xcsf30",
+                        platform_profile="salesforce",
+                        scope_key=lid_key,
+                        proposed_delta_json="{}",
+                    ),
+                )
+                update_lesson_status(conn, lid, "draft_ready", reason="d")
+                update_lesson_status(conn, lid, "approved", reason="a")
+                update_lesson_status(
+                    conn, lid, "applied", reason="pr opened",
+                    pr_url=f"https://github.com/x/y/pull/{lid_key}",
+                )
+            return lid
+
+        bad_lid = _seed("bad")
+        good_lid = _seed("good")
+
+        call_log: list[str] = []
+
+        # Make the FIRST poll raise; the second should still be reached.
+        def raising_process_one(lesson, stats, *, scratch_provider):
+            lid = str(lesson["lesson_id"])
+            call_log.append(lid)
+            if lid == bad_lid:
+                raise RuntimeError("simulated per-lesson failure")
+
+        monkeypatch.setattr(
+            outcomes_mod, "_process_one_lesson", raising_process_one
+        )
+        stats = run_outcomes()
+        # Both lessons were processed despite bad_lid raising.
+        assert bad_lid in call_log
+        assert good_lid in call_log
+        # The failure was recorded but didn't abort the tick.
+        assert any("simulated per-lesson failure" in e for e in stats.errors)
+
     def test_scratch_clone_lazy_when_no_measurement(
         self,
         learning_conn,

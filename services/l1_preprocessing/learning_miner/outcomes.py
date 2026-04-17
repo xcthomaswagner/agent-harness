@@ -44,6 +44,10 @@ from pathlib import Path
 
 import structlog
 
+# Top-level import avoids the per-``_scoped_metrics``-call cost of
+# re-resolving the private helper and makes the coupling obvious.
+# No circular-import risk — autonomy_metrics doesn't import outcomes.
+from autonomy_metrics import _count_human_issues_and_matches
 from autonomy_store import (
     LessonOutcomeInsert,
     autonomy_conn,
@@ -588,8 +592,6 @@ def _scoped_metrics(
     # display, just scoped to a different pr-id list. A shared
     # non-private helper would be better; deferred to Phase F along
     # with the metric-refactor.
-    from autonomy_metrics import _count_human_issues_and_matches
-
     pr_ids = [int(r["id"]) for r in rows]
     h_count, matched = _count_human_issues_and_matches(conn, pr_ids)
     catch_rate = round(matched / h_count, 3) if h_count else None
