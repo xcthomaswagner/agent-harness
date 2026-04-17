@@ -44,6 +44,18 @@ class TestExtractUnifiedDiff:
     def test_empty_on_no_diff(self) -> None:
         assert _extract_unified_diff("hi there") == ""
 
+    def test_fenced_block_without_trailing_newline(self) -> None:
+        # Regression: a fenced block whose content lacks a newline
+        # before the closing fence previously missed the strict
+        # newline-anchored pattern, and the last-resort fallback
+        # returned the diff with the trailing backticks still
+        # attached — which then tripped git apply --check with a
+        # bogus trailing marker.
+        text = "```diff\n--- a/x\n+++ b/x\n+rule```"
+        out = _extract_unified_diff(text)
+        assert "```" not in out
+        assert out.startswith("--- a/x")
+
 
 class TestExtractAddedLines:
     def test_ignores_header(self) -> None:

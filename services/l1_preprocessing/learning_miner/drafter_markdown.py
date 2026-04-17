@@ -320,10 +320,17 @@ def _extract_unified_diff(text: str) -> str:
 
     Accepts either a raw diff or one fenced in ```diff / ``` blocks.
     Returns an empty string when no diff marker is found.
+
+    The fenced regex tolerates a missing trailing newline — some LLM
+    outputs emit ``\\n```\\n`` while others emit ``\\n```\\n`` with
+    whitespace between content and closing fence. Previously the
+    strict ``\\n```\\n`` pattern missed the second shape and the
+    last-resort path returned the diff WITH the trailing backticks
+    still attached, which later tripped ``git apply --check``.
     """
     text = text.strip()
     fenced = re.search(
-        r"```(?:diff|patch)?\s*\n(.*?)\n```", text, re.DOTALL
+        r"```(?:diff|patch)?\s*\n(.*?)\s*```", text, re.DOTALL
     )
     if fenced:
         return fenced.group(1).strip()

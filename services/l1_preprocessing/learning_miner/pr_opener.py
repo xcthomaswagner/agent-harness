@@ -28,7 +28,7 @@ import structlog
 
 from redaction import redact_token_urls
 
-from ._subprocess import build_env, resolve_auth_token, run_bin
+from ._subprocess import build_env, resolve_auth_token, run_bin, safe_stderr_tail
 from .drafter_markdown import _validate_diff_internal_paths
 
 logger = structlog.get_logger()
@@ -504,13 +504,17 @@ def open_pr_for_lesson(inputs: OpenPRInputs) -> PROpenerResult:
             # exists"; the operator inspects GitHub if a PR slipped
             # through.
             _best_effort_delete_remote_branch(clone_dir, branch, env)
+            # Redact stdout before slicing — gh output is normally token-
+            # free, but a misconfigured HTTPS remote URL could echo
+            # ``https://user:tok@...`` in error context. Defensive.
+            safe_tail = redact_token_urls(pr_proc.stdout)[-200:]
             return PROpenerResult(
                 success=False,
                 branch=branch,
                 commit_sha=commit_sha,
                 error=(
                     "gh pr create succeeded but no URL detected in "
-                    f"output: {pr_proc.stdout[-200:]!r}"
+                    f"output: {safe_tail!r}"
                 ),
             )
         logger.info(
@@ -566,9 +570,16 @@ def _recover_pr_url_by_branch(
     interactive prompt leaking stderr into stdout. One targeted
     ``gh pr list --head --json url`` query recovers the URL without
     creating a duplicate PR on retry.
+
+    ``--state all`` covers open + closed + merged. Without it, a prior
+    attempt that landed a PR and then immediately got the PR merged
+    (or closed) — or an "already exists" error against a pre-existing
+    closed PR — would leave us unable to recover the URL, triggering
+    the branch-delete fallback unnecessarily.
     """
     proc = _gh(
-        ["pr", "list", "--head", branch, "--json", "url", "--limit", "1"],
+        ["pr", "list", "--head", branch, "--state", "all",
+         "--json", "url", "--limit", "1"],
         cwd=clone_dir,
         env=env,
         timeout=30,
@@ -610,7 +621,7 @@ def _best_effort_delete_remote_branch(
         logger.warning(
             "learning_pr_opener_remote_branch_cleanup_failed",
             branch=branch,
-            stderr=redact_token_urls((proc.stderr or "")[-200:]),
+            stderr=safe_stderr_tail(proc.stderr),
         )
 
 
@@ -806,13 +817,14 @@ def open_revert_pr_for_lesson(inputs: RevertPRInputs) -> PROpenerResult:
             pr_url = _recover_pr_url_by_branch(clone_dir, branch, env)
         if not pr_url:
             _best_effort_delete_remote_branch(clone_dir, branch, env)
+            safe_tail = redact_token_urls(pr_proc.stdout)[-200:]
             return PROpenerResult(
                 success=False,
                 branch=branch,
                 commit_sha=commit_sha,
                 error=(
                     "gh pr create succeeded but no URL detected in "
-                    f"output: {pr_proc.stdout[-200:]!r}"
+                    f"output: {safe_tail!r}"
                 ),
             )
         logger.info(

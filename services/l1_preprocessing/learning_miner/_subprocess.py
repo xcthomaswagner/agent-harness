@@ -12,6 +12,21 @@ import os
 import subprocess
 from pathlib import Path
 
+from redaction import redact_token_urls
+
+
+def safe_stderr_tail(stderr: str | None, limit: int = 200) -> str:
+    """Redact token URLs, then tail to ``limit`` chars.
+
+    Redact BEFORE truncate — a token URL clipped at the boundary
+    wouldn't match the redaction regex and would leak the partial
+    token. Centralized here so every logger that surfaces gh/git
+    stderr gets the same treatment without each caller repeating
+    the ordering (easy to forget, per iter-5's earlier fix in _run).
+    """
+    redacted = redact_token_urls(stderr or "")
+    return redacted[-limit:] if len(redacted) > limit else redacted
+
 # Proxy vars MUST be forwarded so git push / gh work behind corporate
 # firewalls. Locking the allowlist to bare PATH/HOME/LANG/LC_ALL/USER
 # silently breaks those deployments — the push hangs until the

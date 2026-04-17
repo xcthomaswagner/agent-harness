@@ -55,9 +55,8 @@ from autonomy_store import (
     set_lesson_merged_commit_sha,
 )
 from config import settings
-from redaction import redact_token_urls
 
-from ._subprocess import build_env, run_bin
+from ._subprocess import build_env, run_bin, safe_stderr_tail
 
 logger = structlog.get_logger()
 
@@ -202,7 +201,7 @@ def _prepare_scratch_root(
     if proc.returncode != 0:
         logger.info(
             "learning_outcomes_clone_failed",
-            stderr=redact_token_urls((proc.stderr or "")[-200:]),
+            stderr=safe_stderr_tail(proc.stderr),
         )
         with contextlib.suppress(OSError):
             shutil.rmtree(scratch.parent)
@@ -299,7 +298,7 @@ def _poll_merge_state(pr_url: str) -> _MergeInfo | None:
         logger.info(
             "learning_outcomes_merge_poll_failed",
             pr_url=pr_url,
-            stderr=redact_token_urls((proc.stderr or "")[-200:]),
+            stderr=safe_stderr_tail(proc.stderr),
         )
         return None
     try:

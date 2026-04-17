@@ -396,6 +396,51 @@ class TestOpenPrFullFlow:
         assert "AGENT_GH_TOKEN" in result.error
 
 
+class TestRecoveryUsesStateAll:
+    """``_recover_pr_url_by_branch`` should find open OR merged OR
+    closed PRs — a prior run may have left a PR in any state.
+    """
+
+    def test_list_command_includes_state_all(
+        self, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_git = __import__(
+            "learning_miner.pr_opener", fromlist=["_git"]
+        )._git
+        seen_args: list[list[str]] = []
+
+        def fake_git(args, **kw):
+            if args[:1] == ["push"]:
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            return real_git(args, **kw)
+
+        def fake_gh(args, **kw):
+            if args[:2] == ["pr", "create"]:
+                return subprocess.CompletedProcess(
+                    args, 0, stdout="(no url here)\n", stderr="",
+                )
+            if args[:2] == ["pr", "list"]:
+                seen_args.append(list(args))
+                return subprocess.CompletedProcess(
+                    args, 0,
+                    stdout='[{"url": "https://github.com/x/y/pull/7"}]\n',
+                    stderr="",
+                )
+            raise AssertionError(f"unexpected gh args: {args}")
+
+        monkeypatch.setattr("learning_miner.pr_opener._git", fake_git)
+        monkeypatch.setattr("learning_miner.pr_opener._gh", fake_gh)
+        monkeypatch.setenv("AGENT_GH_TOKEN", "fake-token")
+
+        result = open_pr_for_lesson(_base_inputs(origin_repo, dry_run=False))
+        assert result.success is True
+        assert result.pr_url == "https://github.com/x/y/pull/7"
+        # Verify --state all was passed so open+closed+merged all match.
+        assert seen_args, "pr list was never called"
+        assert "--state" in seen_args[0]
+        assert "all" in seen_args[0]
+
+
 class TestUrlRecoveryFallback:
     """When ``gh pr create`` exits 0 but doesn't echo a URL, the
     opener must (a) fall back to ``gh pr list --head --json url``,
@@ -1168,3 +1213,38 @@ class TestReviewerFlags:
             "--reviewer", "b",
             "--reviewer", "c",
         ]
+
+
+class TestSafeStderrTail:
+    """Redact-before-truncate helper shared by outcomes + pr_opener."""
+
+    def test_redacts_full_url_even_when_boundary_cuts_it(self) -> None:
+        """Regression: each logger used
+        ``redact_token_urls(stderr[-200:])`` — redact AFTER truncate.
+        A ``https://user:tok@host`` URL straddling the boundary
+        wouldn't match the regex on the clipped slice, and the
+        partial token leaked.
+        """
+        from learning_miner._subprocess import safe_stderr_tail
+
+        # Craft a stderr with a token URL positioned so its prefix
+        # falls OUTSIDE the last 200 chars but trailing `@host` is
+        # inside. Old behavior would leak ``user:tok`` because the
+        # regex (``https://[^/@\s]*@``) can't anchor.
+        prefix = "x" * 180
+        token_url = "https://user:tok_SECRET@github.com/x/y.git"
+        noise = "\nsome trailing error output here."
+        raw = prefix + token_url + noise
+        tail = safe_stderr_tail(raw, limit=200)
+        assert "tok_SECRET" not in tail
+        assert "github.com/x/y.git" in tail
+
+    def test_none_stderr_returns_empty(self) -> None:
+        from learning_miner._subprocess import safe_stderr_tail
+
+        assert safe_stderr_tail(None) == ""
+
+    def test_short_stderr_passes_through(self) -> None:
+        from learning_miner._subprocess import safe_stderr_tail
+
+        assert safe_stderr_tail("ok", limit=200) == "ok"
