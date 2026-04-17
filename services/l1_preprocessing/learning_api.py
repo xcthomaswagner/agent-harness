@@ -68,7 +68,12 @@ def _candidate_to_dict(row: Any) -> dict[str, Any]:
     try:
         out["proposed_delta"] = json.loads(raw) if raw else {}
     except (ValueError, TypeError):
-        out["proposed_delta"] = {"_parse_error": True, "raw": raw}
+        # Cap raw to keep a corrupted row from bloating the API
+        # response. 2KB is enough to see the shape of the garbage
+        # without dumping kilobytes of malformed JSON into every
+        # list-candidates payload.
+        trimmed = raw[:2000] if isinstance(raw, str) else raw
+        out["proposed_delta"] = {"_parse_error": True, "raw": trimmed}
     return out
 
 

@@ -263,9 +263,43 @@ class MarkdownDrafter:
         path_error = _validate_diff_internal_paths(diff)
         if path_error is not None:
             return path_error
+        # Enforce that every edited path actually matches ``target_path``.
+        # Without this, a hallucinated sibling like ``runtime/skills/b/``
+        # (when the lesson names ``runtime/skills/a/``) passes the
+        # allowlist — and if the sibling exists in the repo, the diff
+        # applies cleanly and the PR edits the wrong file. The
+        # `target_abs` parameter is retained for future file-local
+        # checks.
+        del target_abs  # currently only needed for the sibling guard below
+        diff_paths = _extract_all_diff_paths(diff)
+        off_target = [p for p in diff_paths if p and p != target_path]
+        if off_target:
+            return (
+                f"drafter diff edits paths outside target_path "
+                f"{target_path!r}: {off_target!r}"
+            )
         if not _git_apply_check(self._repo_root, diff):
             return "git apply --check failed against the target file"
         return None
+
+
+def _extract_all_diff_paths(diff: str) -> list[str]:
+    """All distinct non-``/dev/null`` paths referenced in the diff.
+
+    Used by the drafter's target-path-match check: collects every
+    path the diff touches so the caller can assert they all equal
+    the expected ``target_path``. Ignores ``/dev/null`` entries.
+    Unlike ``_edited_paths_from_diff`` in pr_opener, this helper
+    returns paths from BOTH ``--- a/`` and ``+++ b/`` headers plus
+    rename/copy variants, because the drafter must not straddle
+    targets via any header flavor.
+    """
+    seen: list[str] = []
+    for raw_line in diff.splitlines():
+        for path in _extract_header_paths(raw_line):
+            if path and path != "/dev/null" and path not in seen:
+                seen.append(path)
+    return seen
 
 
 def _validate_diff_internal_paths(diff: str) -> str | None:
@@ -375,8 +409,15 @@ def _git_apply_check(repo_root: Path, diff: str) -> bool:
         return False
     if "--- " not in stripped and "diff " not in stripped:
         return False
+    # Pin encoding=utf-8 + newline="" so the patch lands byte-for-byte
+    # on disk. Default ``NamedTemporaryFile(mode="w")`` uses the
+    # platform encoding and does universal-newline translation — on
+    # Windows ``\n`` becomes ``\r\n`` and git apply --check rejects
+    # the file as "whitespace errors". Same rationale as the fix in
+    # pr_opener._write_patch_file (iter 9).
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".patch", delete=False
+        mode="w", suffix=".patch", delete=False,
+        encoding="utf-8", newline="",
     ) as tmp:
         tmp.write(diff)
         if not diff.endswith("\n"):

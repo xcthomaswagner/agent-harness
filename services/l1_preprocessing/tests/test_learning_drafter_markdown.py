@@ -214,6 +214,45 @@ class TestValidateDiffInternalPaths:
         assert "services/l1" in err
 
 
+class TestExtractAllDiffPaths:
+    """Helper used by the drafter's target-path-match check."""
+
+    def test_collects_both_minus_and_plus(self) -> None:
+        from learning_miner.drafter_markdown import _extract_all_diff_paths
+
+        diff = (
+            "--- a/runtime/skills/a/SKILL.md\n"
+            "+++ b/runtime/skills/a/SKILL.md\n"
+            "@@ -1 +1,2 @@\n x\n+y\n"
+        )
+        assert _extract_all_diff_paths(diff) == ["runtime/skills/a/SKILL.md"]
+
+    def test_ignores_dev_null(self) -> None:
+        from learning_miner.drafter_markdown import _extract_all_diff_paths
+
+        diff = "--- a/x.md\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
+        assert _extract_all_diff_paths(diff) == ["x.md"]
+
+    def test_surfaces_sibling_when_drafter_hallucinates(self) -> None:
+        """The target-path-match check needs sibling paths visible —
+        this ensures the extractor doesn't collapse to just the first.
+        """
+        from learning_miner.drafter_markdown import _extract_all_diff_paths
+
+        diff = (
+            "--- a/runtime/skills/a/SKILL.md\n"
+            "+++ b/runtime/skills/a/SKILL.md\n"
+            "@@\n+ok\n"
+            "--- a/runtime/skills/b/SKILL.md\n"
+            "+++ b/runtime/skills/b/SKILL.md\n"
+            "@@\n+bogus\n"
+        )
+        assert _extract_all_diff_paths(diff) == [
+            "runtime/skills/a/SKILL.md",
+            "runtime/skills/b/SKILL.md",
+        ]
+
+
 class TestGitApplyCheck:
     def test_clean_apply_passes(self, tmp_path: Path) -> None:
         subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
@@ -415,6 +454,38 @@ class TestDrafterValidation:
         )
         assert result.success is False
         assert "MAX_ADDED_LINES" in result.error
+
+    async def test_rejects_off_target_diff(
+        self,
+        drafter: MarkdownDrafter,
+        mock_client: AsyncMock,
+    ) -> None:
+        """Regression: the drafter validator used to accept any
+        allowlist-compliant path even if it wasn't the lesson's
+        target_path. A hallucinated sibling like
+        ``runtime/skills/b/SKILL.md`` (when lesson targets
+        ``runtime/skills/code-review/SKILL.md``) would apply and
+        modify the wrong file in the PR.
+        """
+        off_target = "\n".join([
+            "--- a/runtime/skills/a-sibling/SKILL.md",
+            "+++ b/runtime/skills/a-sibling/SKILL.md",
+            "@@ -1 +1,2 @@",
+            " hi",
+            "+off-target",
+        ]) + "\n"
+        mock_client.messages.create.return_value = _mock_anthropic_response(
+            off_target
+        )
+        result = await drafter.draft(
+            proposed_delta={
+                "target_path": "runtime/skills/code-review/SKILL.md",
+                "anchor": "## Review Checklist",
+            },
+            evidence_snippets=[],
+        )
+        assert result.success is False
+        assert "outside target_path" in result.error
 
     async def test_rejects_when_git_apply_check_fails(
         self,

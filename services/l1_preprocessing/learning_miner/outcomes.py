@@ -245,6 +245,17 @@ def _process_one_lesson(
                 stats.errors.append(
                     f"merge-state write failed for {lesson_id}: {exc}"
                 )
+        # Log merged_at for observability — it's captured by
+        # _poll_merge_state but not persisted (Tier-1 uses updated_at
+        # as the pivot). Logging at least lets operators correlate
+        # measurement timing with the true merge moment when
+        # investigating outcome verdicts.
+        logger.info(
+            "learning_outcomes_merge_resolved",
+            lesson_id=lesson_id,
+            commit_sha=merge_info.commit_sha,
+            merged_at=merge_info.merged_at,
+        )
         # Poll resolves the sha; measurement waits for the window.
         return
 
