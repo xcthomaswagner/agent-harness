@@ -1742,6 +1742,49 @@ def list_lesson_evidence(
     return list(rows)
 
 
+def list_evidence_for_lessons(
+    conn: sqlite3.Connection,
+    lesson_ids: list[str],
+    *,
+    limit_per_lesson: int = LESSON_EVIDENCE_CAP,
+) -> dict[str, list[sqlite3.Row]]:
+    """Batch ``list_lesson_evidence`` — one SELECT + in-memory bucket.
+
+    The triage dashboard renders up to ``limit`` candidates per page
+    (500 max), so the per-row ``list_lesson_evidence`` loop was up to
+    500 SQL round-trips. This replaces that with a single
+    ``WHERE lesson_id IN (...)`` query; callers dict-lookup per row.
+    Lesson ids with no evidence are simply absent from the result.
+
+    ``limit_per_lesson`` caps the rows returned per lesson at the
+    same evidence cap the single-lesson call uses, so the dashboard's
+    rendered output is identical.
+    """
+    if not lesson_ids:
+        return {}
+    # Chunk to stay under SQLITE_MAX_VARIABLE_NUMBER (default 999).
+    chunk_size = 900
+    buckets: dict[str, list[sqlite3.Row]] = {lid: [] for lid in lesson_ids}
+    for i in range(0, len(lesson_ids), chunk_size):
+        chunk = lesson_ids[i : i + chunk_size]
+        placeholders = ",".join("?" for _ in chunk)
+        sql = (
+            "SELECT * FROM lesson_evidence "
+            f"WHERE lesson_id IN ({placeholders}) "
+            "ORDER BY id DESC"
+        )
+        for row in conn.execute(sql, tuple(chunk)).fetchall():
+            lid = str(row["lesson_id"])
+            bucket = buckets.get(lid)
+            if bucket is None or len(bucket) >= limit_per_lesson:
+                continue
+            bucket.append(row)
+    # Drop empty buckets so callers' `.get(id)` reflects "no evidence"
+    # as None rather than []; matches the single-lesson call's
+    # downstream `if evidence:` idioms.
+    return {lid: rows for lid, rows in buckets.items() if rows}
+
+
 def get_lesson_by_id(
     conn: sqlite3.Connection, lesson_id: str
 ) -> sqlite3.Row | None:

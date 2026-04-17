@@ -344,13 +344,18 @@ async def _open_pr_for_lesson(
 
     with autonomy_conn() as conn:
         try:
+            # merged_commit_sha is intentionally NOT set here.
+            # ``result.commit_sha`` is the lesson-branch HEAD before
+            # push — not the sha that lands on main after merge.
+            # outcomes.py's ``_poll_merge_state`` populates the real
+            # merge commit from ``gh pr view --json mergeCommit``
+            # once the PR merges.
             update_lesson_status(
                 conn,
                 lesson_id,
                 "applied",
                 reason="pr opened",
                 pr_url=result.pr_url,
-                merged_commit_sha=result.commit_sha,
             )
         except ValueError as exc:
             return {

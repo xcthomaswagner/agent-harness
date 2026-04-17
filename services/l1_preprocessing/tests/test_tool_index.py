@@ -287,6 +287,19 @@ class TestExtractBashVerb:
     def test_strips_timeout_with_duration(self) -> None:
         assert extract_bash_verb("timeout 30 sf deploy") == "sf"
 
+    def test_strips_timeout_with_unit_suffix(self) -> None:
+        # `timeout` accepts 30s / 5m / 2h / 1d — bare integer is only one
+        # of several legal duration forms.
+        assert extract_bash_verb("timeout 30s sf deploy") == "sf"
+        assert extract_bash_verb("timeout 5m gh pr view") == "gh"
+        assert extract_bash_verb("timeout 2h pytest") == "pytest"
+        assert extract_bash_verb("timeout 1.5s sf org list") == "sf"
+
+    def test_timeout_without_duration_treats_next_as_cmd(self) -> None:
+        # If `timeout` is followed by a non-duration token (unlikely
+        # in practice), don't eat it — prefer under-stripping to over.
+        assert extract_bash_verb("timeout foo bar") == "foo"
+
     def test_strips_time(self) -> None:
         assert extract_bash_verb("time pytest tests/") == "pytest"
 

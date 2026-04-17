@@ -23,9 +23,9 @@ from fastapi.responses import HTMLResponse
 
 from autonomy_store import (
     autonomy_conn,
+    list_evidence_for_lessons,
     list_latest_outcomes,
     list_lesson_candidates,
-    list_lesson_evidence,
 )
 from dashboard_common import LANGFUSE_BASE_CSS
 from dashboard_common import badge as _badge
@@ -431,10 +431,12 @@ async def get_learning_dashboard(
         )
         lesson_ids = [str(c["lesson_id"]) for c in candidates]
         outcomes_by_id = list_latest_outcomes(conn, lesson_ids)
+        evidence_by_id = list_evidence_for_lessons(conn, lesson_ids)
         enriched: list[tuple[Any, list[Any], Any]] = []
         for c in candidates:
-            evidence = list_lesson_evidence(conn, c["lesson_id"])
-            outcome = outcomes_by_id.get(str(c["lesson_id"]))
+            lid = str(c["lesson_id"])
+            evidence = evidence_by_id.get(lid, [])
+            outcome = outcomes_by_id.get(lid)
             enriched.append((c, evidence, outcome))
     selector_html = _render_selector(profiles, client_profile, status)
     table_html = _render_candidate_table(enriched)

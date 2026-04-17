@@ -15,6 +15,7 @@ the dashboard.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -410,6 +411,17 @@ def open_pr_for_lesson(inputs: OpenPRInputs) -> PROpenerResult:
             )
         pr_url = _parse_pr_url(pr_proc.stdout)
         if not pr_url:
+            # ``gh`` version drift / interactive-prompt stderr-into-stdout
+            # can swallow the URL even on exit=0. Ask ``gh`` for it by
+            # branch head before giving up — recovers the URL AND
+            # prevents a duplicate PR on retry.
+            pr_url = _recover_pr_url_by_branch(clone_dir, branch, env)
+        if not pr_url:
+            # Still no URL — the PR may or may not exist. Delete the
+            # remote branch so /approve retry doesn't trip on "branch
+            # exists"; the operator inspects GitHub if a PR slipped
+            # through.
+            _best_effort_delete_remote_branch(clone_dir, branch, env)
             return PROpenerResult(
                 success=False,
                 branch=branch,
@@ -458,6 +470,64 @@ def _parse_pr_url(gh_output: str) -> str:
         if line.startswith("https://") and "/pull/" in line:
             return line
     return ""
+
+
+def _recover_pr_url_by_branch(
+    clone_dir: Path, branch: str, env: dict[str, str]
+) -> str:
+    """Ask ``gh`` for the URL of the PR whose head matches ``branch``.
+
+    Runs on the URL-parse fallback path — ``gh pr create`` exit=0 but
+    no URL in stdout can happen with ``gh`` version drift or an
+    interactive prompt leaking stderr into stdout. One targeted
+    ``gh pr list --head --json url`` query recovers the URL without
+    creating a duplicate PR on retry.
+    """
+    proc = _gh(
+        ["pr", "list", "--head", branch, "--json", "url", "--limit", "1"],
+        cwd=clone_dir,
+        env=env,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        return ""
+    try:
+        payload = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, list) or not payload:
+        return ""
+    entry = payload[0]
+    if not isinstance(entry, dict):
+        return ""
+    url = str(entry.get("url") or "")
+    return url if url.startswith("https://") else ""
+
+
+def _best_effort_delete_remote_branch(
+    clone_dir: Path, branch: str, env: dict[str, str]
+) -> None:
+    """``git push origin --delete <branch>`` — swallow errors.
+
+    Called on the push-succeeded-but-PR-create-failed path to keep
+    retries idempotent (otherwise /approve retry fails at
+    ``git push --set-upstream`` because the branch already exists).
+    Failures are logged and ignored — we only ran push if auth was
+    valid a moment ago; anything worse than this function doing
+    nothing is the operator's cleanup problem.
+    """
+    proc = _git(
+        ["push", "origin", "--delete", branch],
+        cwd=clone_dir,
+        env=env,
+        timeout=60,
+    )
+    if proc.returncode != 0:
+        logger.warning(
+            "learning_pr_opener_remote_branch_cleanup_failed",
+            branch=branch,
+            stderr=redact_token_urls((proc.stderr or "")[-200:]),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -621,6 +691,9 @@ def open_revert_pr_for_lesson(inputs: RevertPRInputs) -> PROpenerResult:
             )
         pr_url = _parse_pr_url(pr_proc.stdout)
         if not pr_url:
+            pr_url = _recover_pr_url_by_branch(clone_dir, branch, env)
+        if not pr_url:
+            _best_effort_delete_remote_branch(clone_dir, branch, env)
             return PROpenerResult(
                 success=False,
                 branch=branch,

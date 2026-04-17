@@ -27,6 +27,11 @@ _BASH_WRAPPER_VERBS: set[str] = {
 
 _BASH_SPLIT_RE = re.compile(r"&&|\|\||;")
 
+# ``timeout`` accepts ``30``, ``5s``, ``5m``, ``2h``, ``1d`` — a bare
+# integer/float, optionally suffixed with a unit letter. Anything
+# outside that shape is a real command token we shouldn't eat.
+_TIMEOUT_DURATION_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
+
 
 def extract_bash_verb(command: str) -> str:
     """Return the first meaningful verb from a Bash command string, or ''.
@@ -81,7 +86,7 @@ def _first_verb_after_preamble(command: str) -> str:
             tokens = tokens[1:]
             while tokens:
                 nxt = tokens[0]
-                if base == "timeout" and nxt.replace(".", "").isdigit():
+                if base == "timeout" and _TIMEOUT_DURATION_RE.fullmatch(nxt):
                     tokens = tokens[1:]
                     continue
                 if nxt.startswith("-"):

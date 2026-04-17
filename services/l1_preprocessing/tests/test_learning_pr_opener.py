@@ -259,6 +259,96 @@ class TestOpenPrFullFlow:
         assert "AGENT_GH_TOKEN" in result.error
 
 
+class TestUrlRecoveryFallback:
+    """When ``gh pr create`` exits 0 but doesn't echo a URL, the
+    opener must (a) fall back to ``gh pr list --head --json url``,
+    (b) if still nothing, best-effort delete the pushed branch so
+    retries don't trip on ``branch exists``.
+    """
+
+    def test_recovers_url_via_pr_list(
+        self, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Make git push a no-op so we don't need a real remote.
+        real_git = __import__(
+            "learning_miner.pr_opener", fromlist=["_git"]
+        )._git
+
+        def fake_git(args, **kw):
+            if args[:1] == ["push"]:
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            return real_git(args, **kw)
+
+        call_count = {"create": 0, "list": 0}
+
+        def fake_gh(args, **kw):
+            if args[:2] == ["pr", "create"]:
+                call_count["create"] += 1
+                # Exit 0 but NO URL in stdout — the failure mode.
+                return subprocess.CompletedProcess(
+                    args, 0, stdout="(no url here)\n", stderr="",
+                )
+            if args[:2] == ["pr", "list"]:
+                call_count["list"] += 1
+                return subprocess.CompletedProcess(
+                    args, 0,
+                    stdout='[{"url": "https://github.com/x/y/pull/77"}]\n',
+                    stderr="",
+                )
+            raise AssertionError(f"unexpected gh args: {args}")
+
+        monkeypatch.setattr("learning_miner.pr_opener._git", fake_git)
+        monkeypatch.setattr("learning_miner.pr_opener._gh", fake_gh)
+        monkeypatch.setenv("AGENT_GH_TOKEN", "fake-token")
+
+        inputs = _base_inputs(origin_repo, dry_run=False)
+        result = open_pr_for_lesson(inputs)
+        assert result.success is True
+        assert result.pr_url == "https://github.com/x/y/pull/77"
+        assert call_count["create"] == 1
+        assert call_count["list"] == 1
+
+    def test_deletes_remote_branch_when_recovery_fails(
+        self, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_git = __import__(
+            "learning_miner.pr_opener", fromlist=["_git"]
+        )._git
+        delete_calls: list[list[str]] = []
+
+        def fake_git(args, **kw):
+            if args[:1] == ["push"] and "--delete" in args:
+                delete_calls.append(list(args))
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            if args[:1] == ["push"]:
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            return real_git(args, **kw)
+
+        def fake_gh(args, **kw):
+            if args[:2] == ["pr", "create"]:
+                return subprocess.CompletedProcess(
+                    args, 0, stdout="(no url here)\n", stderr="",
+                )
+            if args[:2] == ["pr", "list"]:
+                return subprocess.CompletedProcess(
+                    args, 0, stdout="[]\n", stderr="",
+                )
+            raise AssertionError(f"unexpected gh args: {args}")
+
+        monkeypatch.setattr("learning_miner.pr_opener._git", fake_git)
+        monkeypatch.setattr("learning_miner.pr_opener._gh", fake_gh)
+        monkeypatch.setenv("AGENT_GH_TOKEN", "fake-token")
+
+        inputs = _base_inputs(origin_repo, dry_run=False)
+        result = open_pr_for_lesson(inputs)
+        assert result.success is False
+        assert "no URL detected" in result.error
+        # Delete-branch call fired exactly once.
+        assert len(delete_calls) == 1
+        assert "--delete" in delete_calls[0]
+        assert result.branch in delete_calls[0]
+
+
 class TestOpenPrFailurePaths:
     def test_unapplicable_diff_fails_at_apply(
         self, origin_repo: Path

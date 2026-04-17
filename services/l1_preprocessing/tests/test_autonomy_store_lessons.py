@@ -297,6 +297,53 @@ class TestInsertLessonEvidence:
         assert trace_ids == {"T-3", "T-4"}
 
 
+class TestListEvidenceForLessons:
+    def _seed(self, conn, lid: str, n: int) -> None:
+        for i in range(n):
+            insert_lesson_evidence(
+                conn,
+                lesson_id=lid,
+                trace_id=f"T-{lid}-{i}",
+                source_ref=f"ref-{i}",
+                observed_at=f"2026-04-{i+1:02d}",
+                snippet="",
+            )
+
+    def _seed_candidate(self, conn, scope_key: str) -> str:
+        upsert_lesson_candidate(conn, _base_candidate(scope_key=scope_key))
+        return compute_lesson_id(
+            "human_issue_cluster", "security|*.cls", scope_key
+        )
+
+    def test_empty_lesson_ids_returns_empty_dict(self, conn) -> None:
+        from autonomy_store import list_evidence_for_lessons
+        assert list_evidence_for_lessons(conn, []) == {}
+
+    def test_buckets_evidence_by_lesson_id(self, conn) -> None:
+        from autonomy_store import list_evidence_for_lessons
+        l1 = self._seed_candidate(conn, "A")
+        l2 = self._seed_candidate(conn, "B")
+        self._seed(conn, l1, 2)
+        self._seed(conn, l2, 3)
+        out = list_evidence_for_lessons(conn, [l1, l2])
+        assert len(out[l1]) == 2
+        assert len(out[l2]) == 3
+
+    def test_missing_lesson_absent_from_result(self, conn) -> None:
+        from autonomy_store import list_evidence_for_lessons
+        lid = self._seed_candidate(conn, "X")
+        out = list_evidence_for_lessons(conn, [lid, "LSN-absent"])
+        assert "LSN-absent" not in out
+        assert lid not in out  # no evidence seeded → also absent
+
+    def test_per_lesson_cap_respected(self, conn) -> None:
+        from autonomy_store import list_evidence_for_lessons
+        lid = self._seed_candidate(conn, "Y")
+        self._seed(conn, lid, 5)
+        out = list_evidence_for_lessons(conn, [lid], limit_per_lesson=2)
+        assert len(out[lid]) == 2
+
+
 class TestListLessonCandidates:
     def test_filters_combine(self, conn) -> None:
         upsert_lesson_candidate(
