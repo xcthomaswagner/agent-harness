@@ -275,20 +275,24 @@ class MarkdownDrafter:
         path_error = _validate_diff_internal_paths(diff)
         if path_error is not None:
             return path_error
-        # Enforce that every edited path actually matches ``target_path``.
-        # Without this, a hallucinated sibling like ``runtime/skills/b/``
-        # (when the lesson names ``runtime/skills/a/``) passes the
-        # allowlist — and if the sibling exists in the repo, the diff
-        # applies cleanly and the PR edits the wrong file. The
-        # `target_abs` parameter is retained for future file-local
-        # checks.
-        del target_abs  # currently only needed for the sibling guard below
+        # Require ``target_path`` to appear in the diff. Without this,
+        # a hallucinated sibling like ``runtime/skills/b/`` (when the
+        # lesson names ``runtime/skills/a/``) passes the allowlist —
+        # and if the sibling exists in the repo, the diff applies
+        # cleanly and the PR edits the wrong file.
+        #
+        # Previously we rejected ANY path other than target_path, but
+        # that broke legitimate rename diffs (``old.md → new.md``)
+        # where the pre-image path necessarily differs from the
+        # post-image. Now we only require target_path to be present;
+        # the allowlist check above already bounds the other paths
+        # to safe prefixes.
+        del target_abs  # retained for future file-local checks
         diff_paths = _extract_all_diff_paths(diff)
-        off_target = [p for p in diff_paths if p and p != target_path]
-        if off_target:
+        if diff_paths and target_path not in diff_paths:
             return (
-                f"drafter diff edits paths outside target_path "
-                f"{target_path!r}: {off_target!r}"
+                f"drafter diff does not touch target_path "
+                f"{target_path!r}; edits {diff_paths!r}"
             )
         if not _git_apply_check(self._repo_root, diff):
             return "git apply --check failed against the target file"

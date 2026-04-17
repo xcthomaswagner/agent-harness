@@ -502,7 +502,7 @@ class TestDrafterValidation:
             evidence_snippets=[],
         )
         assert result.success is False
-        assert "outside target_path" in result.error
+        assert "does not touch target_path" in result.error
 
     async def test_rejects_when_git_apply_check_fails(
         self,

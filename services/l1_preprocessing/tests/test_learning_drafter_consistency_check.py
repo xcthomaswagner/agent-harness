@@ -74,6 +74,16 @@ class TestParseVerdictJson:
         assert obj["contradicts"] is True
         assert "{nested}" in obj["reasoning"]
 
+    def test_fenced_block_without_trailing_newline(self) -> None:
+        # Regression: the fenced regex used to require ``\n```\n`` at
+        # the close. Outputs like ``{...}```\n`` (no content newline
+        # before the closing fence) missed the match and fell through
+        # to the text path — usually fine, but if the LLM wrapped the
+        # JSON in a non-standard way, the parser could return None and
+        # the checker would fail open needlessly.
+        obj = _parse_verdict_json('```json\n{"contradicts": false}```')
+        assert obj == {"contradicts": False}
+
 
 class TestCheckerDisabled:
     async def test_disabled_returns_noop_verdict(

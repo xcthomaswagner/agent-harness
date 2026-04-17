@@ -167,9 +167,16 @@ def _parse_verdict_json(text: str) -> dict[str, Any] | None:
     first ``{`` to last ``}`` straddled both and failed to parse. We
     now scan for the first balanced object instead, tolerating brace
     characters inside strings.
+
+    The fenced regex uses ``\\s*`` (not strict ``\\n``) before the
+    close fence so outputs like ``{...}```\n`` (no content newline
+    before the closing backticks) still match. Mirrors the same fix
+    iter-11 made in drafter_markdown._extract_unified_diff — the
+    strict pattern silently missed valid but slightly unusual LLM
+    output shapes.
     """
     text = text.strip()
-    fenced = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
+    fenced = re.search(r"```(?:json)?\s*\n(.*?)\s*```", text, re.DOTALL)
     candidate = fenced.group(1).strip() if fenced else text
     obj_str = _extract_first_balanced_object(candidate)
     if obj_str is None:
