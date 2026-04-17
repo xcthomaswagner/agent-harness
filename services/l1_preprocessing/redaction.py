@@ -44,7 +44,21 @@ import math
 import re
 from typing import NamedTuple
 
-__all__ = ["redact"]
+__all__ = ["redact", "redact_token_urls"]
+
+
+_TOKEN_URL_RE = re.compile(r"https://[^/@\s]*@")
+
+
+def redact_token_urls(text: str) -> str:
+    """Strip the ``user:token@`` part of any ``https://user:token@host...`` URL.
+
+    ``git push`` and similar tools can echo remote URLs on failure. When the
+    remote is HTTPS-with-token the URL contains the agent PAT; scrubbing it
+    before the text lands in logs or SQLite ``status_reason`` rows keeps the
+    token off disk.
+    """
+    return _TOKEN_URL_RE.sub("https://", text)
 
 
 # ---------------------------------------------------------------------------

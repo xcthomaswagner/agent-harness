@@ -71,6 +71,15 @@ class Settings(BaseSettings):
     # Self-learning miner + drafter
     learning_miner_enabled: bool = False
     learning_consistency_check_enabled: bool = True
+    # PR opener: OFF by default. When enabled, dry-run stops at the
+    # local commit (no push, no gh pr create) so operators can exercise
+    # the full flow before allowing real PRs.
+    learning_pr_opener_enabled: bool = False
+    learning_pr_opener_dry_run: bool = True
+    learning_harness_repo_url: str = (
+        "https://github.com/xcthomaswagner/agent-harness.git"
+    )
+    learning_harness_base_branch: str = "main"
 
     # Service
     log_level: str = "INFO"

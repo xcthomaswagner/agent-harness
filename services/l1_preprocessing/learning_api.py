@@ -25,6 +25,7 @@ failing open.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -44,6 +45,7 @@ from autonomy_store import (
 from config import settings
 from learning_miner.drafter_consistency_check import ConsistencyChecker
 from learning_miner.drafter_markdown import MarkdownDrafter
+from learning_miner.pr_opener import OpenPRInputs, open_pr_for_lesson
 
 logger = structlog.get_logger()
 
@@ -263,22 +265,176 @@ def _record_drafter_failure(lesson_id: str, error: str) -> None:
         set_lesson_status_reason(conn, lesson_id, error)
 
 
+async def _open_pr_for_lesson(
+    lesson_id: str, approved_record: dict[str, Any]
+) -> dict[str, Any]:
+    """Run the PR opener for a freshly-approved lesson.
+
+    On success transitions the lesson to ``applied`` with ``pr_url``
+    recorded. On failure leaves the lesson at ``approved`` and writes
+    the error to ``status_reason`` so the dashboard surfaces it —
+    operators can then decide to retry (re-call /approve via API) or
+    reject.
+
+    The dry-run path does the local clone + commit but never pushes
+    or calls ``gh pr create``. It still transitions to ``applied`` so
+    the flow is observable end-to-end — the dashboard distinguishes
+    real PRs from dry-runs via an empty ``pr_url`` + a
+    ``pr_opener_dry_run=true`` marker in ``status_reason``.
+    """
+    load = _load_pr_opener_inputs(lesson_id, approved_record)
+    if load.inputs is None:
+        _record_drafter_failure(lesson_id, load.error)
+        return {
+            "pr_opener_enabled": True,
+            "pr_opener_success": False,
+            "error": load.error,
+        }
+
+    import asyncio
+
+    result = await asyncio.to_thread(open_pr_for_lesson, load.inputs)
+    if not result.success:
+        _record_drafter_failure(
+            lesson_id, f"pr_opener: {result.error}"
+        )
+        return {
+            "pr_opener_enabled": True,
+            "pr_opener_success": False,
+            "error": result.error,
+        }
+
+    if result.dry_run:
+        # Dry-run exercises the full local flow but never pushes.
+        # Keep the lesson at ``approved`` so the operator can flip
+        # the real-PR flag and retry — ``applied`` would be a
+        # misleading terminal state for a no-network run.
+        _record_drafter_failure(
+            lesson_id,
+            f"pr_opener dry-run ok (branch={result.branch}, "
+            f"commit={result.commit_sha[:8]})",
+        )
+        return {
+            "pr_opener_enabled": True,
+            "pr_opener_success": True,
+            "pr_opener_dry_run": True,
+            "branch": result.branch,
+            "commit_sha": result.commit_sha,
+        }
+
+    with autonomy_conn() as conn:
+        try:
+            update_lesson_status(
+                conn,
+                lesson_id,
+                "applied",
+                reason="pr opened",
+                pr_url=result.pr_url,
+                merged_commit_sha=result.commit_sha,
+            )
+        except ValueError as exc:
+            return {
+                "pr_opener_enabled": True,
+                "pr_opener_success": False,
+                "error": str(exc),
+            }
+    return {
+        "pr_opener_enabled": True,
+        "pr_opener_success": True,
+        "pr_opener_dry_run": False,
+        "pr_url": result.pr_url,
+        "branch": result.branch,
+        "commit_sha": result.commit_sha,
+    }
+
+
+@dataclass(frozen=True)
+class _PROpenerInputLoad:
+    """Result of ``_load_pr_opener_inputs``.
+
+    Exactly one of ``inputs`` / ``error`` is populated. Using a
+    dataclass instead of a union-return keeps the caller's
+    dispatch type-safe and avoids the ``isinstance(x, str)`` smell.
+    """
+
+    inputs: OpenPRInputs | None = None
+    error: str = ""
+
+
+def _load_pr_opener_inputs(
+    lesson_id: str, approved_record: dict[str, Any]
+) -> _PROpenerInputLoad:
+    """Pull the fields the PR opener needs off the stored candidate."""
+    delta = approved_record.get("proposed_delta") or {}
+    unified_diff = str(delta.get("unified_diff") or "")
+    if not unified_diff.strip():
+        return _PROpenerInputLoad(
+            error="pr_opener: proposed_delta.unified_diff missing — run /draft first"
+        )
+    rationale = str(delta.get("rationale_md") or "")
+
+    trace_ids: list[str] = []
+    with autonomy_conn() as conn:
+        for row in list_lesson_evidence(conn, lesson_id):
+            tid = row["trace_id"] or ""
+            if tid and tid not in trace_ids:
+                trace_ids.append(tid)
+
+    return _PROpenerInputLoad(
+        inputs=OpenPRInputs(
+            lesson_id=lesson_id,
+            unified_diff=unified_diff,
+            scope_key=str(approved_record.get("scope_key") or ""),
+            detector_name=str(approved_record.get("detector_name") or ""),
+            rationale_md=rationale,
+            evidence_trace_ids=trace_ids,
+            harness_repo_url=settings.learning_harness_repo_url,
+            base_branch=settings.learning_harness_base_branch,
+            dry_run=settings.learning_pr_opener_dry_run,
+        )
+    )
+
+
 @router.post("/api/learning/candidates/{lesson_id}/approve")
 async def post_approve(
     lesson_id: str,
     request: Request,
     x_autonomy_admin_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Approve a ``draft_ready`` lesson.
+    """Approve a ``draft_ready`` lesson and open its PR.
 
-    ``proposed`` candidates must run through ``/draft`` first so a
-    Claude-drafted diff is written before approval. The transition
-    table in ``autonomy_store`` enforces this; the /approve handler
-    just surfaces the resulting 409.
+    ``proposed`` candidates must run through ``/draft`` first. When
+    the PR opener is enabled, a successful approve walks
+    ``draft_ready -> approved -> applied`` (the last step is the
+    PR-opened marker). When the PR opener is disabled, the lesson
+    stays at ``approved`` and the operator can open the PR manually.
+
+    Re-entrable: if a previous call transitioned the lesson to
+    ``approved`` but the PR opener failed, calling /approve again
+    skips the transition and retries the PR opener. This is the
+    sanctioned recovery path — no separate /retry-pr endpoint needed.
     """
     body = await _guard_admin_request(request, x_autonomy_admin_token)
     payload = _parse_body(body, ApproveIn)
-    return _transition(lesson_id, "approved", reason=payload.reason)
+
+    with autonomy_conn() as conn:
+        existing = get_lesson_by_id(conn, lesson_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="lesson not found")
+
+    if str(existing["status"]) == "approved":
+        # Already approved (prior attempt failed at PR opener stage).
+        # Surface the existing record and re-run the opener.
+        approved = _candidate_to_dict(existing)
+    else:
+        approved = _transition(lesson_id, "approved", reason=payload.reason)
+
+    if not settings.learning_pr_opener_enabled:
+        approved["pr_opener_enabled"] = False
+        return approved
+    pr_outcome = await _open_pr_for_lesson(lesson_id, approved)
+    approved.update(pr_outcome)
+    return approved
 
 
 @router.post("/api/learning/candidates/{lesson_id}/draft")

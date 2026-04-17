@@ -30,6 +30,7 @@ from dashboard_common import LANGFUSE_BASE_CSS
 from dashboard_common import badge as _badge
 from dashboard_common import escape_html as _e
 from dashboard_common import fmt_ts as _fmt_ts
+from dashboard_common import safe_url as _safe_url
 
 router = APIRouter()
 
@@ -278,11 +279,20 @@ def _render_candidate_row(
 ) -> str:
     status = candidate["status"] or ""
     severity = candidate["severity"] or "info"
+    pr_url = candidate["pr_url"] or ""
     scope_cell = (
         f"<code>{_e(candidate['scope_key'])}</code><br>"
         f'<span class="meta">detector: {_e(candidate["detector_name"])} '
         f'· pattern: {_e(candidate["pattern_key"])}</span>'
     )
+    if pr_url:
+        # Only render real https URLs as links; anything else (empty,
+        # file://) gets safe_url'd to '#' so a poisoned row can't
+        # inject a javascript: scheme.
+        scope_cell += (
+            f"<br><a href=\"{_safe_url(pr_url)}\" target=\"_blank\" "
+            f"rel=\"noreferrer noopener\">PR →</a>"
+        )
     first_seen = _fmt_ts(candidate["detected_at"])
     last_seen = _fmt_ts(candidate["last_seen_at"])
     time_cell = f"{_e(last_seen)}<br><span class='meta'>first {_e(first_seen)}</span>"

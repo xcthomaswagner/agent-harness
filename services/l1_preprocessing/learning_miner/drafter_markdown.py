@@ -245,9 +245,59 @@ class MarkdownDrafter:
                     "drafter emitted an absolute directive "
                     f"(always/never/must): {line!r}"
                 )
+        path_error = _validate_diff_internal_paths(diff)
+        if path_error is not None:
+            return path_error
         if not _git_apply_check(self._repo_root, diff):
             return "git apply --check failed against the target file"
         return None
+
+
+def _validate_diff_internal_paths(diff: str) -> str | None:
+    """Ensure every path reference in the diff targets an allowlisted file.
+
+    Inspects four families of header lines that ``git apply`` honors:
+    ``--- a/<path>``, ``+++ b/<path>``, ``rename from/to <path>``,
+    ``copy from/to <path>``, and the ``diff --git a/<p1> b/<p2>``
+    preamble. A rename or copy header could otherwise slip
+    ``services/`` or ``.github/`` past the simple ``--- / +++`` check.
+    """
+    for raw_line in diff.splitlines():
+        for path in _extract_header_paths(raw_line):
+            if path == "/dev/null" or not path:
+                continue
+            if ".." in path.split("/"):
+                return f"drafter diff contains path traversal: {path!r}"
+            if not any(
+                path.startswith(prefix) for prefix in _ALLOWED_TARGET_PREFIXES
+            ):
+                return (
+                    f"drafter diff targets disallowed path {path!r} "
+                    f"(allowed prefixes: {_ALLOWED_TARGET_PREFIXES})"
+                )
+    return None
+
+
+def _extract_header_paths(line: str) -> list[str]:
+    """Pull git-diff path references out of a single diff line.
+
+    Handles ``--- a/``, ``+++ b/``, ``rename from/to``, ``copy from/to``,
+    and ``diff --git a/P1 b/P2``. Returns an empty list for non-header
+    lines. Each returned path has any ``a/``/``b/`` prefix stripped.
+    """
+    if line.startswith(("--- ", "+++ ")):
+        rest = line[4:].strip()
+        return [rest[2:] if rest.startswith(("a/", "b/")) else rest]
+    for header in ("rename from ", "rename to ", "copy from ", "copy to "):
+        if line.startswith(header):
+            return [line[len(header) :].strip()]
+    if line.startswith("diff --git "):
+        tokens = line[len("diff --git ") :].strip().split()
+        paths: list[str] = []
+        for tok in tokens:
+            paths.append(tok[2:] if tok.startswith(("a/", "b/")) else tok)
+        return paths
+    return []
 
 
 def _extract_unified_diff(text: str) -> str:

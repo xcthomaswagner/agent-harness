@@ -133,9 +133,14 @@ class TestApprove:
         assert body["status"] == "approved"
         assert body["status_reason"] == "reviewed"
 
-    def test_second_approve_409(
+    def test_second_approve_is_idempotent_when_pr_opener_off(
         self, client: TestClient, admin_headers: dict[str, str]
     ) -> None:
+        # With the PR opener disabled, re-calling /approve on an
+        # already-approved lesson is a no-op (the operator is
+        # effectively retrying but there's no PR to open). This
+        # matches the "re-entrable from approved" contract that
+        # enables the retry-after-PR-opener-failure recovery path.
         from autonomy_store import autonomy_conn, update_lesson_status
 
         lid = _seed_candidate()
@@ -153,7 +158,8 @@ class TestApprove:
             json={"reason": "second"},
             headers=admin_headers,
         )
-        assert r2.status_code == 409
+        assert r2.status_code == 200
+        assert r2.json()["status"] == "approved"
 
     def test_404_on_unknown(
         self, client: TestClient, admin_headers: dict[str, str]

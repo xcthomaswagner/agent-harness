@@ -212,6 +212,57 @@ def mock_anthropic_client():
     return client
 
 
+def seed_draft_ready_candidate(
+    *,
+    unified_diff: str = "--- a/x\n+++ b/x\n@@\n+rule",
+    target_path: str = "runtime/skills/code-review/SKILL.md",
+    rationale: str = "r",
+) -> str:
+    """Seed a candidate and walk it to ``status='draft_ready'``.
+
+    Shared by PR-opener tests that need a lesson poised for
+    /approve. Callers may override the unified_diff when they want
+    a specific scope or the drafter-emission to fail a path check.
+    """
+    import json
+
+    from autonomy_store import autonomy_conn, update_lesson_status
+
+    lid = seed_lesson_candidate(
+        proposed_delta_json=json.dumps(
+            {
+                "target_path": target_path,
+                "unified_diff": unified_diff,
+                "rationale_md": rationale,
+            }
+        ),
+    )
+    with autonomy_conn() as conn:
+        update_lesson_status(conn, lid, "draft_ready", reason="drafter ok")
+    return lid
+
+
+@pytest.fixture
+def learning_api_client(configure_admin_auth: str):
+    """Pre-wired TestClient for learning_api.py.
+
+    Builds a minimal FastAPI app with just the learning router mounted
+    plus the admin auth settings. Three PR-opener test classes
+    previously reconstructed this inline.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from learning_api import router as learning_api_router
+
+    app = FastAPI()
+    app.include_router(learning_api_router)
+    client = TestClient(app)
+    token = configure_admin_auth
+    client.headers.update({"X-Autonomy-Admin-Token": token})
+    return client
+
+
 @pytest.fixture
 def configure_admin_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

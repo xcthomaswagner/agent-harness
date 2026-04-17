@@ -15,6 +15,7 @@ from learning_miner.drafter_markdown import (
     _extract_added_lines,
     _extract_unified_diff,
     _git_apply_check,
+    _validate_diff_internal_paths,
 )
 from tests.conftest import make_anthropic_response as _mock_anthropic_response
 
@@ -54,6 +55,94 @@ class TestExtractAddedLines:
 
 
 # ---- git apply check -------------------------------------------------
+
+
+class TestValidateDiffInternalPaths:
+    def test_allowed_paths_pass(self) -> None:
+        diff = (
+            "--- a/runtime/skills/code-review/SKILL.md\n"
+            "+++ b/runtime/skills/code-review/SKILL.md\n"
+            "@@ -1 +1 @@\n-old\n+new\n"
+        )
+        assert _validate_diff_internal_paths(diff) is None
+
+    def test_disallowed_prefix_rejected(self) -> None:
+        diff = (
+            "--- a/services/l1/main.py\n"
+            "+++ b/services/l1/main.py\n"
+            "@@ -1 +1 @@\n-x\n+y\n"
+        )
+        err = _validate_diff_internal_paths(diff)
+        assert err is not None
+        assert "disallowed path" in err
+
+    def test_path_traversal_rejected(self) -> None:
+        diff = (
+            "--- a/runtime/skills/../../services/x.py\n"
+            "+++ b/runtime/skills/../../services/x.py\n"
+            "@@ -1 +1 @@\n-x\n+y\n"
+        )
+        err = _validate_diff_internal_paths(diff)
+        assert err is not None
+        assert "traversal" in err
+
+    def test_dev_null_ignored(self) -> None:
+        # File-delete diffs from git have `+++ b/dev/null`. Detector
+        # won't produce these but ignoring them keeps the check safe.
+        diff = (
+            "--- a/runtime/skills/code-review/SKILL.md\n"
+            "+++ /dev/null\n"
+            "@@ -1 +0,0 @@\n-old\n"
+        )
+        assert _validate_diff_internal_paths(diff) is None
+
+    def test_mixed_disallowed_in_later_hunk_rejected(self) -> None:
+        diff = (
+            "--- a/runtime/skills/code-review/SKILL.md\n"
+            "+++ b/runtime/skills/code-review/SKILL.md\n"
+            "@@ -1 +1 @@\n-x\n+y\n"
+            "--- a/.github/workflows/ci.yml\n"
+            "+++ b/.github/workflows/ci.yml\n"
+            "@@ -1 +1 @@\n-x\n+y\n"
+        )
+        err = _validate_diff_internal_paths(diff)
+        assert err is not None
+        assert ".github" in err
+
+    def test_rename_to_disallowed_target_rejected(self) -> None:
+        # Extended unified-diff format: rename headers are honored by
+        # ``git apply`` even when the --- /+++ lines look innocent.
+        diff = (
+            "diff --git a/runtime/skills/foo.md b/services/l1/secrets.py\n"
+            "rename from runtime/skills/foo.md\n"
+            "rename to services/l1/secrets.py\n"
+            "--- a/runtime/skills/foo.md\n"
+            "+++ b/services/l1/secrets.py\n"
+            "@@ -1 +1 @@\n-x\n+y\n"
+        )
+        err = _validate_diff_internal_paths(diff)
+        assert err is not None
+        assert "services/l1" in err
+
+    def test_copy_from_disallowed_rejected(self) -> None:
+        diff = (
+            "diff --git a/runtime/skills/foo.md b/.github/CODEOWNERS\n"
+            "copy from .github/workflows/ci.yml\n"
+            "copy to runtime/skills/foo.md\n"
+        )
+        err = _validate_diff_internal_paths(diff)
+        assert err is not None
+
+    def test_diff_git_header_scanned(self) -> None:
+        # Even if a malicious diff omits --- /+++ , the diff --git
+        # preamble itself still names paths git apply honors.
+        diff = (
+            "diff --git a/services/l1/main.py b/services/l1/main.py\n"
+            "@@ -1 +1 @@\n-x\n+y\n"
+        )
+        err = _validate_diff_internal_paths(diff)
+        assert err is not None
+        assert "services/l1" in err
 
 
 class TestGitApplyCheck:
