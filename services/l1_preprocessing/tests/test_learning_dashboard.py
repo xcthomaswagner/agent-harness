@@ -254,6 +254,22 @@ class TestStatusFilter:
         r = client.get("/autonomy/learning?status=applied")
         assert "No lesson candidates match" in r.text
 
+    def test_selector_includes_reverted_and_stale(
+        self, client: TestClient
+    ) -> None:
+        """Regression: the status selector used to omit ``reverted``
+        and ``stale``. Both are valid terminal statuses rendered by
+        _STATUS_BADGE, and operators sometimes need to filter to
+        them (e.g. audit reverted lessons). Without an explicit link
+        the operator had to hand-craft the URL.
+        """
+        _seed()
+        r = client.get("/autonomy/learning")
+        # Links for ``reverted`` and ``stale`` should exist as
+        # clickable <a> elements in the selector.
+        assert "?status=reverted" in r.text
+        assert "?status=stale" in r.text
+
 
 class TestNavigation:
     def test_home_autonomy_traces_links_present(

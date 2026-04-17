@@ -738,10 +738,19 @@ def open_revert_pr_for_lesson(inputs: RevertPRInputs) -> PROpenerResult:
     clone_dir = scratch_parent / "harness"
     success = False
     try:
+        # Clone single-branch (``--branch <base_branch>``) with full
+        # history on that branch. We need ``merged_commit_sha`` to be
+        # reachable for ``git revert``; using ``--branch`` + no depth
+        # guarantees full history on base_branch (where the merge
+        # commit lives) without pulling every other ref — the older
+        # ``--no-single-branch`` form fetched history for EVERY
+        # branch in the repo, which is an unnecessary bandwidth cost
+        # for repos with many feature branches.
         clone_err = _run(
             _git(
                 [
-                    "clone", "--no-single-branch",
+                    "clone",
+                    "--branch", inputs.base_branch,
                     inputs.harness_repo_url, str(clone_dir),
                 ],
                 cwd=scratch_parent,
@@ -757,12 +766,10 @@ def open_revert_pr_for_lesson(inputs: RevertPRInputs) -> PROpenerResult:
         if identity_err is not None:
             return PROpenerResult(success=False, error=identity_err)
 
-        # Same rationale as the approve flow: fork off
-        # origin/<base_branch> explicitly so the revert PR's diff
-        # stays scoped to the revert commit, not a mix with unrelated
-        # default-branch commits when base_branch differs from the
-        # remote default. ``--no-single-branch`` above gave us all
-        # remote refs so origin/<base_branch> is available.
+        # Fork off origin/<base_branch> explicitly for consistency
+        # with the approve flow — the clone is already on that branch
+        # since we passed --branch, but an explicit ``-B`` is
+        # resilient against future clone changes.
         checkout_err = _run(
             _git(
                 ["checkout", "-B", branch, f"origin/{inputs.base_branch}"],

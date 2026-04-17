@@ -166,9 +166,14 @@ def _render_selector(
             parts.append(f'<a href="{_e(href)}">{_e(profile)}</a>')
     parts.append("</div>")
     parts.append('<div class="selector"><strong>Status:</strong> ')
+    # All statuses from _LESSON_STATUS_TRANSITIONS, including the
+    # terminal ones. Previously ``reverted`` and ``stale`` were
+    # missing — operators couldn't filter to those via the UI and
+    # had to hand-craft the URL. The dashboard already renders them
+    # via _STATUS_BADGE so the filter selector should cover them too.
     status_filters: list[str | None] = [
         None, "proposed", "draft_ready", "approved", "applied",
-        "rejected", "snoozed",
+        "rejected", "reverted", "snoozed", "stale",
     ]
     for s in status_filters:
         label = s or "all"

@@ -714,10 +714,16 @@ async def post_revert(
     Gated: the lesson must be at ``status='applied'`` with a non-empty
     ``merged_commit_sha`` AND the latest recorded outcome verdict
     must be ``regressed`` or ``human_reedit``. We transition to
-    ``reverted`` only after the revert PR is successfully opened
-    (or the dry-run completes locally) — on failure the lesson stays
-    at ``applied`` and the error lands on ``status_reason`` so the
-    operator can retry.
+    ``reverted`` only after the revert PR is successfully pushed and
+    opened on GitHub — on failure the lesson stays at ``applied`` and
+    the error lands on ``status_reason`` so the operator can retry.
+
+    Dry-run (``LEARNING_PR_OPENER_DRY_RUN=true``) keeps the lesson at
+    ``applied`` and stamps ``status_reason`` with the local branch +
+    commit summary. The operator flips the real-PR flag and re-hits
+    /revert to actually push — ``reverted`` is terminal, so staying
+    at ``applied`` preserves the retry path. Mirrors the approve
+    flow's dry-run semantics.
     """
     body = await _guard_admin_request(request, x_autonomy_admin_token)
     payload = _parse_body(body, RevertIn)
