@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     autonomy_internal_rate_refill_per_sec: float = 1.0
     autonomy_internal_max_body_bytes: int = 262_144  # 256 KB
 
+    # Self-learning miner + drafter
+    learning_miner_enabled: bool = False
+    learning_consistency_check_enabled: bool = True
+
     # Service
     log_level: str = "INFO"
 

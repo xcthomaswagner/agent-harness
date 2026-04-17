@@ -1,4 +1,4 @@
-"""Tests for the self-learning triage API (learning_api.py)."""
+"""Tests for learning_api.py. /draft uses mocked drafter + checker."""
 
 from __future__ import annotations
 
@@ -99,24 +99,50 @@ class TestGetCandidate:
 
 
 class TestApprove:
-    def test_happy_path_from_proposed(
+    def test_proposed_cannot_be_directly_approved(
         self, client: TestClient, admin_headers: dict[str, str]
     ) -> None:
+        # Phase C gates approval behind /draft. Bypassing the drafter
+        # would defeat the consistency check, so the transition table
+        # rejects it with 409.
         lid = _seed_candidate()
         r = client.post(
             f"/api/learning/candidates/{lid}/approve",
             json={"reason": "looks good"},
             headers=admin_headers,
         )
+        assert r.status_code == 409
+
+    def test_happy_path_from_draft_ready(
+        self, client: TestClient, admin_headers: dict[str, str]
+    ) -> None:
+        from autonomy_store import autonomy_conn, update_lesson_status
+
+        lid = _seed_candidate()
+        with autonomy_conn() as conn:
+            update_lesson_status(
+                conn, lid, "draft_ready", reason="drafter ok"
+            )
+        r = client.post(
+            f"/api/learning/candidates/{lid}/approve",
+            json={"reason": "reviewed"},
+            headers=admin_headers,
+        )
         assert r.status_code == 200
         body = r.json()
         assert body["status"] == "approved"
-        assert body["status_reason"] == "looks good"
+        assert body["status_reason"] == "reviewed"
 
     def test_second_approve_409(
         self, client: TestClient, admin_headers: dict[str, str]
     ) -> None:
+        from autonomy_store import autonomy_conn, update_lesson_status
+
         lid = _seed_candidate()
+        with autonomy_conn() as conn:
+            update_lesson_status(
+                conn, lid, "draft_ready", reason="drafter ok"
+            )
         client.post(
             f"/api/learning/candidates/{lid}/approve",
             json={"reason": "first"},
@@ -138,33 +164,6 @@ class TestApprove:
             headers=admin_headers,
         )
         assert r.status_code == 404
-
-    def test_approve_from_draft_ready_succeeds(
-        self, client: TestClient, admin_headers: dict[str, str]
-    ) -> None:
-        # If a previous approve partially landed (proposed -> draft_ready
-        # committed, then update_lesson_status("approved") failed), the
-        # operator must be able to retry /approve from draft_ready and
-        # have it complete on the single call.
-        from autonomy_store import autonomy_conn, update_lesson_status
-
-        lid = _seed_candidate()
-        with autonomy_conn() as conn:
-            update_lesson_status(
-                conn,
-                lid,
-                "draft_ready",
-                reason="simulated earlier partial run",
-            )
-        r = client.post(
-            f"/api/learning/candidates/{lid}/approve",
-            json={"reason": "retry after partial"},
-            headers=admin_headers,
-        )
-        assert r.status_code == 200
-        body = r.json()
-        assert body["status"] == "approved"
-        assert body["status_reason"] == "retry after partial"
 
 
 class TestReject:
@@ -314,3 +313,241 @@ class TestAbuseGuards:
             headers=admin_headers,
         )
         assert r.status_code == 429
+
+
+# ---- /draft endpoint -------------------------------------------------
+
+from unittest.mock import AsyncMock, patch  # noqa: E402
+
+from learning_miner.drafter_consistency_check import (  # noqa: E402
+    ConsistencyVerdict,
+)
+from learning_miner.drafter_markdown import DrafterResult  # noqa: E402
+
+
+class TestDraftEndpoint:
+    def _seed_with_delta(self, target_path: str = "runtime/skills/code-review/SKILL.md") -> str:
+        """Seed a candidate whose proposed_delta points at a real file."""
+        import json as _json
+
+        return _seed_candidate(
+            scope="xcsf30|salesforce|security|*.cls",
+            detector="human_issue_cluster",
+            pattern="security|*.cls",
+            proposed_delta_json=_json.dumps(
+                {
+                    "target_path": target_path,
+                    "anchor": "## Review Checklist",
+                    "rationale_md": "cluster of SOQL injections",
+                }
+            ),
+        )
+
+    def test_drafter_success_promotes_to_draft_ready(
+        self, client: TestClient, admin_headers: dict[str, str]
+    ) -> None:
+        lid = self._seed_with_delta()
+        drafter_result = DrafterResult(
+            success=True,
+            unified_diff="--- a/x\n+++ b/x\n@@\n+rule",
+            tokens_in=100,
+            tokens_out=50,
+        )
+        consistency_verdict = ConsistencyVerdict(
+            contradicts=False, reasoning="ok"
+        )
+        with (
+            patch(
+                "learning_api._run_drafter",
+                AsyncMock(return_value=drafter_result),
+            ),
+            patch(
+                "learning_api._run_consistency_check",
+                AsyncMock(return_value=consistency_verdict),
+            ),
+            # The handler reads the target file; stub it.
+            patch("pathlib.Path.read_text", return_value="current content"),
+        ):
+            r = client.post(
+                f"/api/learning/candidates/{lid}/draft",
+                json={},
+                headers=admin_headers,
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "draft_ready"
+        assert body["drafter_success"] is True
+        assert body["consistency_contradicts"] is False
+        # Unified diff got merged into the stored delta.
+        assert (
+            "unified_diff"
+            in body["candidate"]["proposed_delta"]
+        )
+
+    def test_drafter_failure_keeps_proposed(
+        self, client: TestClient, admin_headers: dict[str, str]
+    ) -> None:
+        lid = self._seed_with_delta()
+        drafter_result = DrafterResult(
+            success=False, error="git apply --check failed"
+        )
+        with patch(
+            "learning_api._run_drafter",
+            AsyncMock(return_value=drafter_result),
+        ):
+            r = client.post(
+                f"/api/learning/candidates/{lid}/draft",
+                json={},
+                headers=admin_headers,
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "proposed"
+        assert body["drafter_success"] is False
+        assert "git apply" in body["error"]
+
+    def test_consistency_contradiction_blocks_promotion(
+        self, client: TestClient, admin_headers: dict[str, str]
+    ) -> None:
+        lid = self._seed_with_delta()
+        drafter_result = DrafterResult(
+            success=True, unified_diff="--- a/x\n+++ b/x\n@@\n+rule"
+        )
+        verdict = ConsistencyVerdict(
+            contradicts=True,
+            contradicts_with="Use X tool",
+            reasoning="new rule conflicts with X",
+        )
+        with (
+            patch(
+                "learning_api._run_drafter",
+                AsyncMock(return_value=drafter_result),
+            ),
+            patch(
+                "learning_api._run_consistency_check",
+                AsyncMock(return_value=verdict),
+            ),
+            patch("pathlib.Path.read_text", return_value="existing"),
+        ):
+            r = client.post(
+                f"/api/learning/candidates/{lid}/draft",
+                json={},
+                headers=admin_headers,
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "proposed"
+        assert body["drafter_success"] is True
+        assert body["consistency_contradicts"] is True
+        assert body["contradicts_with"] == "Use X tool"
+
+    def test_non_proposed_409(
+        self, client: TestClient, admin_headers: dict[str, str]
+    ) -> None:
+        from autonomy_store import autonomy_conn, update_lesson_status
+
+        lid = self._seed_with_delta()
+        with autonomy_conn() as conn:
+            update_lesson_status(
+                conn, lid, "rejected", reason="no"
+            )
+        r = client.post(
+            f"/api/learning/candidates/{lid}/draft",
+            json={},
+            headers=admin_headers,
+        )
+        assert r.status_code == 409
+
+    def test_404_on_unknown(
+        self, client: TestClient, admin_headers: dict[str, str]
+    ) -> None:
+        r = client.post(
+            "/api/learning/candidates/LSN-nope/draft",
+            json={},
+            headers=admin_headers,
+        )
+        assert r.status_code == 404
+
+    def test_requires_admin_token(self, client: TestClient) -> None:
+        lid = self._seed_with_delta()
+        r = client.post(
+            f"/api/learning/candidates/{lid}/draft", json={}
+        )
+        assert r.status_code == 401
+
+    def test_drafter_failure_records_status_reason_on_candidate(
+        self, client: TestClient, admin_headers: dict[str, str]
+    ) -> None:
+        # The dashboard surfaces status_reason to the operator, so the
+        # failure branch of /draft must actually persist the reason —
+        # not just echo it in the response.
+        lid = self._seed_with_delta()
+        drafter_result = DrafterResult(
+            success=False, error="git apply --check failed"
+        )
+        with patch(
+            "learning_api._run_drafter",
+            AsyncMock(return_value=drafter_result),
+        ):
+            client.post(
+                f"/api/learning/candidates/{lid}/draft",
+                json={},
+                headers=admin_headers,
+            )
+        r = client.get(f"/api/learning/candidates/{lid}")
+        assert r.status_code == 200
+        assert "git apply" in r.json()["status_reason"]
+
+    def test_consistency_check_killswitch_skips_second_llm_call(
+        self,
+        client: TestClient,
+        admin_headers: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # When the kill switch is off, the handler must still succeed
+        # end-to-end — the real ConsistencyChecker short-circuits to
+        # contradicts=False when enabled=False. We verify by letting
+        # the REAL consistency checker run (not mocked) with a mocked
+        # client that would blow up if called.
+        monkeypatch.setattr(
+            settings, "learning_consistency_check_enabled", False
+        )
+        lid = self._seed_with_delta()
+        drafter_result = DrafterResult(
+            success=True,
+            unified_diff="--- a/x\n+++ b/x\n@@\n+rule",
+        )
+        fake_client = AsyncMock()
+        fake_client.messages.create.side_effect = AssertionError(
+            "consistency check must not be called when killswitch is off"
+        )
+
+        def _fake_checker_factory(**_kw: object) -> object:
+            from learning_miner.drafter_consistency_check import (
+                ConsistencyChecker,
+            )
+
+            return ConsistencyChecker(
+                api_key="test", client=fake_client, enabled=False
+            )
+
+        with (
+            patch(
+                "learning_api._run_drafter",
+                AsyncMock(return_value=drafter_result),
+            ),
+            patch(
+                "learning_api.ConsistencyChecker",
+                side_effect=_fake_checker_factory,
+            ),
+            patch("pathlib.Path.read_text", return_value="current"),
+        ):
+            r = client.post(
+                f"/api/learning/candidates/{lid}/draft",
+                json={},
+                headers=admin_headers,
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "draft_ready"
+        fake_client.messages.create.assert_not_called()

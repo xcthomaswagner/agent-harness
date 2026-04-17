@@ -91,6 +91,7 @@ details.evidence li { margin: 3px 0; }
   padding: 3px 10px; border-radius: 6px; font-size: 11.5px; font-weight: 600;
   cursor: pointer;
 }
+.btn-draft   { border-color: #4D45E5; color: #4D45E5; }
 .btn-approve { border-color: #12A87B; color: #12A87B; }
 .btn-reject  { border-color: #DB2626; color: #DB2626; }
 .btn-snooze  { border-color: #C79004; color: #C79004; }
@@ -201,26 +202,30 @@ def _render_evidence_list(evidence_rows: list[sqlite3.Row]) -> str:
 def _render_action_buttons(lesson_id: str, status: str) -> str:
     """Render action buttons as disabled HTML ``<button>`` elements.
 
-    Phase B does not yet wire form submission with the admin token —
-    that lands in Phase C alongside the drafter. Until then the
-    buttons are rendered disabled with a ``title`` tooltip showing
-    the exact JSON API call an operator should make via curl / a
-    tool that can inject the ``X-Autonomy-Admin-Token`` header.
-    Plain ``<a>`` tags would invite clicks that issue a GET (405).
+    The dashboard is server-rendered without JS, so a form-submit
+    flow would require a round-trip that reads the admin token from
+    somewhere — deferred. For now the operator reads the POST
+    endpoint off the ``title``/``data-endpoint`` attributes and hits
+    it via curl (or a tool that injects the admin header). Plain
+    ``<a>`` tags would invite clicks that issue a GET (405).
     """
     terminal = status in {
         "applied", "rejected", "reverted", "stale", "approved"
     }
-    buttons = [
-        ("Approve", "approve", "btn btn-approve"),
-        ("Reject", "reject", "btn btn-reject"),
-        ("Snooze", "snooze", "btn btn-snooze"),
+    # Draft is only applicable at `proposed` — the drafter transitions
+    # proposed -> draft_ready and a lesson already past proposed can't
+    # re-draft in place.
+    buttons: list[tuple[str, str, str, bool]] = [
+        ("Draft diff", "draft", "btn btn-draft", status != "proposed"),
+        ("Approve", "approve", "btn btn-approve", status != "draft_ready"),
+        ("Reject", "reject", "btn btn-reject", terminal),
+        ("Snooze", "snooze", "btn btn-snooze", terminal),
     ]
     out: list[str] = ['<div class="actions">']
-    for label, action, cls in buttons:
+    for label, action, cls, disabled in buttons:
         endpoint = f"/api/learning/candidates/{_e(lesson_id)}/{_e(action)}"
-        if terminal:
-            tooltip = f"Disabled — lesson is already {status}"
+        if disabled:
+            tooltip = f"Disabled — current status is {status}"
         else:
             tooltip = f"POST {endpoint} (requires X-Autonomy-Admin-Token)"
         out.append(

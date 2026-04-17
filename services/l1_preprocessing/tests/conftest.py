@@ -177,6 +177,41 @@ def seed_lesson_candidate(
     return lid
 
 
+def make_anthropic_response(
+    text: str, *, tokens_in: int = 100, tokens_out: int = 50
+):
+    """Build a MagicMock shaped like an Anthropic Messages response.
+
+    Shared by analyst + drafter tests so the mock shape can't drift
+    between them. The real Anthropic SDK returns an object with
+    ``content = [TextBlock(type='text', text=...)]`` and a ``usage``
+    record carrying input/output token counts.
+    """
+    from unittest.mock import MagicMock
+
+    block = MagicMock()
+    block.type = "text"
+    block.text = text
+    usage = MagicMock()
+    usage.input_tokens = tokens_in
+    usage.output_tokens = tokens_out
+    resp = MagicMock()
+    resp.content = [block]
+    resp.usage = usage
+    return resp
+
+
+@pytest.fixture
+def mock_anthropic_client():
+    """AsyncMock-shaped Anthropic client for drafter/analyst tests."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    client = MagicMock()
+    client.messages = MagicMock()
+    client.messages.create = AsyncMock()
+    return client
+
+
 @pytest.fixture
 def configure_admin_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

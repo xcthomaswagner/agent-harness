@@ -1,18 +1,4 @@
-"""Tests for the v5 lesson-candidate / evidence / outcome repository helpers.
-
-Covers:
-
-- ``upsert_lesson_candidate``: insert path, repeat-detection increments
-  frequency + last_seen_at, and does NOT touch status/pr_url even on
-  subsequent scans.
-- ``insert_lesson_evidence``: insert, UNIQUE-collision no-op,
-  per-lesson row cap with oldest-first trim, custom cap.
-- ``get_lesson_by_id`` + ``list_lesson_candidates``: filters and
-  ordering.
-- ``update_lesson_status``: valid transitions, invalid transitions
-  rejected, side-channel fields (pr_url / merged_commit_sha /
-  next_review_at / proposed_delta_json) only updated when supplied.
-"""
+"""Tests for the v5 lesson-candidate / evidence / outcome repository helpers."""
 
 from __future__ import annotations
 
@@ -26,6 +12,7 @@ from autonomy_store import (
     insert_lesson_evidence,
     list_lesson_candidates,
     list_lesson_evidence,
+    set_lesson_status_reason,
     update_lesson_status,
     upsert_lesson_candidate,
     upsert_pr_run,
@@ -443,3 +430,31 @@ class TestUpdateLessonStatus:
         row = get_lesson_by_id(conn, lid)
         assert row is not None
         assert row["status"] == "proposed"
+
+
+class TestSetLessonStatusReason:
+    def _seed(self, conn) -> str:
+        upsert_lesson_candidate(
+            conn, _base_candidate(), now="2026-04-10T00:00:00+00:00"
+        )
+        return compute_lesson_id(
+            "human_issue_cluster",
+            "security|*.cls",
+            "xcsf30|salesforce|security|foo.cls",
+        )
+
+    def test_updates_reason_without_changing_status(self, conn) -> None:
+        lid = self._seed(conn)
+        set_lesson_status_reason(conn, lid, "drafter: git apply failed")
+        row = get_lesson_by_id(conn, lid)
+        assert row is not None
+        assert row["status"] == "proposed"
+        assert row["status_reason"] == "drafter: git apply failed"
+
+    def test_truncates_to_500_chars(self, conn) -> None:
+        lid = self._seed(conn)
+        long = "x" * 700
+        set_lesson_status_reason(conn, lid, long)
+        row = get_lesson_by_id(conn, lid)
+        assert row is not None
+        assert len(row["status_reason"]) == 500

@@ -162,7 +162,7 @@ class TestPopulated:
         with autonomy_conn() as conn:
             update_lesson_status(conn, lid, "rejected", reason="no")
         r = client.get("/autonomy/learning")
-        assert "Disabled — lesson is already rejected" in r.text
+        assert "Disabled — current status is rejected" in r.text
 
 
 class TestProfileSelector:

@@ -1850,3 +1850,26 @@ def update_lesson_status(
     updated = get_lesson_by_id(conn, lesson_id)
     assert updated is not None  # just updated
     return updated
+
+
+def set_lesson_status_reason(
+    conn: sqlite3.Connection,
+    lesson_id: str,
+    reason: str,
+    *,
+    now: str | None = None,
+) -> None:
+    """Update ``status_reason`` without changing ``status``.
+
+    Used when a drafter run fails — the operator needs to see what
+    went wrong, but the lesson remains at its existing status
+    (usually ``proposed``). The transition validator does not apply
+    since no transition is happening.
+    """
+    ts = now or _now_iso()
+    with conn:
+        conn.execute(
+            "UPDATE lesson_candidates SET status_reason = ?, updated_at = ? "
+            "WHERE lesson_id = ?",
+            (reason[:500], ts, lesson_id),
+        )
