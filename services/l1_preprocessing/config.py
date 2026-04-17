@@ -80,6 +80,11 @@ class Settings(BaseSettings):
         "https://github.com/xcthomaswagner/agent-harness.git"
     )
     learning_harness_base_branch: str = "main"
+    # Comma-separated GitHub handles (no @) — passed as --reviewer to
+    # ``gh pr create`` on every lesson PR (and revert PR). Empty =
+    # rely on CODEOWNERS or manual assignment. Example:
+    # LEARNING_PR_OPENER_REVIEWERS=xcthomaswagner,xcentium/platform-reviewers
+    learning_pr_opener_reviewers: str = ""
     # Outcomes measurement: polls applied lessons for PR-merge state,
     # then measures pre/post metrics once the window has elapsed.
     # OFF by default — flip when the PR opener starts creating real

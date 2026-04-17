@@ -567,3 +567,114 @@ class TestEndToEndViaRunner:
         # (lesson_id, trace_id, source_ref) makes second insert a no-op.
         ev = list_lesson_evidence(conn, candidates[0]["lesson_id"])
         assert len(ev) == MIN_CLUSTER_SIZE
+
+
+class TestRecurrenceFor:
+    """Detector 2 implements recurrence_for so outcomes.py can ask
+    'did the pattern continue to show up after the lesson's PR merged?'
+    """
+
+    def _lesson_row(
+        self,
+        pattern_key: str,
+        client_profile: str = "xcsf30",
+    ):
+        from unittest.mock import MagicMock
+        row = MagicMock()
+        def getitem(self, k):
+            return {
+                "pattern_key": pattern_key,
+                "client_profile": client_profile,
+            }.get(k, "")
+        row.__getitem__ = getitem
+        return row
+
+    def test_zero_when_no_post_window_rows(self, conn) -> None:
+        detector = HumanIssueClusterDetector()
+        lesson = self._lesson_row("security|*.cls")
+        out = detector.recurrence_for(
+            conn,
+            lesson=lesson,
+            since_iso=_days_ago_iso(5),
+            until_iso=_days_ago_iso(0),
+        )
+        assert out == 0
+
+    def test_counts_recurring_issues_in_window(self, conn) -> None:
+        """Seed 3 new issues in the window; recurrence should be 3."""
+        detector = HumanIssueClusterDetector()
+        since = _days_ago_iso(10)
+        until = _days_ago_iso(0)
+        for i in range(3):
+            pr_id = _seed_pr_run(
+                conn,
+                pr_number=200 + i,
+                ticket_id=f"POST-{i}",
+                client_profile="xcsf30",
+                opened_days_ago=5,
+            )
+            _seed_human_issue(
+                conn, pr_run_id=pr_id,
+                category="security", file_path=f"a{i}.cls",
+            )
+        lesson = self._lesson_row("security|*.cls")
+        assert detector.recurrence_for(
+            conn, lesson=lesson, since_iso=since, until_iso=until,
+        ) == 3
+
+    def test_mismatched_file_pattern_returns_zero(self, conn) -> None:
+        """Issues whose derived file_pattern doesn't match the lesson's
+        pattern are not counted — they're recurrences of a *different* lesson.
+        """
+        detector = HumanIssueClusterDetector()
+        since = _days_ago_iso(10)
+        until = _days_ago_iso(0)
+        for i in range(3):
+            pr_id = _seed_pr_run(
+                conn,
+                pr_number=300 + i,
+                ticket_id=f"POST2-{i}",
+                client_profile="xcsf30",
+                opened_days_ago=5,
+            )
+            _seed_human_issue(
+                conn, pr_run_id=pr_id,
+                category="security", file_path=f"page{i}.html",
+            )
+        lesson = self._lesson_row("security|*.cls")
+        assert detector.recurrence_for(
+            conn, lesson=lesson, since_iso=since, until_iso=until,
+        ) == 0
+
+    def test_other_profile_issues_excluded(self, conn) -> None:
+        detector = HumanIssueClusterDetector()
+        since = _days_ago_iso(10)
+        until = _days_ago_iso(0)
+        for i in range(3):
+            pr_id = _seed_pr_run(
+                conn,
+                pr_number=400 + i,
+                ticket_id=f"POST3-{i}",
+                client_profile="other-profile",
+                opened_days_ago=5,
+            )
+            _seed_human_issue(
+                conn, pr_run_id=pr_id,
+                category="security", file_path=f"a{i}.cls",
+            )
+        lesson = self._lesson_row(
+            "security|*.cls", client_profile="xcsf30"
+        )
+        assert detector.recurrence_for(
+            conn, lesson=lesson, since_iso=since, until_iso=until,
+        ) == 0
+
+    def test_malformed_pattern_key_returns_zero(self, conn) -> None:
+        detector = HumanIssueClusterDetector()
+        lesson = self._lesson_row("not-a-pipe-key")
+        assert detector.recurrence_for(
+            conn,
+            lesson=lesson,
+            since_iso=_days_ago_iso(5),
+            until_iso=_days_ago_iso(0),
+        ) == 0

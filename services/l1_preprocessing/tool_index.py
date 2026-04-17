@@ -9,12 +9,118 @@ consolidation step to support post-mortem analysis without re-reading the
 from __future__ import annotations
 
 import json
+import re
+import shlex
 from pathlib import Path
 from typing import Any
 
 import structlog
 
 logger = structlog.get_logger()
+
+
+# Wrappers that front the real command verb. Order-independent; all
+# stripped in a loop until the command settles.
+_BASH_WRAPPER_VERBS: set[str] = {
+    "env", "sudo", "nohup", "time", "exec", "timeout",
+}
+
+_BASH_SPLIT_RE = re.compile(r"&&|\|\||;")
+
+
+def extract_bash_verb(command: str) -> str:
+    """Return the first meaningful verb from a Bash command string, or ''.
+
+    Design notes:
+    - Chained commands (``cd /path && sf deploy``, ``source venv && pytest``)
+      split on ``&&``/``||``/``;`` and we take the LAST chunk's first verb
+      — that's the "real" command; the earlier chunks are setup.
+    - Wrapper prefixes (``env X=y``, ``sudo``, ``nohup``, ``timeout N``,
+      ``time``, ``exec``) are stripped recursively so ``sudo timeout 30
+      sf pull`` resolves to ``sf``.
+    - ``bash -c "..."`` / ``sh -c "..."`` unwraps the quoted payload once
+      (bounded — we don't recurse arbitrarily deep, just one hop).
+    - Leading variable assignments (``FOO=bar BAZ=qux cmd``) are skipped.
+    - Empty / unparseable commands return ''. Callers treat empty as
+      "not attributable" and skip the count.
+    """
+    if not command or not isinstance(command, str):
+        return ""
+    chunks = _BASH_SPLIT_RE.split(command)
+    last = chunks[-1].strip() if chunks else command.strip()
+    verb = _first_verb_after_preamble(last)
+    if verb in {"bash", "sh", "/bin/bash", "/bin/sh"}:
+        # Try to unwrap ``bash -c "..."`` — if that fails, the bare
+        # ``bash`` invocation is itself the signal we want to record.
+        unwrapped = _unwrap_bash_c(last)
+        if unwrapped:
+            return _first_verb_after_preamble(unwrapped) or verb
+    return verb
+
+
+def _first_verb_after_preamble(command: str) -> str:
+    """Strip wrappers + var-assignments, return the first token."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        # shlex can't parse unbalanced quotes — fall back to whitespace.
+        tokens = command.split()
+    while tokens:
+        head = tokens[0]
+        if not head:
+            tokens = tokens[1:]
+            continue
+        if "=" in head and head.split("=", 1)[0].isidentifier():
+            tokens = tokens[1:]
+            continue
+        base = head.rsplit("/", 1)[-1]
+        if base in _BASH_WRAPPER_VERBS:
+            # Strip the wrapper itself, its numeric duration (timeout),
+            # and any leading -flags including the value that follows a
+            # separate-token option like ``sudo -u user``.
+            tokens = tokens[1:]
+            while tokens:
+                nxt = tokens[0]
+                if base == "timeout" and nxt.replace(".", "").isdigit():
+                    tokens = tokens[1:]
+                    continue
+                if nxt.startswith("-"):
+                    tokens = tokens[1:]
+                    # If the flag was short-form (``-u`` not ``--user=x``)
+                    # and didn't embed ``=``, consume its value too.
+                    if (
+                        len(nxt) <= 2
+                        and "=" not in nxt
+                        and tokens
+                        and not tokens[0].startswith("-")
+                    ):
+                        tokens = tokens[1:]
+                    continue
+                break
+            continue
+        return base
+    return ""
+
+
+def _unwrap_bash_c(command: str) -> str:
+    """Return the payload of ``bash -c "<payload>"``, else ''."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return ""
+    if len(tokens) < 3:
+        return ""
+    if tokens[0].rsplit("/", 1)[-1] not in {"bash", "sh"}:
+        return ""
+    # Skip any flags before -c.
+    i = 1
+    while i < len(tokens) and tokens[i].startswith("-") and tokens[i] != "-c":
+        i += 1
+    if i >= len(tokens) or tokens[i] != "-c":
+        return ""
+    if i + 1 >= len(tokens):
+        return ""
+    return tokens[i + 1]
 
 
 def _mcp_server_name(tool_name: str) -> str | None:
@@ -39,6 +145,7 @@ def build_tool_index(stream_path: Path) -> dict[str, Any]:
     """
     tool_counts: dict[str, int] = {}
     tool_errors: dict[str, int] = {}
+    bash_verb_counts: dict[str, int] = {}
     mcp_servers_used: set[str] = set()
     mcp_servers_available: list[str] = []
     first_tool_error: dict[str, Any] | None = None
@@ -103,6 +210,13 @@ def build_tool_index(stream_path: Path) -> dict[str, Any]:
                 tool_use_id = block.get("id")
                 if isinstance(tool_use_id, str):
                     tool_use_by_id[tool_use_id] = (name, idx)
+                if name == "Bash":
+                    cmd = (block.get("input") or {}).get("command")
+                    verb = extract_bash_verb(cmd) if isinstance(cmd, str) else ""
+                    if verb:
+                        bash_verb_counts[verb] = (
+                            bash_verb_counts.get(verb, 0) + 1
+                        )
                 server = _mcp_server_name(name)
                 if server:
                     # Canonicalize to match mcp_servers_available (which
@@ -162,6 +276,7 @@ def build_tool_index(stream_path: Path) -> dict[str, Any]:
     return {
         "tool_counts": tool_counts,
         "tool_errors": tool_errors,
+        "bash_verb_counts": bash_verb_counts,
         "mcp_servers_used": sorted(mcp_servers_used),
         "mcp_servers_available": list(mcp_servers_available),
         "mcp_servers_unused": mcp_servers_unused,
@@ -175,6 +290,7 @@ def _empty_index(mcp_servers_available: list[str]) -> dict[str, Any]:
     return {
         "tool_counts": {},
         "tool_errors": {},
+        "bash_verb_counts": {},
         "mcp_servers_used": [],
         "mcp_servers_available": list(mcp_servers_available),
         "mcp_servers_unused": list(mcp_servers_available),

@@ -307,15 +307,19 @@ def _render_outcome_fragment(outcome: sqlite3.Row) -> str:
         f" · reedits: {int(outcome['human_reedit_count'])}"
     )
     badge_cls = _VERDICT_BADGE.get(verdict, "badge-secondary")
-    # Regressed / human_reedit rows expose a disabled Revert button so
-    # the operator sees that the option exists; wiring lands in Tier 2.
-    revert_disabled = verdict in {"regressed", "human_reedit"}
-    revert_html = (
-        '<button class="btn btn-reject" disabled '
-        'title="Revert not yet wired (Tier 2)">Revert?</button>'
-        if revert_disabled
-        else ""
-    )
+    # Regressed / human_reedit rows expose a Revert button with the
+    # POST endpoint in the tooltip — same curl-only UX as the other
+    # action buttons (no JS to read the admin token client-side).
+    revert_html = ""
+    if verdict in {"regressed", "human_reedit"}:
+        lesson_id = str(outcome["lesson_id"] or "")
+        endpoint = f"/api/learning/candidates/{_e(lesson_id)}/revert"
+        revert_html = (
+            f'<button class="btn btn-reject" disabled '
+            f'data-endpoint="{endpoint}" '
+            f'title="POST {endpoint} (requires X-Autonomy-Admin-Token)">'
+            "Revert</button>"
+        )
     return (
         f'<br><span class="badge {_e(badge_cls)}" title="{_e(tooltip)}">'
         f"{_e(verdict)}</span> {revert_html}"

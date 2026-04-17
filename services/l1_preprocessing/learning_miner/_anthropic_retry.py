@@ -16,6 +16,12 @@ import structlog
 logger = structlog.get_logger()
 
 
+# Default retry count for all Anthropic-API calls in L1. Callers that
+# need a different policy pass ``max_retries=`` explicitly; changing
+# the default moves everyone at once.
+MAX_RETRIES_DEFAULT = 3
+
+
 def is_retryable_anthropic_error(exc: anthropic.APIError) -> bool:
     """Transient errors worth retrying: rate limits, connection, 5xx."""
     if isinstance(exc, anthropic.RateLimitError | anthropic.APIConnectionError):
@@ -40,7 +46,7 @@ async def call_with_retry(
     max_tokens: int,
     system: str,
     user: str,
-    max_retries: int = 3,
+    max_retries: int = MAX_RETRIES_DEFAULT,
     log_event: str = "learning_drafter_retrying",
 ) -> tuple[str, int, int] | RetryFailure:
     """Single-prompt Claude call with exponential-backoff retry.

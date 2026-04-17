@@ -270,17 +270,21 @@ def test_concurrent_calls_serialize_via_per_repo_lock(
     results: list[bool] = []
 
     def worker() -> None:
-        with patch("pipeline.subprocess.run", side_effect=fake_run):
-            results.append(_ensure_client_repo(str(target), sc, log))
+        results.append(_ensure_client_repo(str(target), sc, log))
 
-    t1 = threading.Thread(target=worker)
-    t2 = threading.Thread(target=worker)
-    t1.start()
-    t2.start()
-    # Release the first clone after a beat so the second waiter can proceed.
-    threading.Timer(0.3, clone_barrier.set).start()
-    t1.join(timeout=5)
-    t2.join(timeout=5)
+    # Patch at the test scope (not per-thread), so the patch lifetime
+    # is bounded by ``with`` + the join below. A per-thread patch
+    # could outlive a thread that's still mid-call at teardown, which
+    # leaks the monkeypatch into sibling tests.
+    with patch("pipeline.subprocess.run", side_effect=fake_run):
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        # Release the first clone after a beat so the second waiter can proceed.
+        threading.Timer(0.3, clone_barrier.set).start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
     # Both callers should report success...
     assert results == [True, True]
     # ...but only ONE clone should have run.

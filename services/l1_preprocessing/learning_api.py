@@ -36,6 +36,7 @@ from pydantic import BaseModel
 from autonomy_ingest import _guard_admin_request
 from autonomy_store import (
     autonomy_conn,
+    get_latest_outcome,
     get_lesson_by_id,
     list_lesson_candidates,
     list_lesson_evidence,
@@ -45,7 +46,13 @@ from autonomy_store import (
 from config import settings
 from learning_miner.drafter_consistency_check import ConsistencyChecker
 from learning_miner.drafter_markdown import MarkdownDrafter
-from learning_miner.pr_opener import OpenPRInputs, open_pr_for_lesson
+from learning_miner.outcomes import Verdict
+from learning_miner.pr_opener import (
+    OpenPRInputs,
+    RevertPRInputs,
+    open_pr_for_lesson,
+    open_revert_pr_for_lesson,
+)
 
 logger = structlog.get_logger()
 
@@ -74,6 +81,19 @@ class RejectIn(BaseModel):
 class SnoozeIn(BaseModel):
     reason: str = ""
     next_review_at: str  # ISO 8601; required so callers can't "forever snooze"
+
+
+class RevertIn(BaseModel):
+    reason: str = ""
+
+
+# Verdicts that make a revert request valid. Everything else the
+# operator should reject or snooze — reverts are the heavy hammer
+# and only exist for confirmed-bad outcomes. Sourced from the
+# ``Verdict`` StrEnum so an enum rename can't silently desync.
+_REVERTABLE_VERDICTS: frozenset[str] = frozenset(
+    {Verdict.REGRESSED.value, Verdict.HUMAN_REEDIT.value}
+)
 
 
 @router.get("/api/learning/candidates")
@@ -391,8 +411,22 @@ def _load_pr_opener_inputs(
             harness_repo_url=settings.learning_harness_repo_url,
             base_branch=settings.learning_harness_base_branch,
             dry_run=settings.learning_pr_opener_dry_run,
+            reviewers=_configured_reviewers(),
         )
     )
+
+
+def _configured_reviewers() -> tuple[str, ...]:
+    """Parse the ``LEARNING_PR_OPENER_REVIEWERS`` comma-separated env.
+
+    Kept as a small helper so both approve (PR) and revert (PR) flow
+    pull from the same source of truth — if an operator updates the
+    env, both paths pick it up without a redeploy.
+    """
+    raw = (settings.learning_pr_opener_reviewers or "").strip()
+    if not raw:
+        return ()
+    return tuple(h.strip() for h in raw.split(",") if h.strip())
 
 
 @router.post("/api/learning/candidates/{lesson_id}/approve")
@@ -559,3 +593,121 @@ async def post_snooze(
         reason=payload.reason,
         next_review_at=payload.next_review_at,
     )
+
+
+@router.post("/api/learning/candidates/{lesson_id}/revert")
+async def post_revert(
+    lesson_id: str,
+    request: Request,
+    x_autonomy_admin_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Open a revert PR for an applied lesson with a bad outcome.
+
+    Gated: the lesson must be at ``status='applied'`` with a non-empty
+    ``merged_commit_sha`` AND the latest recorded outcome verdict
+    must be ``regressed`` or ``human_reedit``. We transition to
+    ``reverted`` only after the revert PR is successfully opened
+    (or the dry-run completes locally) — on failure the lesson stays
+    at ``applied`` and the error lands on ``status_reason`` so the
+    operator can retry.
+    """
+    body = await _guard_admin_request(request, x_autonomy_admin_token)
+    payload = _parse_body(body, RevertIn)
+
+    with autonomy_conn() as conn:
+        row = get_lesson_by_id(conn, lesson_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="lesson not found")
+        if row["status"] != "applied":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"lesson not in 'applied' state "
+                    f"(currently {row['status']!r})"
+                ),
+            )
+        merged_commit_sha = str(row["merged_commit_sha"] or "")
+        if not merged_commit_sha:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "lesson has no merged_commit_sha — outcomes poll "
+                    "may not have run yet"
+                ),
+            )
+        outcome = get_latest_outcome(conn, lesson_id)
+        verdict = str(outcome["verdict"] or "") if outcome is not None else ""
+        if verdict not in _REVERTABLE_VERDICTS:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"latest outcome verdict {verdict!r} is not "
+                    "revertable (requires regressed or human_reedit)"
+                ),
+            )
+
+    inputs = RevertPRInputs(
+        lesson_id=lesson_id,
+        merged_commit_sha=merged_commit_sha,
+        verdict=verdict,
+        reason_md=payload.reason,
+        harness_repo_url=settings.learning_harness_repo_url,
+        base_branch=settings.learning_harness_base_branch,
+        dry_run=settings.learning_pr_opener_dry_run,
+        reviewers=_configured_reviewers(),
+    )
+
+    import asyncio
+
+    result = await asyncio.to_thread(open_revert_pr_for_lesson, inputs)
+    if not result.success:
+        _record_drafter_failure(
+            lesson_id, f"revert_pr_opener: {result.error}"
+        )
+        return {
+            "revert_success": False,
+            "error": result.error,
+        }
+
+    if result.dry_run:
+        # Dry-run: leave lesson at ``applied``; the operator can flip
+        # real-PR mode and retry. Matches approve's dry-run behavior.
+        with autonomy_conn() as conn:
+            set_lesson_status_reason(
+                conn,
+                lesson_id,
+                (
+                    f"revert_pr_opener dry-run ok "
+                    f"(branch={result.branch}, commit={result.commit_sha[:8]})"
+                ),
+            )
+        return {
+            "revert_success": True,
+            "revert_dry_run": True,
+            "branch": result.branch,
+            "commit_sha": result.commit_sha,
+        }
+
+    with autonomy_conn() as conn:
+        try:
+            update_lesson_status(
+                conn,
+                lesson_id,
+                "reverted",
+                reason=payload.reason or f"reverted ({verdict})",
+                pr_url=result.pr_url,
+            )
+        except ValueError as exc:
+            return {
+                "revert_success": False,
+                "error": str(exc),
+            }
+    return {
+        "revert_success": True,
+        "revert_dry_run": False,
+        "pr_url": result.pr_url,
+        "branch": result.branch,
+        "commit_sha": result.commit_sha,
+    }
+
+

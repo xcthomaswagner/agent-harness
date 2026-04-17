@@ -242,6 +242,31 @@ def seed_draft_ready_candidate(
     return lid
 
 
+def seed_applied_candidate(
+    *,
+    merged_commit_sha: str = "abc1234",
+    pr_url: str = "https://github.com/x/y/pull/1",
+) -> str:
+    """Walk a fresh candidate all the way to ``status='applied'``.
+
+    Used by the revert flow tests that need a lesson with a recorded
+    merge commit sha. Walks proposed → draft_ready → approved →
+    applied in one call.
+    """
+    from autonomy_store import autonomy_conn, update_lesson_status
+
+    lid = seed_draft_ready_candidate()
+    with autonomy_conn() as conn:
+        update_lesson_status(conn, lid, "approved", reason="test")
+        update_lesson_status(
+            conn, lid, "applied",
+            reason="test",
+            pr_url=pr_url,
+            merged_commit_sha=merged_commit_sha,
+        )
+    return lid
+
+
 @pytest.fixture
 def learning_api_client(configure_admin_auth: str):
     """Pre-wired TestClient for learning_api.py.

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tool_index import build_tool_index
+from tool_index import build_tool_index, extract_bash_verb
 
 
 def _write_stream(path: Path, events: list[dict]) -> None:
@@ -253,3 +253,137 @@ def test_mcp_server_connected_but_unused(tmp_path: Path) -> None:
     assert "playwright" in idx["mcp_servers_unused"]
     assert "github" in idx["mcp_servers_unused"]
     assert "salesforce" not in idx["mcp_servers_unused"]
+
+
+# ---- bash_verb_counts + extract_bash_verb --------------------------------
+
+
+class TestExtractBashVerb:
+    def test_simple_command(self) -> None:
+        assert extract_bash_verb("sf org list") == "sf"
+
+    def test_empty_returns_empty(self) -> None:
+        assert extract_bash_verb("") == ""
+        assert extract_bash_verb("   ") == ""
+
+    def test_non_string_returns_empty(self) -> None:
+        assert extract_bash_verb(None) == ""  # type: ignore[arg-type]
+
+    def test_strips_cd_prefix(self) -> None:
+        assert extract_bash_verb("cd /tmp && sf deploy") == "sf"
+
+    def test_strips_env_prefix(self) -> None:
+        assert extract_bash_verb("env FOO=bar sf pull") == "sf"
+
+    def test_strips_sudo(self) -> None:
+        assert extract_bash_verb("sudo gh auth login") == "gh"
+
+    def test_strips_sudo_with_flag(self) -> None:
+        assert extract_bash_verb("sudo -u svc gh auth login") == "gh"
+
+    def test_strips_nohup(self) -> None:
+        assert extract_bash_verb("nohup sf org list") == "sf"
+
+    def test_strips_timeout_with_duration(self) -> None:
+        assert extract_bash_verb("timeout 30 sf deploy") == "sf"
+
+    def test_strips_time(self) -> None:
+        assert extract_bash_verb("time pytest tests/") == "pytest"
+
+    def test_inline_var_assignment(self) -> None:
+        assert extract_bash_verb("FOO=1 BAZ=2 sf deploy") == "sf"
+
+    def test_takes_last_chunk_of_chain(self) -> None:
+        assert extract_bash_verb("source venv && pytest") == "pytest"
+        assert (
+            extract_bash_verb("git pull && sf project deploy start") == "sf"
+        )
+
+    def test_semicolon_chain(self) -> None:
+        assert extract_bash_verb("echo hi ; sf org list") == "sf"
+
+    def test_bash_c_unwrap(self) -> None:
+        assert extract_bash_verb('bash -c "sf org list"') == "sf"
+
+    def test_sh_c_unwrap(self) -> None:
+        assert extract_bash_verb('sh -c "gh auth status"') == "gh"
+
+    def test_bash_without_c_kept_as_bash(self) -> None:
+        # Bare ``bash script.sh`` — there's no quoted payload to unwrap,
+        # so the signal is ``bash`` itself.
+        assert extract_bash_verb("bash script.sh") == "bash"
+
+    def test_strips_absolute_path(self) -> None:
+        assert extract_bash_verb("/usr/local/bin/sf org list") == "sf"
+
+    def test_unbalanced_quotes_falls_back(self) -> None:
+        # shlex raises on unbalanced quotes; we fall back to whitespace
+        # split and still extract the verb.
+        assert extract_bash_verb('sf deploy "foo') == "sf"
+
+
+class TestBashVerbCountsInIndex:
+    def test_counts_verbs_across_calls(self, tmp_path: Path) -> None:
+        stream = tmp_path / "session-stream.jsonl"
+        events = [
+            _init_event([("salesforce_capability_mcp", "connected")]),
+            {
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use", "name": "Bash", "id": "b1",
+                    "input": {"command": "sf org list"},
+                }]},
+            },
+            {
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use", "name": "Bash", "id": "b2",
+                    "input": {"command": "cd /tmp && sf deploy"},
+                }]},
+            },
+            {
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use", "name": "Bash", "id": "b3",
+                    "input": {"command": "gh auth status"},
+                }]},
+            },
+        ]
+        _write_stream(stream, events)
+        idx = build_tool_index(stream)
+        assert idx["bash_verb_counts"] == {"sf": 2, "gh": 1}
+
+    def test_ignores_non_bash_tools(self, tmp_path: Path) -> None:
+        stream = tmp_path / "session-stream.jsonl"
+        events = [
+            _init_event([("github", "connected")]),
+            {
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use", "name": "Read", "id": "r1",
+                    "input": {"file_path": "/tmp/x"},
+                }]},
+            },
+        ]
+        _write_stream(stream, events)
+        idx = build_tool_index(stream)
+        assert idx["bash_verb_counts"] == {}
+
+    def test_empty_command_skipped(self, tmp_path: Path) -> None:
+        stream = tmp_path / "session-stream.jsonl"
+        events = [
+            {
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use", "name": "Bash", "id": "b1",
+                    "input": {"command": ""},
+                }]},
+            },
+        ]
+        _write_stream(stream, events)
+        idx = build_tool_index(stream)
+        assert idx["bash_verb_counts"] == {}
+
+    def test_empty_index_includes_bash_verb_counts(self, tmp_path: Path) -> None:
+        idx = build_tool_index(tmp_path / "none.jsonl")
+        assert idx["bash_verb_counts"] == {}

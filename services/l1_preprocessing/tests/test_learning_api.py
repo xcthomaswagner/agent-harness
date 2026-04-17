@@ -557,3 +557,191 @@ class TestDraftEndpoint:
         body = r.json()
         assert body["status"] == "draft_ready"
         fake_client.messages.create.assert_not_called()
+
+
+class TestRevert:
+    """POST /api/learning/candidates/{id}/revert
+
+    Gated on: (1) status==applied, (2) merged_commit_sha present,
+    (3) latest outcome verdict ∈ {regressed, human_reedit}. Dry-run
+    keeps lesson at applied; real run transitions to reverted.
+    """
+
+    def _seed_outcome(self, lesson_id: str, verdict: str) -> None:
+        from autonomy_store import (
+            LessonOutcomeInsert,
+            autonomy_conn,
+            insert_lesson_outcome,
+        )
+        with autonomy_conn() as conn:
+            insert_lesson_outcome(
+                conn,
+                LessonOutcomeInsert(
+                    lesson_id=lesson_id,
+                    measured_at="2026-04-17T00:00:00+00:00",
+                    window_days=14,
+                    verdict=verdict,
+                ),
+            )
+
+    def test_unknown_lesson_returns_404(
+        self, client: TestClient, admin_headers: dict[str, str]
+    ) -> None:
+        r = client.post(
+            "/api/learning/candidates/LSN-missing/revert",
+            json={"reason": "x"},
+            headers=admin_headers,
+        )
+        assert r.status_code == 404
+
+    def test_wrong_status_returns_409(
+        self, client: TestClient, admin_headers: dict[str, str]
+    ) -> None:
+        # Freshly seeded candidate is at 'proposed', not applied.
+        lid = _seed_candidate()
+        r = client.post(
+            f"/api/learning/candidates/{lid}/revert",
+            json={"reason": "regressed"},
+            headers=admin_headers,
+        )
+        assert r.status_code == 409
+        assert "applied" in r.json()["detail"]
+
+    def test_missing_outcome_returns_409(
+        self, client: TestClient, admin_headers: dict[str, str]
+    ) -> None:
+        from tests.conftest import seed_applied_candidate
+        lid = seed_applied_candidate()
+        # No outcome written — verdict lookup returns "".
+        r = client.post(
+            f"/api/learning/candidates/{lid}/revert",
+            json={"reason": "x"},
+            headers=admin_headers,
+        )
+        assert r.status_code == 409
+        assert "revertable" in r.json()["detail"]
+
+    def test_confirmed_verdict_is_not_revertable(
+        self, client: TestClient, admin_headers: dict[str, str]
+    ) -> None:
+        from tests.conftest import seed_applied_candidate
+        lid = seed_applied_candidate()
+        self._seed_outcome(lid, "confirmed")
+        r = client.post(
+            f"/api/learning/candidates/{lid}/revert",
+            json={"reason": "x"},
+            headers=admin_headers,
+        )
+        assert r.status_code == 409
+
+    def test_regressed_dry_run_stays_applied(
+        self,
+        client: TestClient,
+        admin_headers: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from tests.conftest import seed_applied_candidate
+        lid = seed_applied_candidate()
+        self._seed_outcome(lid, "regressed")
+
+        from learning_miner.pr_opener import PROpenerResult
+        monkeypatch.setattr(settings, "learning_pr_opener_dry_run", True)
+
+        def fake_open(inputs):
+            return PROpenerResult(
+                success=True,
+                branch=f"learning/revert-{inputs.lesson_id}",
+                commit_sha="revsha01",
+                dry_run=True,
+            )
+
+        monkeypatch.setattr(
+            "learning_api.open_revert_pr_for_lesson", fake_open
+        )
+        r = client.post(
+            f"/api/learning/candidates/{lid}/revert",
+            json={"reason": "regressed"},
+            headers=admin_headers,
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["revert_success"] is True
+        assert body["revert_dry_run"] is True
+        # Lesson stays at applied on dry-run.
+        from autonomy_store import autonomy_conn, get_lesson_by_id
+        with autonomy_conn() as conn:
+            row = get_lesson_by_id(conn, lid)
+        assert row["status"] == "applied"
+
+    def test_human_reedit_real_run_transitions_to_reverted(
+        self,
+        client: TestClient,
+        admin_headers: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from tests.conftest import seed_applied_candidate
+        lid = seed_applied_candidate()
+        self._seed_outcome(lid, "human_reedit")
+
+        from learning_miner.pr_opener import PROpenerResult
+        monkeypatch.setattr(settings, "learning_pr_opener_dry_run", False)
+
+        def fake_open(inputs):
+            return PROpenerResult(
+                success=True,
+                pr_url="https://github.com/x/y/pull/42",
+                branch=f"learning/revert-{inputs.lesson_id}",
+                commit_sha="revsha02",
+            )
+
+        monkeypatch.setattr(
+            "learning_api.open_revert_pr_for_lesson", fake_open
+        )
+        r = client.post(
+            f"/api/learning/candidates/{lid}/revert",
+            json={"reason": "human found issue"},
+            headers=admin_headers,
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["revert_success"] is True
+        assert body["pr_url"] == "https://github.com/x/y/pull/42"
+        from autonomy_store import autonomy_conn, get_lesson_by_id
+        with autonomy_conn() as conn:
+            row = get_lesson_by_id(conn, lid)
+        assert row["status"] == "reverted"
+        assert row["pr_url"] == "https://github.com/x/y/pull/42"
+
+    def test_opener_failure_keeps_applied_status(
+        self,
+        client: TestClient,
+        admin_headers: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from tests.conftest import seed_applied_candidate
+        lid = seed_applied_candidate()
+        self._seed_outcome(lid, "regressed")
+
+        from learning_miner.pr_opener import PROpenerResult
+        monkeypatch.setattr(settings, "learning_pr_opener_dry_run", False)
+
+        def fake_open(inputs):
+            return PROpenerResult(success=False, error="git revert conflict")
+
+        monkeypatch.setattr(
+            "learning_api.open_revert_pr_for_lesson", fake_open
+        )
+        r = client.post(
+            f"/api/learning/candidates/{lid}/revert",
+            json={"reason": "x"},
+            headers=admin_headers,
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["revert_success"] is False
+        assert "git revert conflict" in body["error"]
+        from autonomy_store import autonomy_conn, get_lesson_by_id
+        with autonomy_conn() as conn:
+            row = get_lesson_by_id(conn, lid)
+        assert row["status"] == "applied"
+        assert "revert_pr_opener" in (row["status_reason"] or "")

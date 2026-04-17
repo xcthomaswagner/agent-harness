@@ -17,12 +17,15 @@ import pytest
 from learning_miner.pr_opener import (
     OpenPRInputs,
     PROpenerResult,
+    RevertPRInputs,
     _build_branch_name,
+    _build_revert_branch_name,
     _compose_pr_body,
     _edited_paths_from_diff,
     _parse_pr_url,
     _stamp_lesson_id,
     open_pr_for_lesson,
+    open_revert_pr_for_lesson,
 )
 
 # ---- branch-name validation ------------------------------------------
@@ -133,22 +136,6 @@ class TestStampLessonId:
 
 
 # ---- end-to-end (real git, mocked gh) --------------------------------
-
-
-_REAL_SUBPROCESS_RUN = subprocess.run
-
-
-@pytest.fixture(autouse=True)
-def _restore_subprocess_run(monkeypatch: pytest.MonkeyPatch):
-    """Restore the real ``subprocess.run`` at each test start.
-
-    Needed because another test module (test_ensure_client_repo.py)
-    patches ``pipeline.subprocess.run`` from background threads, and
-    the patches can leak when threads outlive the main test. The
-    ``_REAL_SUBPROCESS_RUN`` reference is captured at import time.
-    """
-    monkeypatch.setattr(subprocess, "run", _REAL_SUBPROCESS_RUN)
-    yield
 
 
 @pytest.fixture
@@ -586,3 +573,239 @@ class TestDashboardRendersPrLink:
         app.include_router(dashboard_router)
         r = TestClient(app).get("/autonomy/learning")
         assert "PR →" not in r.text
+
+
+# ---- revert branch-name validation -----------------------------------
+
+
+class TestBuildRevertBranchName:
+    def test_valid_lesson_id(self) -> None:
+        assert (
+            _build_revert_branch_name("LSN-a1b2c3d4")
+            == "learning/revert-LSN-a1b2c3d4"
+        )
+
+    def test_unsafe_id_raises(self) -> None:
+        with pytest.raises(ValueError, match="unsafe revert branch"):
+            _build_revert_branch_name("LSN-; rm -rf /")
+
+    def test_double_dot_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            _build_revert_branch_name("LSN-a..b")
+
+
+# ---- revert PR flow --------------------------------------------------
+
+
+def _origin_with_committed_change(tmp_path: Path) -> tuple[Path, str]:
+    """Build an origin repo where a previous commit introduces a change
+    we can later revert. Returns (origin_path, sha_to_revert).
+    """
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=origin,
+        check=True, capture_output=True,
+    )
+    f = origin / "runtime" / "skills" / "code-review" / "SKILL.md"
+    f.parent.mkdir(parents=True)
+    f.write_text("# initial\n")
+    subprocess.run(
+        ["git", "add", "."], cwd=origin, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-c", "user.email=init@t", "-c", "user.name=init",
+         "commit", "-m", "init"],
+        cwd=origin, check=True, capture_output=True,
+    )
+    # Lesson-opener-like commit we'll revert.
+    f.write_text("# initial\n\n- bad rule\n")
+    subprocess.run(
+        ["git", "add", "."], cwd=origin, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-c", "user.email=xcagent@x.com", "-c", "user.name=agent",
+         "commit", "-m", "chore(learning): LSN-1"],
+        cwd=origin, check=True, capture_output=True,
+    )
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=origin,
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    return origin, sha
+
+
+class TestOpenRevertPr:
+    def test_malformed_sha_fails_fast(
+        self, tmp_path: Path
+    ) -> None:
+        inputs = RevertPRInputs(
+            lesson_id="LSN-a1b2c3d4",
+            merged_commit_sha="not-a-sha",
+            verdict="regressed",
+            reason_md="x",
+            harness_repo_url="https://example.invalid/x.git",
+            dry_run=True,
+        )
+        out = open_revert_pr_for_lesson(inputs)
+        assert out.success is False
+        assert "malformed" in out.error
+
+    def test_unsafe_lesson_id_fails_fast(self, tmp_path: Path) -> None:
+        inputs = RevertPRInputs(
+            lesson_id="LSN-; rm",
+            merged_commit_sha="a" * 40,
+            verdict="regressed",
+            reason_md="x",
+            harness_repo_url="https://example.invalid/x.git",
+            dry_run=True,
+        )
+        out = open_revert_pr_for_lesson(inputs)
+        assert out.success is False
+        assert "unsafe" in out.error
+
+    def test_dry_run_reverts_locally(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        origin, sha = _origin_with_committed_change(tmp_path)
+        # gh must not run in dry-run.
+        monkeypatch.setattr(
+            "learning_miner.pr_opener._gh",
+            MagicMock(
+                side_effect=AssertionError("gh must not run in dry-run")
+            ),
+        )
+        inputs = RevertPRInputs(
+            lesson_id="LSN-a1b2c3d4",
+            merged_commit_sha=sha,
+            verdict="regressed",
+            reason_md="metrics dropped",
+            harness_repo_url=str(origin),
+            dry_run=True,
+        )
+        out = open_revert_pr_for_lesson(inputs)
+        assert out.success is True
+        assert out.dry_run is True
+        assert out.branch == "learning/revert-LSN-a1b2c3d4"
+        assert out.commit_sha  # revert produced a commit
+
+    def test_real_run_calls_gh_pr_create(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        origin, sha = _origin_with_committed_change(tmp_path)
+        # Capture gh; also stub git push since the test origin isn't
+        # a push-able remote. We let git clone/checkout/revert run
+        # for real — only gh + push are mocked.
+        real_git = __import__("learning_miner.pr_opener", fromlist=["_git"])._git
+
+        def fake_git(args, **kw):
+            if args[:1] == ["push"]:
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            return real_git(args, **kw)
+
+        fake_gh = MagicMock(
+            return_value=subprocess.CompletedProcess(
+                ["gh"], 0,
+                stdout="https://github.com/x/y/pull/99\n",
+                stderr="",
+            )
+        )
+        monkeypatch.setattr("learning_miner.pr_opener._git", fake_git)
+        monkeypatch.setattr("learning_miner.pr_opener._gh", fake_gh)
+        monkeypatch.setenv("AGENT_GH_TOKEN", "fake-token")
+        inputs = RevertPRInputs(
+            lesson_id="LSN-a1b2c3d4",
+            merged_commit_sha=sha,
+            verdict="human_reedit",
+            reason_md="Alice edited the file",
+            harness_repo_url=str(origin),
+            dry_run=False,
+        )
+        out = open_revert_pr_for_lesson(inputs)
+        assert out.success is True
+        assert out.pr_url == "https://github.com/x/y/pull/99"
+        fake_gh.assert_called_once()
+        # Title includes verdict + lesson id.
+        called_args = fake_gh.call_args[0][0]
+        title_idx = called_args.index("--title") + 1
+        assert "LSN-a1b2c3d4" in called_args[title_idx]
+        assert "human_reedit" in called_args[title_idx]
+
+    def test_no_token_refuses_push(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        origin, sha = _origin_with_committed_change(tmp_path)
+        monkeypatch.delenv("AGENT_GH_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        inputs = RevertPRInputs(
+            lesson_id="LSN-a1b2c3d4",
+            merged_commit_sha=sha,
+            verdict="regressed",
+            reason_md="x",
+            harness_repo_url=str(origin),
+            dry_run=False,
+        )
+        out = open_revert_pr_for_lesson(inputs)
+        assert out.success is False
+        assert "token" in out.error.lower() or "credentials" in out.error.lower()
+
+    def test_reviewers_passed_to_gh_pr_create(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        origin, sha = _origin_with_committed_change(tmp_path)
+        real_git = __import__(
+            "learning_miner.pr_opener", fromlist=["_git"]
+        )._git
+
+        def fake_git(args, **kw):
+            if args[:1] == ["push"]:
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            return real_git(args, **kw)
+
+        fake_gh = MagicMock(
+            return_value=subprocess.CompletedProcess(
+                ["gh"], 0,
+                stdout="https://github.com/x/y/pull/100\n",
+                stderr="",
+            )
+        )
+        monkeypatch.setattr("learning_miner.pr_opener._git", fake_git)
+        monkeypatch.setattr("learning_miner.pr_opener._gh", fake_gh)
+        monkeypatch.setenv("AGENT_GH_TOKEN", "fake-token")
+        inputs = RevertPRInputs(
+            lesson_id="LSN-a1b2c3d4",
+            merged_commit_sha=sha,
+            verdict="regressed",
+            reason_md="x",
+            harness_repo_url=str(origin),
+            dry_run=False,
+            reviewers=("xcthomaswagner", "xcentium/platform-reviewers"),
+        )
+        out = open_revert_pr_for_lesson(inputs)
+        assert out.success is True
+        called_args = fake_gh.call_args[0][0]
+        assert "--reviewer" in called_args
+        assert "xcthomaswagner" in called_args
+        assert "xcentium/platform-reviewers" in called_args
+
+
+class TestReviewerFlags:
+    """Helper that expands tuple → gh CLI flag list."""
+
+    def test_empty(self) -> None:
+        from learning_miner.pr_opener import _reviewer_flags
+        assert _reviewer_flags(()) == []
+
+    def test_drops_blank_entries(self) -> None:
+        from learning_miner.pr_opener import _reviewer_flags
+        assert _reviewer_flags(("", "alice", "  ")) == [
+            "--reviewer", "alice",
+        ]
+
+    def test_preserves_order(self) -> None:
+        from learning_miner.pr_opener import _reviewer_flags
+        assert _reviewer_flags(("a", "b", "c")) == [
+            "--reviewer", "a",
+            "--reviewer", "b",
+            "--reviewer", "c",
+        ]

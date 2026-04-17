@@ -12,6 +12,10 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Protocol
 
+import structlog
+
+logger = structlog.get_logger()
+
 
 def compute_lesson_id(
     detector_name: str, pattern_key: str, scope_key: str
@@ -66,6 +70,11 @@ class Detector(Protocol):
     Implementations must be deterministic for the same (conn,
     window_days) so repeat scans idempotently upsert instead of
     churning frequency.
+
+    Detectors MAY implement a ``recurrence_for`` method — see
+    ``count_pattern_recurrence`` below for the expected signature.
+    Detectors without one contribute 0 to the post-merge
+    pattern-recurrence count (outcomes.py's default).
     """
 
     name: str
@@ -75,3 +84,43 @@ class Detector(Protocol):
         self, conn: sqlite3.Connection, window_days: int
     ) -> list[CandidateProposal]:
         ...
+
+
+def count_pattern_recurrence(
+    detector: Detector,
+    conn: sqlite3.Connection,
+    *,
+    lesson: sqlite3.Row,
+    since_iso: str,
+    until_iso: str,
+) -> int:
+    """Dispatch to ``detector.recurrence_for`` if implemented, else 0.
+
+    Kept as a free function so the ``Detector`` Protocol stays
+    interface-only and detectors without a recurrence implementation
+    don't need to stub it.
+
+    Catches the narrow set of errors we expect from well-formed
+    detectors — SQL schema mismatch, bad row access, bad pattern_key
+    split. Non-data bugs (import errors, assertion failures) propagate
+    so operators see real regressions in the miner rather than
+    having them silently downgrade a lesson's verdict.
+    """
+    fn = getattr(detector, "recurrence_for", None)
+    if fn is None:
+        return 0
+    try:
+        result = fn(
+            conn, lesson=lesson, since_iso=since_iso, until_iso=until_iso
+        )
+    except (sqlite3.DatabaseError, KeyError, IndexError) as exc:
+        logger.warning(
+            "learning_pattern_recurrence_failed",
+            detector=getattr(detector, "name", ""),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return 0
+    try:
+        return max(0, int(result))
+    except (TypeError, ValueError):
+        return 0

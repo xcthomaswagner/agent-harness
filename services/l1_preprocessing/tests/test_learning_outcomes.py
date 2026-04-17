@@ -6,10 +6,9 @@ The outcomes job touches three external surfaces:
 - ``git clone`` + ``git log`` for human-reedit detection
 - ``autonomy.db`` for pre/post metric windows
 
-The merge poll + clone paths are mocked (``_REAL_SUBPROCESS_RUN``
-restore from test_learning_pr_opener — same thread-patch-leak
-workaround). Metric-window math is exercised against a real sqlite
-DB populated with synthetic pr_runs rows.
+Metric-window math is exercised against a real sqlite DB populated
+with synthetic pr_runs rows. The merge poll + clone paths are mocked
+via monkeypatch on ``learning_miner._subprocess.run_bin``.
 """
 
 from __future__ import annotations
@@ -40,22 +39,6 @@ from learning_miner.outcomes import (
     _scoped_metrics,
     run_outcomes,
 )
-
-_REAL_SUBPROCESS_RUN = subprocess.run
-
-
-@pytest.fixture(autouse=True)
-def _restore_subprocess_run(monkeypatch: pytest.MonkeyPatch):
-    """Mirror test_learning_pr_opener's subprocess-restore fixture.
-
-    Same root cause: test_ensure_client_repo.py leaks patches on
-    ``subprocess.run`` from background threads. Restoring the real
-    callable at every test start keeps outcomes tests order-
-    independent.
-    """
-    monkeypatch.setattr(subprocess, "run", _REAL_SUBPROCESS_RUN)
-    yield
-
 
 # ---- verdict classifier ----------------------------------------------
 
@@ -568,3 +551,60 @@ class TestRunOutcomes:
                 (lid,),
             ).fetchone()
         assert row["merged_commit_sha"] == "merged-sha-7"
+
+
+class TestPatternRecurrence:
+    """The outcomes helper delegates to the lesson's detector and
+    tolerates missing / broken detectors without blocking."""
+
+    def _make_lesson(
+        self,
+        *,
+        detector_name: str = "human_issue_cluster",
+        pattern_key: str = "security|*.cls",
+        client_profile: str = "xcsf30",
+    ):
+        row = MagicMock()
+        def getitem(self, k):
+            return {
+                "detector_name": detector_name,
+                "pattern_key": pattern_key,
+                "client_profile": client_profile,
+            }.get(k, "")
+        row.__getitem__ = getitem
+        return row
+
+    def test_unknown_detector_returns_zero(self, learning_conn) -> None:
+        from learning_miner.outcomes import _pattern_recurrence
+        out = _pattern_recurrence(
+            learning_conn,
+            lesson=self._make_lesson(detector_name="nonexistent"),
+            since_iso="2026-01-01T00:00:00+00:00",
+            until_iso="2026-02-01T00:00:00+00:00",
+        )
+        assert out == 0
+
+    def test_empty_detector_name_returns_zero(self, learning_conn) -> None:
+        from learning_miner.outcomes import _pattern_recurrence
+        out = _pattern_recurrence(
+            learning_conn,
+            lesson=self._make_lesson(detector_name=""),
+            since_iso="2026-01-01T00:00:00+00:00",
+            until_iso="2026-02-01T00:00:00+00:00",
+        )
+        assert out == 0
+
+    def test_mcp_drift_has_no_recurrence_impl_yet(
+        self, learning_conn
+    ) -> None:
+        """Detector 1 doesn't override recurrence_for, so it falls
+        through to 0 via count_pattern_recurrence.
+        """
+        from learning_miner.outcomes import _pattern_recurrence
+        out = _pattern_recurrence(
+            learning_conn,
+            lesson=self._make_lesson(detector_name="mcp_drift"),
+            since_iso="2026-01-01T00:00:00+00:00",
+            until_iso="2026-02-01T00:00:00+00:00",
+        )
+        assert out == 0

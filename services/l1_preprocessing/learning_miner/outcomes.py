@@ -345,6 +345,12 @@ def _measure_lesson(
             pivot_iso=pivot_iso,
             post_cut=post_cut,
         )
+        pattern_recurrence = _pattern_recurrence(
+            conn,
+            lesson=lesson,
+            since_iso=pivot_iso,
+            until_iso=post_cut,
+        )
 
     human_reedit_count, human_reedit_refs = _detect_human_reedits(
         lesson=lesson,
@@ -355,7 +361,7 @@ def _measure_lesson(
     verdict = _classify_verdict(
         pre=pre,
         post=post,
-        pattern_recurrence=0,  # Tier-1 placeholder; detector rerun is Phase F.
+        pattern_recurrence=pattern_recurrence,
         human_reedit_count=human_reedit_count,
     )
 
@@ -369,7 +375,7 @@ def _measure_lesson(
         post_escape_rate=post["escape_rate"],
         pre_catch_rate=pre["catch_rate"],
         post_catch_rate=post["catch_rate"],
-        pattern_recurrence_count=0,
+        pattern_recurrence_count=pattern_recurrence,
         human_reedit_count=human_reedit_count,
         human_reedit_refs=json.dumps(human_reedit_refs, sort_keys=True),
         verdict=verdict.value,
@@ -410,6 +416,41 @@ def _pre_post_metrics(
         until_iso=post_cut,
     )
     return pre, post
+
+
+def _pattern_recurrence(
+    conn: sqlite3.Connection,
+    *,
+    lesson: sqlite3.Row,
+    since_iso: str,
+    until_iso: str,
+) -> int:
+    """Ask the lesson's detector to count post-merge pattern hits.
+
+    Detectors without a ``recurrence_for`` implementation contribute 0
+    — see ``count_pattern_recurrence`` in detectors.base. Unknown
+    detectors (e.g. deleted after a lesson was applied) likewise
+    contribute 0 rather than blocking outcomes measurement.
+    """
+    detector_name = str(lesson["detector_name"] or "")
+    if not detector_name:
+        return 0
+    # Inline imports: learning_miner/__init__.py pulls in
+    # runner.py which transitively imports outcomes.py; keeping these
+    # deferred avoids a circular-import at module load.
+    from learning_miner import get_detector
+    from learning_miner.detectors.base import count_pattern_recurrence
+
+    detector = get_detector(detector_name)
+    if detector is None:
+        return 0
+    return count_pattern_recurrence(
+        detector,
+        conn,
+        lesson=lesson,
+        since_iso=since_iso,
+        until_iso=until_iso,
+    )
 
 
 def _scoped_metrics(

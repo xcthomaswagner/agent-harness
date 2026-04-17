@@ -289,6 +289,51 @@ class HumanIssueClusterDetector:
             evidence=tuple(evidence),
         )
 
+    def recurrence_for(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        lesson: sqlite3.Row,
+        since_iso: str,
+        until_iso: str,
+    ) -> int:
+        """Count fresh human_review issues matching the lesson's pattern.
+
+        The lesson's ``pattern_key`` is ``<category>|<file_pattern>``.
+        We count ``review_issues`` rows with matching category whose
+        pr_run falls in the post-merge window, restricted to the
+        lesson's client_profile. The file_pattern is re-derived from
+        the matched paths and compared; a mismatch means the issues
+        aren't recurrences of *this* lesson's pattern.
+        """
+        pattern_key = str(lesson["pattern_key"] or "")
+        client_profile = str(lesson["client_profile"] or "")
+        if "|" not in pattern_key or not client_profile:
+            return 0
+        lesson_category, lesson_pattern = pattern_key.split("|", 1)
+        rows = conn.execute(
+            """
+            SELECT ri.file_path
+            FROM review_issues ri
+            JOIN pr_runs pr ON pr.id = ri.pr_run_id
+            WHERE ri.source = 'human_review'
+              AND ri.is_valid = 1
+              AND LOWER(COALESCE(ri.category, '')) = LOWER(?)
+              AND pr.client_profile = ?
+              AND pr.opened_at >= ?
+              AND pr.opened_at < ?
+            """,
+            (lesson_category, client_profile, since_iso, until_iso),
+        ).fetchall()
+        if not rows:
+            return 0
+        matched_pattern = _derive_file_pattern(
+            [str(r["file_path"] or "") for r in rows]
+        )
+        if matched_pattern != lesson_pattern:
+            return 0
+        return len(rows)
+
     def _build_evidence(
         self, key: _ClusterKey, evidence_rows: list[sqlite3.Row]
     ) -> list[EvidenceItem]:
