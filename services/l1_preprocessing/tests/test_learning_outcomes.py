@@ -32,6 +32,7 @@ from autonomy_store import (
 )
 from learning_miner import outcomes as outcomes_mod
 from learning_miner.outcomes import (
+    _agent_email_lower,
     _classify_verdict,
     _detect_human_reedits,
     _lesson_edited_paths,
@@ -344,6 +345,55 @@ class TestDetectHumanReedits:
         assert count == 1
         assert refs[0]["author"].startswith("Alice")
 
+    def test_respects_agent_git_email_override(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When AGENT_GIT_EMAIL is set, pr_opener commits with that email.
+
+        outcomes must recognize that email as agent-authored — otherwise
+        every agent commit trips the HUMAN_REEDIT verdict.
+        """
+        monkeypatch.setenv("AGENT_GIT_EMAIL", "bot@example.com")
+        assert _agent_email_lower() == "bot@example.com"
+        origin = tmp_path / "origin"
+        origin.mkdir()
+        subprocess.run(
+            ["git", "init", "-b", "main"], cwd=origin,
+            check=True, capture_output=True,
+        )
+        f = origin / "runtime" / "skills" / "a.md"
+        f.parent.mkdir(parents=True)
+        f.write_text("v1\n")
+        subprocess.run(["git", "add", "."], cwd=origin, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=bot@example.com",
+             "-c", "user.name=Bot", "commit", "-m", "first"],
+            cwd=origin, check=True, capture_output=True,
+        )
+        merge_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=origin,
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        # Same bot email on the post-merge commit — must be ignored.
+        f.write_text("v2\n")
+        subprocess.run(["git", "add", "."], cwd=origin, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=bot@example.com",
+             "-c", "user.name=Bot", "commit", "-m", "bot follow-up"],
+            cwd=origin, check=True, capture_output=True,
+        )
+        lesson = _lesson_with_diff(
+            target="runtime/skills/a.md",
+            diff="--- a/runtime/skills/a.md\n+++ b/runtime/skills/a.md\n@@\n+rule\n",
+        )
+        count, refs = _detect_human_reedits(
+            lesson=lesson, merged_commit_sha=merge_sha, scratch_root=origin,
+        )
+        assert count == 0
+        assert refs == []
+
     def test_dedupes_commit_touching_multiple_edited_files(
         self,
         tmp_path: Path,
@@ -553,6 +603,81 @@ class TestRunOutcomes:
             "pending", "confirmed", "no_change", "regressed",
         }
         assert outcome["human_reedit_count"] == 0
+
+    def test_scratch_clone_lazy_when_no_measurement(
+        self,
+        learning_conn,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """When no lesson reaches measurement this tick, don't clone.
+
+        A tick where every applied lesson is still merge-polling (or
+        has no PR url) should not pay the harness-clone cost. Previously
+        run_outcomes cloned eagerly before iterating, so a fleet of
+        half-built lessons burned a full clone per tick for nothing.
+        """
+        from config import settings
+        from learning_miner.detectors.base import compute_lesson_id
+
+        monkeypatch.setattr(
+            settings, "autonomy_db_path", str(tmp_path / "a.db")
+        )
+        monkeypatch.setattr(
+            settings,
+            "learning_harness_repo_url",
+            "https://example.invalid/harness.git",
+        )
+        # One applied lesson with pr_url but no merge sha; gh poll will
+        # be stubbed to report "not merged yet" — measurement is skipped,
+        # and the clone should never happen.
+        lid = compute_lesson_id("det", "p", "s|p|k")
+        with autonomy_conn() as conn:
+            upsert_lesson_candidate(
+                conn,
+                LessonCandidateUpsert(
+                    lesson_id=lid,
+                    detector_name="det",
+                    pattern_key="p",
+                    client_profile="xcsf30",
+                    platform_profile="salesforce",
+                    scope_key="s|p|k",
+                    proposed_delta_json="{}",
+                ),
+            )
+            update_lesson_status(conn, lid, "draft_ready", reason="d")
+            update_lesson_status(conn, lid, "approved", reason="a")
+            update_lesson_status(
+                conn, lid, "applied", reason="pr opened",
+                pr_url="https://github.com/x/y/pull/99",
+            )
+
+        clone_calls: list[list[str]] = []
+
+        def fake_run_bin(binary, args, **_kw):
+            # gh poll → "not merged yet".
+            proc = MagicMock()
+            if binary == "gh":
+                proc.returncode = 0
+                proc.stdout = json.dumps({"state": "OPEN"})
+                proc.stderr = ""
+            elif binary == "git" and args[:1] == ["clone"]:
+                clone_calls.append(args)
+                proc.returncode = 0
+                proc.stdout = proc.stderr = ""
+            else:
+                proc.returncode = 0
+                proc.stdout = proc.stderr = ""
+            return proc
+
+        monkeypatch.setattr(
+            "learning_miner._subprocess.subprocess.run",
+            lambda *a, **kw: fake_run_bin(a[0][0], a[0][1:], **kw),
+        )
+        stats = run_outcomes()
+        # No measurement, so no clone.
+        assert stats.outcomes_measured == 0
+        assert clone_calls == []
 
     def test_merge_poll_writes_commit_sha(
         self,

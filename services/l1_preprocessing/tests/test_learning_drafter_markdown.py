@@ -16,6 +16,7 @@ from learning_miner.drafter_markdown import (
     _extract_unified_diff,
     _git_apply_check,
     _validate_diff_internal_paths,
+    check_target_path,
 )
 from tests.conftest import make_anthropic_response as _mock_anthropic_response
 
@@ -62,6 +63,38 @@ class TestExtractAddedLines:
         """
         diff = "+++ b/foo.md\n+++keep me\n+normal add\n"
         assert _extract_added_lines(diff) == ["++keep me", "normal add"]
+
+
+class TestCheckTargetPath:
+    """Shared helper used by both the drafter precheck and the /draft API."""
+
+    def test_empty_rejected(self) -> None:
+        assert "missing" in (check_target_path("") or "")
+
+    def test_allowlisted_passes(self) -> None:
+        assert check_target_path("runtime/skills/x/SKILL.md") is None
+        assert check_target_path("runtime/agents/reviewer.md") is None
+        assert check_target_path(
+            "runtime/platform-profiles/salesforce/CODE_REVIEW_SUPPLEMENT.md"
+        ) is None
+
+    def test_absolute_path_rejected(self) -> None:
+        # Regression: pathlib's / operator discards the repo_root when
+        # the RHS is absolute, so the API must reject before reading.
+        err = check_target_path("/etc/passwd") or ""
+        assert "absolute" in err
+
+    def test_traversal_rejected(self) -> None:
+        err = check_target_path("runtime/skills/../../etc/passwd") or ""
+        assert ".." in err
+
+    def test_non_markdown_rejected(self) -> None:
+        err = check_target_path("runtime/skills/foo.yaml") or ""
+        assert "non-markdown" in err
+
+    def test_outside_prefix_rejected(self) -> None:
+        err = check_target_path("services/l1_preprocessing/main.py") or ""
+        assert "outside allowed" in err
 
 
 # ---- git apply check -------------------------------------------------

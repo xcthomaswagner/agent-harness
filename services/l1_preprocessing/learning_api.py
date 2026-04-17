@@ -45,7 +45,7 @@ from autonomy_store import (
 )
 from config import settings
 from learning_miner.drafter_consistency_check import ConsistencyChecker
-from learning_miner.drafter_markdown import MarkdownDrafter
+from learning_miner.drafter_markdown import MarkdownDrafter, check_target_path
 from learning_miner.outcomes import Verdict
 from learning_miner.pr_opener import (
     OpenPRInputs,
@@ -493,9 +493,27 @@ async def post_draft(
     proposed_delta = _row_proposed_delta(row)
     evidence_snippets = _load_evidence_snippets(lesson_id)
 
+    # Validate target_path against the drafter allowlist BEFORE reading
+    # the file off disk. Without this guard an absolute path in
+    # proposed_delta (e.g. /etc/passwd) slips past _repo_root() because
+    # `Path("/a") / "/etc/passwd"` evaluates to `Path("/etc/passwd")` —
+    # pathlib discards the left operand for absolute RHS. The drafter's
+    # own precheck would eventually reject, but only after the read has
+    # already loaded arbitrary file contents into a Claude prompt.
+    target_path = str(proposed_delta.get("target_path") or "")
+    path_err = check_target_path(target_path)
+    if path_err is not None:
+        _record_drafter_failure(lesson_id, path_err)
+        return {
+            "lesson_id": lesson_id,
+            "status": "proposed",
+            "drafter_success": False,
+            "error": path_err,
+        }
+
     # Read the target file once up front so the drafter and consistency
     # check share a single view — no TOCTOU gap between two reads.
-    target_abs = _repo_root() / str(proposed_delta.get("target_path"))
+    target_abs = _repo_root() / target_path
     try:
         current_content = target_abs.read_text()
     except OSError as exc:

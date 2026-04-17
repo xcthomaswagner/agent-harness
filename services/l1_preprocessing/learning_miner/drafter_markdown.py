@@ -44,6 +44,34 @@ _ALLOWED_TARGET_PREFIXES: tuple[str, ...] = (
 )
 
 
+def check_target_path(target_path: str) -> str | None:
+    """Return an error string if target_path is not a legal edit target.
+
+    Reused by the /draft API handler BEFORE it reads the target file
+    off disk — without this, an absolute path like ``/etc/passwd`` in
+    proposed_delta slips the repo_root prefix via pathlib's `/` operator
+    (which discards the LHS when RHS is absolute). Mirrors the precheck
+    the drafter runs internally; the API needs the same check earlier.
+    """
+    if not target_path:
+        return "proposed_delta.target_path missing"
+    if target_path.startswith("/") or ".." in target_path.split("/"):
+        return (
+            f"target_path {target_path!r} is absolute or contains .."
+        )
+    if not any(target_path.startswith(p) for p in _ALLOWED_TARGET_PREFIXES):
+        return (
+            f"target_path {target_path!r} is outside allowed "
+            f"prefixes {_ALLOWED_TARGET_PREFIXES}"
+        )
+    if not target_path.endswith(".md"):
+        return (
+            "markdown drafter received non-markdown target "
+            f"{target_path!r}"
+        )
+    return None
+
+
 @dataclass(frozen=True)
 class DrafterResult:
     success: bool
@@ -135,31 +163,8 @@ class MarkdownDrafter:
 
     def _precheck(self, target_path: str) -> DrafterResult | None:
         """Fail fast before any LLM call if the target is out of scope."""
-        if not target_path:
-            return DrafterResult(
-                success=False, error="proposed_delta.target_path missing"
-            )
-        if not any(
-            target_path.startswith(p) for p in _ALLOWED_TARGET_PREFIXES
-        ):
-            return DrafterResult(
-                success=False,
-                error=(
-                    f"target_path {target_path!r} is outside allowed "
-                    f"prefixes {_ALLOWED_TARGET_PREFIXES}"
-                ),
-            )
-        if not target_path.endswith(".md"):
-            # Markdown drafter is explicitly Markdown-only; the YAML
-            # drafter (Phase H) handles client-profile YAML.
-            return DrafterResult(
-                success=False,
-                error=(
-                    "markdown drafter received non-markdown target "
-                    f"{target_path!r}"
-                ),
-            )
-        return None
+        err = check_target_path(target_path)
+        return DrafterResult(success=False, error=err) if err else None
 
     # ---- prompts ----------------------------------------------------
 

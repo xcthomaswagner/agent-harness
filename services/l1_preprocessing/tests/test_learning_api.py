@@ -481,6 +481,39 @@ class TestDraftEndpoint:
         )
         assert r.status_code == 401
 
+    def test_absolute_target_path_rejected_before_read(
+        self, client: TestClient, admin_headers: dict[str, str]
+    ) -> None:
+        """Absolute target_path must be refused BEFORE any file read.
+
+        Regression: pathlib's `/` operator discards the repo_root when
+        the RHS is absolute, so `_repo_root() / "/etc/passwd"` reads
+        the absolute path. The drafter's internal precheck would
+        eventually reject, but only after the file has already been
+        slurped into a Claude prompt.
+        """
+        lid = self._seed_with_delta(target_path="/etc/passwd")
+        run_drafter = AsyncMock()
+        with (
+            patch("learning_api._run_drafter", run_drafter),
+            patch("pathlib.Path.read_text") as mock_read,
+        ):
+            r = client.post(
+                f"/api/learning/candidates/{lid}/draft",
+                json={},
+                headers=admin_headers,
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "proposed"
+        assert body["drafter_success"] is False
+        assert "absolute" in body["error"]
+        # Crucially: the file read must not have happened, and the
+        # drafter must not have been invoked with a prompt containing
+        # the file contents.
+        mock_read.assert_not_called()
+        run_drafter.assert_not_called()
+
     def test_drafter_failure_records_status_reason_on_candidate(
         self, client: TestClient, admin_headers: dict[str, str]
     ) -> None:

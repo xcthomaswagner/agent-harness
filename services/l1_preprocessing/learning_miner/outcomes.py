@@ -31,10 +31,12 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import shutil
 import sqlite3
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -66,7 +68,22 @@ logger = structlog.get_logger()
 # measured as decreases, not increases.
 _METRIC_EPSILON = 0.02
 
-_AGENT_EMAIL_LOWER = "xcagent.rockwell@xcentium.com"
+# Fallback when ``AGENT_GIT_EMAIL`` is unset. Must match the default in
+# ``pr_opener._DEFAULT_AUTHOR_EMAIL`` — if pr_opener stamped a commit
+# with email X, outcomes must recognize X as agent-authored or every
+# agent revert loop flips the verdict to HUMAN_REEDIT.
+_DEFAULT_AGENT_EMAIL = "xcagent.rockwell@xcentium.com"
+
+
+def _agent_email_lower() -> str:
+    """Resolve the agent's git email at call time.
+
+    Reads ``AGENT_GIT_EMAIL`` so a deployment that configured pr_opener
+    with a non-default email (e.g. a different agent bot) stays in
+    sync. Resolving per-call — not per-import — means changing the env
+    in a long-running L1 picks up immediately without a restart.
+    """
+    return (os.environ.get("AGENT_GIT_EMAIL") or _DEFAULT_AGENT_EMAIL).lower()
 
 
 class Verdict(StrEnum):
@@ -102,12 +119,23 @@ def run_outcomes(*, repo_root: Path | None = None) -> OutcomesRunStats:
     ``repo_root`` override exists for tests; production clones the
     harness repo into a single scratch directory per invocation and
     reuses it for every lesson's ``git log`` scan. One ``git clone``
-    per tick instead of one per lesson.
+    per tick instead of one per lesson. Lazy: the clone is deferred
+    until the first lesson actually needs human-reedit detection, so
+    a tick where every applied lesson is still merge-polling doesn't
+    pay the clone cost.
     """
     stats = OutcomesRunStats()
     start = time.perf_counter()
     scratch_root: Path | None = None
     cleanup_scratch = False
+
+    def provision_scratch() -> Path | None:
+        nonlocal scratch_root, cleanup_scratch
+        if scratch_root is not None or cleanup_scratch:
+            return scratch_root
+        scratch_root, cleanup_scratch = _prepare_scratch_root(repo_root)
+        return scratch_root
+
     try:
         with autonomy_conn() as conn:
             applied = list_applied_lessons(
@@ -117,9 +145,10 @@ def run_outcomes(*, repo_root: Path | None = None) -> OutcomesRunStats:
         if not applied:
             return stats
 
-        scratch_root, cleanup_scratch = _prepare_scratch_root(repo_root)
         for lesson in applied:
-            _process_one_lesson(lesson, stats, scratch_root=scratch_root)
+            _process_one_lesson(
+                lesson, stats, scratch_provider=provision_scratch
+            )
     except Exception as exc:
         logger.exception("learning_outcomes_run_failed")
         stats.errors.append(f"{type(exc).__name__}: {exc}")
@@ -185,9 +214,14 @@ def _process_one_lesson(
     lesson: sqlite3.Row,
     stats: OutcomesRunStats,
     *,
-    scratch_root: Path | None,
+    scratch_provider: Callable[[], Path | None],
 ) -> None:
-    """Dispatch: poll merge state first, then measure if window has elapsed."""
+    """Dispatch: poll merge state first, then measure if window has elapsed.
+
+    ``scratch_provider`` is a thunk that lazily clones the harness repo
+    the first time human-reedit detection actually needs it — a tick
+    where every lesson is still merge-polling doesn't pay the clone.
+    """
     lesson_id = str(lesson["lesson_id"])
     pr_url = str(lesson["pr_url"] or "")
     merged_commit_sha = str(lesson["merged_commit_sha"] or "")
@@ -223,7 +257,7 @@ def _process_one_lesson(
 
     try:
         _measure_lesson(
-            lesson, merged_commit_sha, scratch_root=scratch_root
+            lesson, merged_commit_sha, scratch_root=scratch_provider()
         )
         stats.outcomes_measured += 1
     except Exception as exc:
@@ -589,6 +623,7 @@ def _detect_human_reedits(
         return 0, []
 
     env = build_env()
+    agent_email = _agent_email_lower()
     refs: list[dict[str, str]] = []
     # Dedup by sha: a single commit touching multiple edited files must
     # count once, not once per file. Without this, human_reedit_count
@@ -615,7 +650,7 @@ def _detect_human_reedits(
             if len(parts) < 5:
                 continue
             sha, email, name, committed_at, message = parts[:5]
-            if email.lower() == _AGENT_EMAIL_LOWER:
+            if email.lower() == agent_email:
                 continue
             if sha in seen_shas:
                 continue
