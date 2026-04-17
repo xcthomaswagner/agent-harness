@@ -32,7 +32,7 @@ jobs:
         run: ruff check .
 
       - name: Type check with mypy
-        run: mypy main.py models.py config.py analyst.py pipeline.py figma_extractor.py client_profile.py queue_worker.py cross_ticket_coordinator.py url_checker.py trace_dashboard.py tracer.py autonomy_store.py autonomy_ingest.py autonomy_metrics.py autonomy_dashboard.py autonomy_matching.py autonomy_sidecars.py autonomy_artifact_ingest.py adapters/
+        run: mypy main.py models.py config.py analyst.py pipeline.py figma_extractor.py client_profile.py queue_worker.py cross_ticket_coordinator.py url_checker.py trace_dashboard.py tracer.py autonomy_store.py autonomy_ingest.py autonomy_metrics.py autonomy_dashboard.py autonomy_matching.py autonomy_sidecars.py autonomy_artifact_ingest.py learning_api.py learning_dashboard.py learning_miner/ adapters/
 
       - name: Run tests
         run: pytest tests/ -v --tb=short

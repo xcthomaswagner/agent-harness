@@ -145,12 +145,56 @@ def _render_nav(active: str = "dashboard") -> str:
         ("Dashboard", "/dashboard"),
         ("Traces", "/traces"),
         ("Autonomy", "/autonomy"),
+        ("Learning", "/autonomy/learning"),
     ]
     parts: list[str] = []
     for label, href in links:
         cls = "nav-link active" if label.lower() == active else "nav-link"
         parts.append(f'<a href="{href}" class="{cls}">{_e(label)}</a>')
     return " ".join(parts)
+
+
+def _render_learning_strip(conn: sqlite3.Connection) -> str:
+    """Compact summary of lesson-candidate counts by status.
+
+    Clicks through to ``/autonomy/learning`` with the corresponding
+    status filter so the dashboard is a single-click triage entry.
+    """
+    rows = conn.execute(
+        "SELECT status, COUNT(*) AS n FROM lesson_candidates GROUP BY status"
+    ).fetchall()
+    counts = {str(r["status"]): int(r["n"]) for r in rows}
+    if not counts:
+        return (
+            '<p class="meta">No lesson candidates yet. '
+            "Run <code>scripts/run_learning_backfill.py</code> "
+            "to seed them.</p>"
+        )
+    order = [
+        ("Proposed", "proposed", "badge-secondary"),
+        ("Draft ready", "draft_ready", "badge-blue"),
+        ("Approved", "approved", "badge-success"),
+        ("Applied", "applied", "badge-success"),
+        ("Snoozed", "snoozed", "badge-warning"),
+        ("Rejected", "rejected", "badge-error"),
+    ]
+    cells: list[str] = []
+    for label, key, cls in order:
+        n = counts.get(key, 0)
+        cells.append(
+            '<a href="/autonomy/learning?status='
+            + _e(key)
+            + f'" style="margin-right:12px">'
+            f'<span class="metric-label">{_e(label)}:</span> '
+            f'<span class="badge {cls}">{n}</span></a>'
+        )
+    return (
+        '<div class="card" style="padding:12px">'
+        f'{"".join(cells)}'
+        '<div class="meta" style="margin-top:8px">'
+        '<a href="/autonomy/learning">Triage all &rarr;</a></div>'
+        "</div>"
+    )
 
 
 def _render_autonomy_strip(conn: sqlite3.Connection) -> str:
@@ -327,6 +371,7 @@ async def unified_dashboard() -> str:
     try:
         ensure_schema(conn)
         autonomy_strip = _render_autonomy_strip(conn)
+        learning_strip = _render_learning_strip(conn)
         auto_merge_html = _render_auto_merge_decisions(conn)
     finally:
         conn.close()
@@ -343,6 +388,8 @@ async def unified_dashboard() -> str:
 </div>
 <h2>Autonomy Summary</h2>
 {autonomy_strip}
+<h2 style="margin-top:24px">Self-learning</h2>
+{learning_strip}
 <h2 style="margin-top:24px">Recent Traces</h2>
 {traces_html}
 {auto_merge_html}

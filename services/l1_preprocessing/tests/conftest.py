@@ -134,3 +134,71 @@ def seed_human_issue_for_learning(
         summary=summary,
         is_valid=1,
     )
+
+
+def seed_lesson_candidate(
+    *,
+    scope: str = "xcsf30|salesforce|security|*.cls",
+    detector: str = "human_issue_cluster",
+    pattern: str = "security|*.cls",
+    client_profile: str = "xcsf30",
+    platform_profile: str = "salesforce",
+    frequency: int = 3,
+    proposed_delta_json: str = "",
+) -> str:
+    """Insert a proposed lesson candidate; return its lesson_id.
+
+    Uses ``autonomy_conn`` so it respects the ``autonomy_db_path``
+    setting the caller configured. Shared between the learning API
+    and dashboard test modules.
+    """
+    from autonomy_store import (
+        LessonCandidateUpsert,
+        autonomy_conn,
+        upsert_lesson_candidate,
+    )
+    from learning_miner.detectors.base import compute_lesson_id
+
+    lid = compute_lesson_id(detector, pattern, scope)
+    with autonomy_conn() as conn:
+        upsert_lesson_candidate(
+            conn,
+            LessonCandidateUpsert(
+                lesson_id=lid,
+                detector_name=detector,
+                pattern_key=pattern,
+                client_profile=client_profile,
+                platform_profile=platform_profile,
+                scope_key=scope,
+                window_frequency=frequency,
+                proposed_delta_json=proposed_delta_json or "{}",
+            ),
+        )
+    return lid
+
+
+@pytest.fixture
+def configure_admin_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> str:
+    """Point autonomy.db at a scratch DB and set a predictable admin token.
+
+    Returns the configured admin token so tests can build the
+    ``X-Autonomy-Admin-Token`` header. Also installs a generous
+    rate-limit bucket so happy-path tests never trip 429; abuse
+    tests monkey-patch ``autonomy_ingest._bucket`` to force it.
+    """
+    import autonomy_ingest
+    from autonomy_ingest import TokenBucket
+    from config import settings as _settings
+
+    db_path = tmp_path / "autonomy.db"
+    token = "admin-token"
+    monkeypatch.setattr(_settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(_settings, "autonomy_admin_token", token)
+    monkeypatch.setattr(
+        autonomy_ingest,
+        "_bucket",
+        TokenBucket(capacity=100, refill_per_sec=100.0),
+    )
+    return token

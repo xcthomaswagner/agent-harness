@@ -43,6 +43,8 @@ from investigate_command import (
 from investigate_command import (
     build_investigate_command as _build_investigate_command,
 )
+from learning_api import router as learning_api_router
+from learning_dashboard import router as learning_dashboard_router
 from models import TicketPayload
 from pipeline import Pipeline
 from redaction import redact
@@ -92,6 +94,8 @@ app.include_router(unified_router)
 app.include_router(trace_router)
 app.include_router(autonomy_router)
 app.include_router(autonomy_dashboard_router)
+app.include_router(learning_api_router)
+app.include_router(learning_dashboard_router)
 
 
 @app.on_event("startup")
