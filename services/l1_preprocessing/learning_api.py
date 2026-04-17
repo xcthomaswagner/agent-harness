@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -62,7 +63,7 @@ logger = structlog.get_logger()
 router = APIRouter()
 
 
-def _candidate_to_dict(row: Any) -> dict[str, Any]:
+def _candidate_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     """Candidate row + a parsed ``proposed_delta`` alongside the raw JSON."""
     out = dict(row)
     raw = out.get("proposed_delta_json", "")
@@ -232,7 +233,7 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-async def _load_proposed_lesson(lesson_id: str) -> Any:
+async def _load_proposed_lesson(lesson_id: str) -> sqlite3.Row:
     """Fetch a lesson row; reject unless it is currently at ``proposed``.
 
     /draft is idempotent from the operator's perspective only in the
@@ -268,7 +269,7 @@ _DRAFTER_OUTPUT_KEYS: frozenset[str] = frozenset({
 })
 
 
-def _row_proposed_delta(row: Any) -> dict[str, Any]:
+def _row_proposed_delta(row: sqlite3.Row) -> dict[str, Any]:
     """Parse the stored proposed_delta_json into a dict.
 
     A candidate with a blank or malformed delta can't be drafted —
