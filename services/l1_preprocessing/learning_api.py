@@ -48,8 +48,15 @@ from autonomy_store import (
     update_lesson_status,
 )
 from config import settings
-from learning_miner.drafter_consistency_check import ConsistencyChecker
-from learning_miner.drafter_markdown import MarkdownDrafter, check_target_path
+from learning_miner.drafter_consistency_check import (
+    ConsistencyChecker,
+    ConsistencyVerdict,
+)
+from learning_miner.drafter_markdown import (
+    DrafterResult,
+    MarkdownDrafter,
+    check_target_path,
+)
 from learning_miner.outcomes import Verdict
 from learning_miner.pr_opener import (
     OpenPRInputs,
@@ -307,7 +314,7 @@ async def _run_drafter(
     proposed_delta: dict[str, Any],
     evidence_snippets: list[str],
     current_content: str,
-) -> Any:
+) -> DrafterResult:
     """Dispatch to the Markdown drafter. Isolates SDK import cost here."""
     drafter = MarkdownDrafter(
         api_key=settings.anthropic_api_key,
@@ -322,7 +329,7 @@ async def _run_drafter(
 
 async def _run_consistency_check(
     current_content: str, unified_diff: str
-) -> Any:
+) -> ConsistencyVerdict:
     checker = ConsistencyChecker(
         api_key=settings.anthropic_api_key,
         enabled=settings.learning_consistency_check_enabled,
