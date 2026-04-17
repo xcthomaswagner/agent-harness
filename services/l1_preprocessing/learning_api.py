@@ -491,7 +491,10 @@ def _configured_reviewers() -> tuple[str, ...]:
     seen: set[str] = set()
     out: list[str] = []
     for h in raw.split(","):
-        handle = h.strip()
+        # Strip ``@`` defensively — the config comment says "no @",
+        # but an operator who follows the conventional @mention
+        # syntax shouldn't have their env silently break ``gh``.
+        handle = h.strip().lstrip("@")
         if handle and handle not in seen:
             seen.add(handle)
             out.append(handle)

@@ -57,9 +57,14 @@ class TestEditedPathsFromDiff:
         )
         assert _edited_paths_from_diff(diff) == ["runtime/skills/x/SKILL.md"]
 
-    def test_skips_dev_null(self) -> None:
+    def test_deletion_uses_pre_image_path(self) -> None:
+        """Previously /dev/null post-images were dropped entirely,
+        so the caller's ``git add -- *edited`` missed the deletion
+        and the commit silently lost it. Now the ``--- a/<path>``
+        pre-image is surfaced so ``git add`` stages the delete.
+        """
         diff = "--- a/foo.md\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
-        assert _edited_paths_from_diff(diff) == []
+        assert _edited_paths_from_diff(diff) == ["foo.md"]
 
     def test_dedupes(self) -> None:
         diff = (
@@ -69,6 +74,17 @@ class TestEditedPathsFromDiff:
         )
         out = _edited_paths_from_diff(diff)
         assert out == ["foo.md", "bar.md"]
+
+    def test_mixed_modify_delete_add(self) -> None:
+        """A diff with modify + delete + add must surface all three paths
+        so the caller's ``git add -- *edited`` stages each change.
+        """
+        diff = (
+            "--- a/foo.md\n+++ b/foo.md\n@@\n+x\n"
+            "--- a/baz.md\n+++ /dev/null\n@@\n-gone\n"
+            "--- /dev/null\n+++ b/new.md\n@@\n+fresh\n"
+        )
+        assert _edited_paths_from_diff(diff) == ["foo.md", "baz.md", "new.md"]
 
 
 class TestResolveAuthToken:

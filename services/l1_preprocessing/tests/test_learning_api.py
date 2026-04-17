@@ -335,6 +335,19 @@ class TestConfiguredReviewers:
         )
         assert _configured_reviewers() == ("a", "b")
 
+    def test_strips_at_prefix_defensively(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The config comment says "no @", but gh rejects ``@handle``.
+        Strip defensively so an operator following conventional
+        @mention syntax doesn't silently break the PR create.
+        """
+        from learning_api import _configured_reviewers
+        monkeypatch.setattr(
+            settings, "learning_pr_opener_reviewers", "@alice,bob,@charlie"
+        )
+        assert _configured_reviewers() == ("alice", "bob", "charlie")
+
 
 class TestAuth:
     def test_503_when_admin_token_unset(

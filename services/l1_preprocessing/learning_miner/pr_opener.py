@@ -165,22 +165,40 @@ def _stamp_lesson_id(file_path: Path, lesson_id: str) -> bool:
 
 
 def _edited_paths_from_diff(diff: str) -> list[str]:
-    """Distinct ``+++ b/<path>`` entries from a unified diff.
+    """Distinct paths referenced by a unified diff (modifies + deletes).
 
-    Used to know which files to stamp + include in the commit message
-    scope. /dev/null (file-delete) entries are skipped.
+    Used to know which files to stamp + include in the ``git add``
+    list for the commit. For modifies and additions the ``+++ b/<path>``
+    header names the post-image; for deletions the post-image is
+    ``/dev/null`` and the pre-image ``--- a/<path>`` carries the real
+    path. Without surfacing deletes, ``git add -- *edited`` would
+    stage only the modifies and the deletion would remain unstaged —
+    the commit then silently drops the delete.
     """
     paths: list[str] = []
-    for line in diff.splitlines():
-        if not line.startswith("+++ "):
+
+    def _add(path: str) -> None:
+        if path and path not in paths:
+            paths.append(path)
+
+    lines = diff.splitlines()
+    # Pair +++/--- lines so we can tell a deletion from a rename.
+    prev_minus: str | None = None
+    for line in lines:
+        if line.startswith("--- "):
+            rest = line[4:].strip()
+            prev_minus = rest[2:] if rest.startswith("a/") else rest
             continue
-        rest = line[4:].strip()
-        if rest == "/dev/null":
-            continue
-        if rest.startswith("b/"):
-            rest = rest[2:]
-        if rest and rest not in paths:
-            paths.append(rest)
+        if line.startswith("+++ "):
+            rest = line[4:].strip()
+            plus_path = rest[2:] if rest.startswith("b/") else rest
+            if plus_path == "/dev/null":
+                # Deletion: fall back to the pre-image path.
+                if prev_minus and prev_minus != "/dev/null":
+                    _add(prev_minus)
+            else:
+                _add(plus_path)
+            prev_minus = None
     return paths
 
 

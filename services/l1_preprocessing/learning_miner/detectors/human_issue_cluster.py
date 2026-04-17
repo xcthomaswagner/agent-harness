@@ -49,8 +49,17 @@ class _ClusterKey:
 
 
 def _normalize_category(value: str) -> str:
-    """Lowercase + strip; empty collapses to '(unknown)'."""
-    v = (value or "").strip().lower()
+    """Lowercase + strip; empty collapses to '(unknown)'.
+
+    Pipe characters are replaced with underscores because the
+    ``pattern_key`` format is ``<category>|<file_pattern>`` —
+    a category containing ``|`` would make ``pattern_key.split("|", 1)``
+    in ``recurrence_for`` bind ``lesson_category`` to only the
+    prefix, and the SQL ``LOWER(category) = LOWER(?)`` match would
+    miss the real rows. Sidecar sources accept free-form category
+    values, so defensive normalization is required.
+    """
+    v = (value or "").strip().lower().replace("|", "_")
     return v if v else "(unknown)"
 
 
@@ -154,8 +163,14 @@ def _build_proposed_delta(
     frequency: int,
 ) -> str:
     """Mechanical starter diff; the Markdown drafter refines it post-approval."""
-    # scan() drops rows where platform_profile resolves to None.
-    assert platform_profile, "unreachable: detector drops rows without platform"
+    # scan() drops rows where platform_profile resolves to None, but an
+    # explicit guard is safer than ``assert`` — running Python with ``-O``
+    # strips asserts, and a stripped empty check here would produce an
+    # invalid ``runtime/platform-profiles//CODE_REVIEW_SUPPLEMENT.md``
+    # path that the allowlist still accepts (double-slash normalizes)
+    # but that points at a nonexistent file.
+    if not platform_profile:
+        raise ValueError("platform_profile is required for proposed delta")
     target = (
         f"runtime/platform-profiles/{platform_profile}"
         "/CODE_REVIEW_SUPPLEMENT.md"
@@ -339,6 +354,11 @@ class HumanIssueClusterDetector:
         if "|" not in pattern_key or not client_profile:
             return 0
         lesson_category, lesson_pattern = pattern_key.split("|", 1)
+        # Normalize the DB category the same way scan() normalizes at
+        # write time: lowercase + replace ``|`` with ``_``. Without the
+        # REPLACE, a raw sidecar category like ``"security|sqli"`` in
+        # the DB wouldn't match the already-normalized lesson_category
+        # ``"security_sqli"`` — recurrence would silently return 0.
         rows = conn.execute(
             """
             SELECT ri.file_path
@@ -346,7 +366,7 @@ class HumanIssueClusterDetector:
             JOIN pr_runs pr ON pr.id = ri.pr_run_id
             WHERE ri.source = 'human_review'
               AND ri.is_valid = 1
-              AND LOWER(COALESCE(ri.category, '')) = LOWER(?)
+              AND REPLACE(LOWER(COALESCE(ri.category, '')), '|', '_') = LOWER(?)
               AND pr.client_profile = ?
               AND pr.opened_at >= ?
               AND pr.opened_at < ?

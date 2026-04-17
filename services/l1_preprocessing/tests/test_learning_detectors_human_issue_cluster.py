@@ -246,6 +246,34 @@ class TestPlatformResolution:
         assert prop.pattern_key == "documentation|"
         assert prop.scope_key == "xcsf30|salesforce|documentation|"
 
+    def test_normalizes_pipe_in_category(self, conn) -> None:
+        """Regression: sidecar categories are free-form, so a value
+        like ``"security|sqli"`` used to get embedded raw into the
+        pattern_key ``"security|sqli|*.cls"``. A downstream
+        ``pattern_key.split("|", 1)`` then bound lesson_category to
+        just ``"security"`` — recurrence_for's SQL missed the actual
+        rows (category=``"security|sqli"``). Normalize by replacing
+        ``|`` with ``_`` so the pattern_key parses cleanly.
+        """
+        for i in range(MIN_CLUSTER_SIZE):
+            pr_id = _seed_pr_run(
+                conn,
+                pr_number=i + 1,
+                ticket_id=f"T-{i+1}",
+                client_profile="xcsf30",
+            )
+            _seed_human_issue(
+                conn,
+                pr_run_id=pr_id,
+                category="security|sqli",
+                file_path=f"force-app/foo{i}.cls",
+            )
+        out = HumanIssueClusterDetector().scan(conn, window_days=14)
+        assert len(out) == 1
+        # Pipe replaced with underscore in both pattern_key and scope_key.
+        assert out[0].pattern_key == "security_sqli|*.cls"
+        assert "security_sqli|*.cls" in out[0].scope_key
+
     def test_normalizes_blank_category_to_unknown(self, conn) -> None:
         for i in range(MIN_CLUSTER_SIZE):
             pr_id = _seed_pr_run(
