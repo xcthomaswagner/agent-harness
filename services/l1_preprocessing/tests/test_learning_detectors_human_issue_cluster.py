@@ -622,6 +622,50 @@ class TestRecurrenceFor:
             conn, lesson=lesson, since_iso=since, until_iso=until,
         ) == 3
 
+    def test_counts_matching_rows_despite_outlier(self, conn) -> None:
+        """A single off-pattern file among matching ones must not suppress
+        the count.
+
+        Regression: the old implementation derived ONE file_pattern
+        from ALL fetched rows and compared it to the lesson's pattern.
+        A single ``*.html`` row among 3 ``*.cls`` rows collapsed the
+        derived pattern to ``''`` and returned 0 — as if no recurrence
+        happened. We now test each row against the lesson's pattern
+        individually.
+        """
+        detector = HumanIssueClusterDetector()
+        since = _days_ago_iso(10)
+        until = _days_ago_iso(0)
+        # 3 genuine recurrences of the lesson's pattern.
+        for i in range(3):
+            pr_id = _seed_pr_run(
+                conn,
+                pr_number=400 + i,
+                ticket_id=f"POST3-{i}",
+                client_profile="xcsf30",
+                opened_days_ago=5,
+            )
+            _seed_human_issue(
+                conn, pr_run_id=pr_id,
+                category="security", file_path=f"service{i}.cls",
+            )
+        # One unrelated issue in the same category but different extension.
+        pr_id = _seed_pr_run(
+            conn,
+            pr_number=999,
+            ticket_id="OUTLIER",
+            client_profile="xcsf30",
+            opened_days_ago=5,
+        )
+        _seed_human_issue(
+            conn, pr_run_id=pr_id,
+            category="security", file_path="landing.html",
+        )
+        lesson = self._lesson_row("security|*.cls")
+        assert detector.recurrence_for(
+            conn, lesson=lesson, since_iso=since, until_iso=until,
+        ) == 3
+
     def test_mismatched_file_pattern_returns_zero(self, conn) -> None:
         """Issues whose derived file_pattern doesn't match the lesson's
         pattern are not counted — they're recurrences of a *different* lesson.

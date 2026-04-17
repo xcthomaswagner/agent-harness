@@ -12,7 +12,15 @@ import os
 import subprocess
 from pathlib import Path
 
-_ENV_ALLOWLIST = {"PATH", "HOME", "LANG", "LC_ALL", "USER"}
+# Proxy vars MUST be forwarded so git push / gh work behind corporate
+# firewalls. Locking the allowlist to bare PATH/HOME/LANG/LC_ALL/USER
+# silently breaks those deployments — the push hangs until the
+# GIT_TERMINAL_PROMPT=0 guard forces an error with no useful message.
+_ENV_ALLOWLIST = {
+    "PATH", "HOME", "LANG", "LC_ALL", "USER",
+    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+    "https_proxy", "http_proxy", "no_proxy",
+}
 
 
 def resolve_auth_token() -> str:

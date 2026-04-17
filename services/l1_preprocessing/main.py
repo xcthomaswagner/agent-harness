@@ -153,16 +153,26 @@ async def _learning_outcomes_loop() -> None:
     that would block the event loop otherwise), sleeps the configured
     interval, repeats. Each iteration is isolated — a raised
     exception logs and the loop continues.
+
+    Sleeps BEFORE the first run rather than after, so rapid L1
+    restarts (deploy churn, crash loops) don't each fire a fresh
+    gh-polling pass. A randomized initial delay de-syncs multiple
+    L1 instances that start together.
     """
+    import random
+
     from learning_miner.outcomes import run_outcomes
 
     interval_sec = max(
         60, int(settings.learning_outcomes_interval_hours * 3600)
     )
+    initial_delay = min(interval_sec, 60 + int(random.random() * 60))
     logger.info(
         "learning_outcomes_scheduler_started",
         interval_sec=interval_sec,
+        initial_delay_sec=initial_delay,
     )
+    await asyncio.sleep(initial_delay)
     while True:
         try:
             await asyncio.to_thread(run_outcomes)

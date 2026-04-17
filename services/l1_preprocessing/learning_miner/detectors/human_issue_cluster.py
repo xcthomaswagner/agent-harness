@@ -70,6 +70,29 @@ def _resolve_platform_profile(client_profile: str) -> str | None:
     return profile.platform_profile or None
 
 
+def _path_matches_pattern(path: str, pattern: str) -> bool:
+    """True when ``path`` fits the pattern ``_derive_file_pattern`` produces.
+
+    Supports the two pattern shapes that detector emits:
+    - ``*.<ext>`` — path shares the extension
+    - ``<dir>/**`` — path's top-level directory matches
+    Empty pattern matches every non-empty path.
+    """
+    if not path:
+        return False
+    if not pattern:
+        return True
+    if pattern.startswith("*."):
+        ext = pattern[1:].lower()
+        return os.path.splitext(path)[1].lower() == ext
+    if pattern.endswith("/**"):
+        top = pattern[: -len("/**")]
+        normalized = posixpath.normpath(path)
+        first = normalized.split("/", 1)[0]
+        return first == top
+    return False
+
+
 def _derive_file_pattern(paths: list[str]) -> str:
     """Cheapest-common-denominator glob from a list of file paths.
 
@@ -302,9 +325,14 @@ class HumanIssueClusterDetector:
         The lesson's ``pattern_key`` is ``<category>|<file_pattern>``.
         We count ``review_issues`` rows with matching category whose
         pr_run falls in the post-merge window, restricted to the
-        lesson's client_profile. The file_pattern is re-derived from
-        the matched paths and compared; a mismatch means the issues
-        aren't recurrences of *this* lesson's pattern.
+        lesson's client_profile.
+
+        Each row is tested individually against the lesson's
+        file_pattern — previously we derived ONE pattern from all rows
+        and compared, but a single outlier file_path collapsed the
+        derived pattern to ``''`` and the comparison returned 0 even
+        when most rows genuinely recurred. Per-row testing counts the
+        matching recurrences while ignoring unrelated noise.
         """
         pattern_key = str(lesson["pattern_key"] or "")
         client_profile = str(lesson["client_profile"] or "")
@@ -327,12 +355,17 @@ class HumanIssueClusterDetector:
         ).fetchall()
         if not rows:
             return 0
-        matched_pattern = _derive_file_pattern(
-            [str(r["file_path"] or "") for r in rows]
+        if not lesson_pattern:
+            # Lessons without a specific file pattern can't be
+            # file-filtered; count every matching-category row.
+            return len(rows)
+        return sum(
+            1
+            for r in rows
+            if _path_matches_pattern(
+                str(r["file_path"] or ""), lesson_pattern
+            )
         )
-        if matched_pattern != lesson_pattern:
-            return 0
-        return len(rows)
 
     def _build_evidence(
         self, key: _ClusterKey, evidence_rows: list[sqlite3.Row]

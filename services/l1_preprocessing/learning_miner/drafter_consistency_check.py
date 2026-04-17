@@ -160,18 +160,56 @@ def _build_user_prompt(current_content: str, unified_diff: str) -> str:
 
 
 def _parse_verdict_json(text: str) -> dict[str, Any] | None:
-    """Pull the first JSON object out of the model response."""
+    """Pull the first JSON object out of the model response.
+
+    Greedy outermost ``{...}`` matching broke when the model emitted
+    two objects back-to-back (``{"a":1} {"b":2}``) — the slice from
+    first ``{`` to last ``}`` straddled both and failed to parse. We
+    now scan for the first balanced object instead, tolerating brace
+    characters inside strings.
+    """
     text = text.strip()
     fenced = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
     candidate = fenced.group(1).strip() if fenced else text
-    # Grab the outermost ``{...}`` to tolerate leading/trailing prose
-    # even without a fence.
-    start = candidate.find("{")
-    end = candidate.rfind("}")
-    if start < 0 or end < 0 or end < start:
+    obj_str = _extract_first_balanced_object(candidate)
+    if obj_str is None:
         return None
     try:
-        obj = json.loads(candidate[start : end + 1])
+        obj = json.loads(obj_str)
     except json.JSONDecodeError:
         return None
     return obj if isinstance(obj, dict) else None
+
+
+def _extract_first_balanced_object(text: str) -> str | None:
+    """Return the first balanced ``{...}`` span, skipping string contents.
+
+    Tracks brace depth while ignoring ``{`` / ``}`` that appear inside
+    double-quoted JSON strings (with backslash-escape awareness).
+    Returns None when no balanced object is found.
+    """
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None

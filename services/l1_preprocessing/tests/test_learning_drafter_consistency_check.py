@@ -52,6 +52,28 @@ class TestParseVerdictJson:
     def test_empty_returns_none(self) -> None:
         assert _parse_verdict_json("") is None
 
+    def test_multiple_objects_returns_first(self) -> None:
+        """Regression: greedy outermost ``{`` / ``}`` matching produced
+        an invalid slice spanning both objects and returned None. Now
+        we scan for the first balanced object instead.
+        """
+        obj = _parse_verdict_json(
+            '{"contradicts": false} {"stray": "second object"}'
+        )
+        assert obj == {"contradicts": False}
+
+    def test_braces_in_string_values(self) -> None:
+        """Braces inside quoted JSON strings must not confuse the depth
+        tracker — otherwise a reasoning field mentioning ``{braces}``
+        would prematurely close the object.
+        """
+        obj = _parse_verdict_json(
+            '{"reasoning": "saw a {nested} brace", "contradicts": true}'
+        )
+        assert obj is not None
+        assert obj["contradicts"] is True
+        assert "{nested}" in obj["reasoning"]
+
 
 class TestCheckerDisabled:
     async def test_disabled_returns_noop_verdict(
