@@ -172,15 +172,18 @@ def _stamp_lesson_id(file_path: Path, lesson_id: str) -> bool:
 
 
 def _edited_paths_from_diff(diff: str) -> list[str]:
-    """Distinct paths referenced by a unified diff (modifies + deletes).
+    """Distinct paths referenced by a unified diff (adds + modifies +
+    deletes + both sides of a rename).
 
     Used to know which files to stamp + include in the ``git add``
     list for the commit. For modifies and additions the ``+++ b/<path>``
     header names the post-image; for deletions the post-image is
     ``/dev/null`` and the pre-image ``--- a/<path>`` carries the real
-    path. Without surfacing deletes, ``git add -- *edited`` would
-    stage only the modifies and the deletion would remain unstaged —
-    the commit then silently drops the delete.
+    path. For renames, both the ``rename from`` (old) and ``rename
+    to`` (new) paths are surfaced so ``git add`` stages the deletion
+    of the old path alongside the new file — otherwise the rename
+    commit only carries the addition and git-status shows the old
+    path as unstaged-deleted.
     """
     paths: list[str] = []
 
@@ -192,6 +195,12 @@ def _edited_paths_from_diff(diff: str) -> list[str]:
     # Pair +++/--- lines so we can tell a deletion from a rename.
     prev_minus: str | None = None
     for line in lines:
+        if line.startswith("rename from "):
+            _add(line[len("rename from ") :].strip())
+            continue
+        if line.startswith("rename to "):
+            _add(line[len("rename to ") :].strip())
+            continue
         if line.startswith("--- "):
             rest = line[4:].strip()
             prev_minus = rest[2:] if rest.startswith("a/") else rest

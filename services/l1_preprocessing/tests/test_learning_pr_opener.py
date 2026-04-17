@@ -86,6 +86,26 @@ class TestEditedPathsFromDiff:
         )
         assert _edited_paths_from_diff(diff) == ["foo.md", "baz.md", "new.md"]
 
+    def test_rename_surfaces_both_old_and_new_path(self) -> None:
+        """Regression: a rename diff used to surface only the
+        ``+++ b/new.md`` post-image. ``git add -- new.md`` staged the
+        add but left the deletion of ``old.md`` unstaged — the commit
+        carried the new file but not the rename. Both paths now
+        surface so ``git add`` stages both sides.
+        """
+        diff = (
+            "diff --git a/runtime/skills/old.md b/runtime/skills/new.md\n"
+            "similarity index 95%\n"
+            "rename from runtime/skills/old.md\n"
+            "rename to runtime/skills/new.md\n"
+            "--- a/runtime/skills/old.md\n"
+            "+++ b/runtime/skills/new.md\n"
+            "@@\n-x\n+y\n"
+        )
+        paths = _edited_paths_from_diff(diff)
+        assert "runtime/skills/old.md" in paths
+        assert "runtime/skills/new.md" in paths
+
 
 class TestResolveAuthToken:
     """resolve_auth_token precedence + whitespace handling."""

@@ -32,7 +32,7 @@ from typing import Any, Literal
 
 import structlog
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ValidationError, field_validator
 
 from autonomy_ingest import _guard_admin_request
 from autonomy_store import (
@@ -207,9 +207,19 @@ def _transition(
 
 
 def _parse_body(body: bytes, model: type[BaseModel]) -> Any:
+    """Validate a request body against a Pydantic model.
+
+    Narrowed the exception catch: Pydantic's
+    ``model_validate_json`` raises ``ValidationError`` (and inside it
+    can bubble ``json.JSONDecodeError`` / ``UnicodeDecodeError`` for
+    malformed payloads). Catching bare ``Exception`` used to swallow
+    arbitrary bugs — an AttributeError from a misconfigured model
+    definition, for instance — as a 422 that looks like user error.
+    Now those propagate as 500 so they surface in monitoring.
+    """
     try:
         return model.model_validate_json(body or b"{}")
-    except Exception as exc:
+    except (ValidationError, ValueError, UnicodeDecodeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
