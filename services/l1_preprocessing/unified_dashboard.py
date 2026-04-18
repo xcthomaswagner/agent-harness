@@ -267,9 +267,15 @@ def _render_recent_traces() -> str:
         dur_html = _e(duration) if duration else '<span class="meta">&mdash;</span>'
         started = _fmt_ts(t.get("started_at", ""))
 
+        live_link = (
+            f' <a href="/traces/{tid}/live" title="Live activity stream" '
+            f'onclick="event.stopPropagation()" '
+            f'style="margin-left:0.4rem;font-size:0.8rem;">live</a>'
+        )
         rows_html += (
             f'<tr onclick="location.href=\'/traces/{tid}\'" style="cursor:pointer">'
-            f'<td><a href="/traces/{tid}" style="font-weight:500">{tid}</a></td>'
+            f'<td><a href="/traces/{tid}" style="font-weight:500">{tid}</a>'
+            f"{live_link}</td>"
             f"<td>{_badge(status, badge_cls)}</td>"
             f"<td>{mode_html}</td>"
             f"<td>{pr_html}</td>"

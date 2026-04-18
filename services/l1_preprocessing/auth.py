@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hmac
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 
 
 def _require_api_key(x_api_key: str | None = Header(default=None)) -> None:
@@ -56,6 +56,37 @@ def _require_dashboard_auth(x_api_key: str | None = Header(default=None)) -> Non
         if not x_api_key or not hmac.compare_digest(x_api_key, settings.api_key):
             raise HTTPException(
                 status_code=401, detail="Invalid or missing X-API-Key"
+            )
+        return
+    if settings.dashboard_allow_anonymous:
+        return
+    raise HTTPException(status_code=503, detail="Dashboard auth not configured")
+
+
+def _require_dashboard_auth_query_or_header(
+    request: Request,
+    x_api_key: str | None = Header(default=None),
+) -> None:
+    """Same policy as ``_require_dashboard_auth`` but also accepts
+    ``?api_key=...`` query string.
+
+    The query-param path exists because the browser ``EventSource``
+    API cannot send custom headers. It is less secure than the header
+    form (the key lands in server access logs, browser history, and
+    any intermediate proxy logs) — so use only for the live-stream
+    endpoint and the HTML page that bootstraps it. Document the
+    tradeoff in the route docstrings.
+
+    Header wins when both are present. Comparison uses
+    ``hmac.compare_digest`` so the check is constant-time.
+    """
+    import main  # local import dodges module-load circular import
+    settings = main.settings
+    effective = x_api_key or request.query_params.get("api_key")
+    if settings.api_key:
+        if not effective or not hmac.compare_digest(effective, settings.api_key):
+            raise HTTPException(
+                status_code=401, detail="Invalid or missing API key"
             )
         return
     if settings.dashboard_allow_anonymous:

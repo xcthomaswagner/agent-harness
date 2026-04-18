@@ -76,6 +76,11 @@ def _open_phase1_dev_defaults(
     """
     monkeypatch.setattr(main.settings, "allow_unsigned_webhooks", True)
     monkeypatch.setattr(main.settings, "dashboard_allow_anonymous", True)
+    # Also neutralize ``api_key`` so a real ``.env`` API_KEY value on the
+    # developer's machine doesn't 401 the auth-ed endpoints under test.
+    # Tests that specifically exercise the key-required path set
+    # ``api_key`` explicitly inside their own block.
+    monkeypatch.setattr(main.settings, "api_key", "")
 
 
 @pytest.fixture
