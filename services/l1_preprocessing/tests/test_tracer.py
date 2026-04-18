@@ -1174,16 +1174,21 @@ class TestRedactEntryInPlace:
         # Sibling tool_counts must not be touched.
         assert entry["index"]["tool_counts"] == {"Bash": 1}
 
-    def test_does_not_touch_unknown_fields(self) -> None:
+    def test_redacts_unknown_fields_via_recursive_walk(self) -> None:
+        """Phase 2 change: the redactor now walks recursively across
+        every reachable string, not just a fixed top-level allowlist.
+        An unknown field containing a known-shape credential gets
+        redacted. The allowlist in ``_REDACT_IMPORTED_FIELDS`` is
+        retained as a contributor hint (and for the seeded scenarios
+        older tests reference), but the walk is the single source of
+        truth — anything reachable from the entry dict is covered."""
         secret = "sk-ant-api03-" + "C" * 40
-        # `custom_field` is NOT in _REDACT_IMPORTED_FIELDS — it's the
-        # caller's responsibility to add fields to the frozenset. The
-        # helper's contract is "walk the known set," not "find every
-        # string anywhere," so this unknown field must pass through.
         entry: dict = {"custom_field": secret, "event": "raw"}
         n = redact_entry_in_place(entry)
-        assert n == 0
-        assert entry["custom_field"] == secret
+        assert n >= 1
+        assert secret not in entry["custom_field"]
+        # Metadata key ``event`` is in the skip set and untouched.
+        assert entry["event"] == "raw"
 
 
 class TestRunStartIdxKwarg:

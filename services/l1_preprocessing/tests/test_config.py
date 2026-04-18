@@ -40,7 +40,7 @@ class TestSettings:
         its name should be stripped from agent environments."""
         import sys
         sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
-        from shared.env_sanitize import SECRET_VARS
+        from shared.env_sanitize import _is_secret
 
         secret_keywords = {"key", "token", "secret", "pat"}
         settings_fields = Settings.model_fields
@@ -50,6 +50,10 @@ class TestSettings:
             # Match on word boundaries so e.g. "path" doesn't match "pat"
             parts = set(field_name.lower().split("_"))
             has_secret_keyword = bool(parts & secret_keywords)
-            if has_secret_keyword and env_name not in SECRET_VARS:
+            # ``_is_secret`` combines the explicit SECRET_VARS allowlist
+            # with the suffix denylist (``_TOKEN``, ``_SECRET``, etc.).
+            # A field qualifies as covered if either mechanism catches
+            # its uppercased name.
+            if has_secret_keyword and not _is_secret(env_name):
                 missing.append(env_name)
         assert not missing, f"Secret fields missing from SECRET_VARS: {missing}"

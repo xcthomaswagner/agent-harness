@@ -24,11 +24,10 @@ LOGS_DIR = Path(__file__).resolve().parents[2] / "data" / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Fields in imported pipeline.jsonl entries that may contain tool output /
-# error content and therefore may leak credentials. Redacted on import.
-# Kept top-level-only on purpose: the simpler code path catches the
-# reviewer's seeded scenarios (tool_result / debug_payload / stderr / etc.)
-# without the complexity of recursive JSON walking, and nested leaks are
-# rare in practice because agent tooling writes flat entries.
+# error content and therefore may leak credentials. These are documented
+# hints for contributors — the actual redaction path walks recursively
+# across every string value in the entry so new fields don't need to be
+# added here to be covered.
 _REDACT_IMPORTED_FIELDS = frozenset({
     "content",      # already redacted by the legacy path — safe to include
     "data",
@@ -43,19 +42,81 @@ _REDACT_IMPORTED_FIELDS = frozenset({
     "evidence",     # diagnostic checklist outputs
 })
 
+# Keys whose values are plain metadata and should NEVER be mutated by
+# the recursive redactor. ``trace_id`` / ``ticket_id`` / ``phase`` /
+# ``event`` are deterministic identifiers — redacting them on a false
+# positive would break dedup and dashboards. Timestamps are ISO 8601
+# strings and have no credential shape.
+_RECURSE_SKIP_KEYS = frozenset({
+    "trace_id",
+    "ticket_id",
+    "timestamp",
+    "phase",
+    "event",
+    "source",
+    "billing",
+    "status",
+    "ticket_title",
+})
+
+
+def _redact_recursive(obj: Any) -> tuple[Any, int]:
+    """Walk ``obj`` (dict/list/str/anything) and redact every string
+    value reachable from it.
+
+    Returns ``(new_obj, count)``. The ``count`` is the total number of
+    redaction-pattern matches made. Dicts and lists are mutated in
+    place so callers that already held references keep seeing the
+    redacted content; strings can't be mutated so the caller is
+    responsible for putting the returned string back.
+
+    Skips well-known metadata keys (``trace_id``, ``timestamp``, etc.)
+    so false positives from the entropy pass can't corrupt identifier
+    fields downstream dashboards rely on for dedup / ordering.
+
+    Previously the tracer only redacted a fixed top-level allowlist of
+    fields. That fixed list meant any agent step writing a credential
+    into a sibling field — or into a nested dict under ``error_context``
+    / ``details`` / ``tool_result`` / etc. — landed in the trace store
+    verbatim. The recursive walk catches the nested case too, which
+    matters in practice: ``error_context`` is a dict with ``stderr``
+    inside it, and the old flat walk skipped the stderr body because
+    it was one level down.
+    """
+    if isinstance(obj, str):
+        if not obj:
+            return obj, 0
+        redacted, n = redact(obj)
+        return redacted, n
+    if isinstance(obj, dict):
+        total = 0
+        for key, value in list(obj.items()):
+            if key in _RECURSE_SKIP_KEYS:
+                continue
+            new_value, n = _redact_recursive(value)
+            if n:
+                obj[key] = new_value
+                total += n
+        return obj, total
+    if isinstance(obj, list):
+        total = 0
+        for i, value in enumerate(obj):
+            new_value, n = _redact_recursive(value)
+            if n:
+                obj[i] = new_value
+                total += n
+        return obj, total
+    # Numbers, bools, None — nothing to redact.
+    return obj, 0
+
 
 def redact_entry_in_place(entry: dict[str, Any]) -> int:
-    """Redact every known-risky string pocket in a trace entry in place.
+    """Redact every reachable string pocket in a trace entry in place.
 
-    Walks:
-
-    1. Every top-level string field listed in ``_REDACT_IMPORTED_FIELDS``
-       (content, data, error, message, output, stderr, stdout,
-       debug_payload, tool_result, details, evidence).
-    2. The nested ``entry['index']['first_tool_error']['message']`` pocket,
-       which tool_index artifact entries use to store the first failing
-       tool call's raw output (up to 500 chars). This can contain live
-       access tokens echoed by CLIs like ``sf org display --json``.
+    Walks the entry recursively — any nested dict/list/string is
+    scanned, regardless of the field name. Metadata keys
+    (``trace_id`` / ``timestamp`` / ``phase`` / ``event``) are skipped
+    so deterministic identifiers stay intact.
 
     Returns the total number of redact-pattern matches made across all
     fields. The entry is mutated in place; callers that need to compare
@@ -64,31 +125,10 @@ def redact_entry_in_place(entry: dict[str, Any]) -> int:
     This helper is the single source of truth for "what constitutes an
     entry's redactable surface area." Both the import path
     (``consolidate_worktree_logs``) and the rescan path
-    (``POST /admin/re-redact`` in ``main.py``) call it so that new
-    risky fields added to ``_REDACT_IMPORTED_FIELDS`` automatically
-    cover both directions without drift.
+    (``POST /admin/re-redact`` in ``main.py``) call it so the two
+    directions stay in sync automatically.
     """
-    total = 0
-
-    for field_name in _REDACT_IMPORTED_FIELDS:
-        value = entry.get(field_name)
-        if isinstance(value, str) and value:
-            redacted_value, n = redact(value)
-            if n:
-                entry[field_name] = redacted_value
-                total += n
-
-    index = entry.get("index")
-    if isinstance(index, dict):
-        first_err = index.get("first_tool_error")
-        if isinstance(first_err, dict):
-            msg = first_err.get("message")
-            if isinstance(msg, str) and msg:
-                redacted_msg, n = redact(msg)
-                if n:
-                    first_err["message"] = redacted_msg
-                    total += n
-
+    _, total = _redact_recursive(entry)
     return total
 
 
