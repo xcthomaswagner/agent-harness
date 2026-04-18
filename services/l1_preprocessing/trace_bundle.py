@@ -621,7 +621,17 @@ async def trace_artifact(ticket_id: str, artifact_type: str) -> Response:
         try:
             body = stream_path.read_bytes()
         except OSError as exc:
-            raise HTTPException(status_code=500, detail=f"read failed: {exc}") from exc
+            # Phase 7: don't leak filesystem paths in the response
+            # body. OSError's ``str`` typically includes the absolute
+            # path and errno; we log the full exc_info for operators
+            # and return a generic message to the caller.
+            logger.exception(
+                "session_stream_read_failed",
+                stream_path=str(stream_path),
+            )
+            raise HTTPException(
+                status_code=500, detail="Failed to read artifact"
+            ) from exc
         # Force a download rather than letting the browser try to render a
         # multi-MB JSONL blob as a syntax-highlighted JSON document in a new
         # tab. The dashboard Raw Downloads panel expects a file save.

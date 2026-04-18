@@ -63,6 +63,7 @@ from claim_store import _webhook_counters as _webhook_counters
 from claim_store import _webhook_counters_lock as _webhook_counters_lock
 from client_profile import find_profile_by_ado_project as find_profile_by_ado_project
 from completion import _BRANCH_PATTERN as _BRANCH_PATTERN
+from completion import _is_safe_branch as _is_safe_branch
 from completion import _TICKET_ID_PATTERN as _TICKET_ID_PATTERN
 from completion import _VALID_PHASES as _VALID_PHASES
 from completion import CompletionPayload as CompletionPayload
@@ -339,14 +340,16 @@ async def _process_ticket(ticket: TicketPayload, trace_id: str = "") -> None:
 
 @app.get("/health")
 async def health() -> dict[str, object]:
-    """Health check.
+    """Health check — minimal liveness probe.
 
     Intentionally returns only liveness status — no secret-presence
-    booleans. Phase 1: prior fields like ``webhook_secret`` and
-    ``anthropic_api_key`` leaked information about which credentials
-    were configured to any unauthenticated caller that could probe
-    the endpoint. Operators checking config should look at startup
-    logs (warnings + errors for missing / open-mode config) instead.
+    booleans. Previously this endpoint returned flags per configured
+    secret (anthropic_api_key, jira_configured, ado_configured, etc.)
+    reachable without auth, which told an attacker exactly which
+    integrations were wired up — useful for targeting. Operators
+    checking config should look at startup logs (warnings + errors
+    for missing / open-mode config) or the API-key-protected
+    /stats/webhooks endpoint.
     """
     return {"status": "ok"}
 

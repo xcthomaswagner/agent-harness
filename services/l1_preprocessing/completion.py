@@ -51,6 +51,41 @@ _TICKET_ID_PATTERN = re.compile(r"^[A-Za-z0-9]+-[0-9]+$")
 # Path.is_relative_to as the real guardrail; this regex is belt-and-
 # braces so a bad branch fails fast at input validation.
 _BRANCH_PATTERN = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9/_.-]*$")
+
+# Phase 7: reserved git ref names that the character-class pattern
+# above doesn't catch. ``HEAD`` and friends pass the regex but can
+# resolve to surprising paths inside ``.git/``; ``*.lock`` is git's
+# in-progress ref lock convention and writing through such a name
+# breaks concurrent ref updates; leading/trailing ``/`` and the
+# literal ``.git`` open other git-internal paths.
+_RESERVED_BRANCH_NAMES = frozenset({
+    "HEAD", "ORIG_HEAD", "FETCH_HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD"
+})
+
+
+def _is_safe_branch(name: str) -> bool:
+    """Return True when the name is safe to use as a worktree branch.
+
+    Combines the character-class ``_BRANCH_PATTERN`` with rejection
+    of git-reserved ref names (``HEAD``/``ORIG_HEAD``/etc.), the
+    ``.lock`` suffix (git's in-progress ref-lock convention), and
+    leading/trailing slash. Belt-and-braces: callers that also
+    resolve the resulting path against a containment root catch
+    the remaining traversal vectors.
+    """
+    if not name or not _BRANCH_PATTERN.match(name):
+        return False
+    if name in _RESERVED_BRANCH_NAMES:
+        return False
+    if name == ".git":
+        return False
+    if name.startswith("/") or name.endswith("/"):
+        return False
+    if name.endswith(".lock"):
+        return False
+    return True
+
+
 _VALID_PHASES = {"qa", "e2e", "review"}
 
 
@@ -79,7 +114,7 @@ def _resolve_worktree_dir(client_repo: str, branch: str) -> Path:
     the semantics of "worktree doesn't exist yet" vs "branch is
     invalid" differ across the two endpoints.
     """
-    if not branch or not _BRANCH_PATTERN.match(branch):
+    if not _is_safe_branch(branch):
         raise HTTPException(
             status_code=400,
             detail="Invalid branch name (alphanumeric, slashes, dots, hyphens only)",

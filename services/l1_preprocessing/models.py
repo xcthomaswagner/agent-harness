@@ -161,8 +161,26 @@ class TicketPayload(BaseModel):
     priority: str = ""
     assignee: str = ""
     callback: CallbackConfig | None = None
+    # DEFERRED (Phase 7 polish): ``raw_payload`` carries the entire
+    # original webhook body forward through normalize → enrich → queue
+    # → ticket.json → spawn. It is a memory and disk cost (a typical
+    # Jira payload is 15-40 KB; ADO system webhooks are bigger) and,
+    # more importantly, it is only read by one caller: the edge-
+    # detection in ``main.ado_webhook`` — and that caller reads the
+    # raw webhook payload dict directly (see ``extract_tag_transition``
+    # there), NOT ``ticket.raw_payload``.
+    #
+    # So the field is effectively vestigial. The fix is to either clear
+    # it after normalization or remove it outright — but both are
+    # risky changes for a polish pass. model_dump_json serialization
+    # currently inlines the entire raw payload into ticket.json, which
+    # the agent session reads, and any downstream caller (prompts,
+    # skills, queue_worker) that happens to read `raw_payload` would
+    # silently break.
+    #
+    # Leaving as-is for now. Tracked for a dedicated follow-up pass.
     raw_payload: dict[str, object] = Field(
-        default_factory=dict, description="Original webhook payload"
+        default_factory=dict, description="Original webhook payload (legacy — see comment above)"
     )
 
 

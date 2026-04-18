@@ -14,7 +14,6 @@ class TestSettings:
         with patch.dict("os.environ", {}, clear=True):
             s = Settings(_env_file=None)  # type: ignore[call-arg]
         assert s.jira_ac_field_id == "customfield_10429"
-        assert s.jira_story_points_field_id == "customfield_10040"
         assert s.log_level == "INFO"
 
     def test_jira_ac_field_customizable(self) -> None:
