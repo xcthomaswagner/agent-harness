@@ -595,7 +595,16 @@ _LIVE_PAGE_TEMPLATE = """<!doctype html>
 </style>
 </head>
 <body>
-  <h1>Live activity — {ticket_id}</h1>
+  <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:0.5rem">
+    <h1>Live activity — {ticket_id}</h1>
+    <div class="meta" style="font-size:0.85rem">
+      <a href="/dashboard">Dashboard</a> |
+      <a href="/traces">Traces</a> |
+      <a href="/autonomy">Autonomy</a> |
+      <a href="/autonomy/learning">Learning</a> |
+      <a href="/traces/{ticket_id}">Full trace</a>
+    </div>
+  </div>
   <div id="connStatus" class="banner info">Connecting…</div>
   <div class="header">
     <div class="stat"><span class="label">Last activity</span><span class="val" id="lastActivity"><span class="dot red"></span>—</span></div>
