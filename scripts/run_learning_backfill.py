@@ -96,9 +96,16 @@ def _open_dry_run_conn(db_path: str) -> tuple[object, Path, Path]:
 
 
 def _load_detectors():
-    from learning_miner.detectors.human_issue_cluster import build as build_hic
+    """Return fresh instances of every registered production detector.
 
-    return [build_hic()]
+    Delegates to ``learning_miner.all_production_detectors`` so the
+    backfill script and the nightly miner stay in lock-step. Prior
+    versions only loaded the ``human_issue_cluster`` detector — a
+    silent bug that kept every other detector out of the backfill.
+    """
+    from learning_miner import all_production_detectors
+
+    return list(all_production_detectors())
 
 
 def _top_scope_keys(conn, limit: int = 10) -> list[tuple[str, int]]:
