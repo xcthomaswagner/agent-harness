@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import subprocess
 import threading
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+import spawner
 from spawner import SessionSpawner, _is_safe_branch
 
 
@@ -314,3 +318,156 @@ class TestWatchdogZombieReap:
             if c.args and c.args[0] == "l3_session_unreapable"
         ]
         assert error_calls, "l3_session_unreapable must be logged when second wait times out"
+
+
+# --- Task 3.3: per-PR file-lock claim for concurrent spawn prevention ---
+#
+# Bug: GitHub retries failed webhook deliveries with NEW X-GitHub-Delivery
+# IDs, bypassing _processed_deliveries dedup. Two concurrent
+# spawn_pr_review invocations on the same PR then race on
+# git fetch/git checkout inside the shared worktree, corrupting branch
+# state. Fix: before spawning, acquire a file-lock on
+# <logs>/.spawn-claims/pr-<repo>-<pr>-pr-review.lock. The second
+# concurrent spawn sees the lock held and returns early.
+
+
+class TestSpawnClaim:
+    """Ensure concurrent spawns on the same PR serialize; different PRs
+    run in parallel; the lock is released after the spawn exits."""
+
+    def test_concurrent_spawns_same_pr_only_one_succeeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two threads invoke spawn_pr_review at the same time; only
+        the first acquires the claim. The second returns False with
+        a pr_review_spawn_already_in_progress log event."""
+        # Redirect the module-level LOGS_DIR so we don't collide with
+        # a real production logs dir.
+        monkeypatch.setattr(spawner, "LOGS_DIR", tmp_path)
+        (tmp_path / ".spawn-claims").mkdir(parents=True, exist_ok=True)
+
+        s = SessionSpawner(repo_path=str(tmp_path))
+
+        # Gate the first spawn's subprocess.Popen on a threading.Event
+        # so its claim stays held while the second spawn attempts.
+        started = threading.Event()
+        proceed = threading.Event()
+
+        def _slow_popen(*args: object, **kwargs: object) -> MagicMock:
+            started.set()
+            proceed.wait(timeout=5)
+            # Return a mock proc so the watchdog thread can wait on it
+            proc = MagicMock()
+            proc.pid = 12345
+            proc.wait = MagicMock(return_value=0)
+            proc.kill = MagicMock()
+            return proc
+
+        results: dict[str, bool] = {}
+
+        def _call_first() -> None:
+            with patch("spawner.subprocess.Popen", side_effect=_slow_popen):
+                results["first"] = s.spawn_pr_review(
+                    pr_number=42, pr_diff="", ticket_context="",
+                    repo="acme/project",
+                )
+
+        t1 = threading.Thread(target=_call_first)
+        t1.start()
+        assert started.wait(timeout=5), "first spawn never reached Popen"
+
+        # At this point thread 1 is holding the claim (inside
+        # subprocess.Popen, before the watchdog starts). Thread 2's
+        # claim attempt must fail.
+        with patch("spawner.subprocess.Popen") as second_popen:
+            results["second"] = s.spawn_pr_review(
+                pr_number=42, pr_diff="", ticket_context="",
+                repo="acme/project",
+            )
+        # Thread 2 never got to Popen
+        assert second_popen.call_count == 0, (
+            "second spawn bypassed the claim lock and called Popen"
+        )
+        assert results["second"] is False, (
+            "second spawn must return False when the claim is held"
+        )
+
+        # Release thread 1 so it finishes
+        proceed.set()
+        t1.join(timeout=5)
+        assert results["first"] is True
+
+    def test_different_prs_spawn_in_parallel(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PR 1 and PR 2 have separate claim files → both can spawn."""
+        monkeypatch.setattr(spawner, "LOGS_DIR", tmp_path)
+        (tmp_path / ".spawn-claims").mkdir(parents=True, exist_ok=True)
+        s = SessionSpawner(repo_path=str(tmp_path))
+
+        def _quick_popen(*args: object, **kwargs: object) -> MagicMock:
+            proc = MagicMock()
+            proc.pid = 1111
+            proc.wait = MagicMock(return_value=0)
+            return proc
+
+        with patch("spawner.subprocess.Popen", side_effect=_quick_popen):
+            r1 = s.spawn_pr_review(
+                pr_number=1, pr_diff="", ticket_context="", repo="acme/project",
+            )
+            r2 = s.spawn_pr_review(
+                pr_number=2, pr_diff="", ticket_context="", repo="acme/project",
+            )
+        assert r1 is True and r2 is True
+
+    def test_claim_released_after_spawn_exits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After the first spawn's watchdog exits, a second spawn on
+        the same PR can succeed."""
+        monkeypatch.setattr(spawner, "LOGS_DIR", tmp_path)
+        (tmp_path / ".spawn-claims").mkdir(parents=True, exist_ok=True)
+        s = SessionSpawner(repo_path=str(tmp_path))
+
+        # First spawn — watchdog runs to completion quickly.
+        proc1 = MagicMock()
+        proc1.pid = 1001
+        proc1.wait = MagicMock(return_value=0)
+
+        with patch("spawner.subprocess.Popen", return_value=proc1):
+            r1 = s.spawn_pr_review(
+                pr_number=99, pr_diff="", ticket_context="",
+                repo="acme/project",
+            )
+        assert r1 is True
+
+        # Let the watchdog thread run to completion so it releases
+        # the claim. The watchdog is a daemon thread — we need to
+        # poll for the claim release rather than joining (no handle).
+        import time
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            # Poll for the claim file being unlocked by trying to
+            # acquire it. If we can, the watchdog has finished.
+            fd = spawner._try_claim_pr_session(
+                tmp_path, "acme/project", 99, "pr-review"
+            )
+            if fd is not None:
+                spawner._release_pr_claim(fd)
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError(
+                "Claim was never released by the first spawn's watchdog"
+            )
+
+        # Second spawn on the same PR — should now succeed.
+        proc2 = MagicMock()
+        proc2.pid = 1002
+        proc2.wait = MagicMock(return_value=0)
+        with patch("spawner.subprocess.Popen", return_value=proc2):
+            r2 = s.spawn_pr_review(
+                pr_number=99, pr_diff="", ticket_context="",
+                repo="acme/project",
+            )
+        assert r2 is True

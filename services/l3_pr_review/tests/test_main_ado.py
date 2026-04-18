@@ -170,3 +170,167 @@ async def test_ado_build_webhook_failed() -> None:
     assert resp.status_code == 202
     body = resp.json()
     assert body["event_type"] == "ci_failed"
+
+
+# --- Task 3.2: ADO build webhook build_sha staleness check ---
+#
+# Before Phase 3 the ADO build webhook called evaluate_and_maybe_merge_ado
+# with head_sha="" unconditionally. That meant a force-push that landed
+# between CI start and CI complete silently merged stale code. Fix:
+# extract sourceVersion from the build payload and pass it as head_sha;
+# _evaluate_core skips with reason "build_sha_stale" if it no longer
+# matches the PR's current head.
+
+
+def _ado_build_payload(source_version: str = "") -> dict[str, object]:
+    """ADO build.complete payload with optional sourceVersion."""
+    resource: dict[str, object] = {
+        "id": 999,
+        "result": "succeeded",
+        "reason": "pullRequest",
+        "triggerInfo": {"pr.number": "42"},
+        "repository": {"id": "repo-id"},
+        "project": {"name": "my-project"},
+        "sourceBranch": "refs/heads/ai/TICKET-55",
+    }
+    if source_version:
+        resource["sourceVersion"] = source_version
+    return {
+        "eventType": "build.complete",
+        "resource": resource,
+        "resourceContainers": {
+            "collection": {"baseUrl": "https://dev.azure.com/org"},
+        },
+    }
+
+
+@pytest.mark.usefixtures("_no_ado_token")
+async def test_ado_build_sha_matches_proceeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the build's sourceVersion matches the PR's current head sha,
+    _evaluate_core proceeds past the stale-sha guard and runs the full
+    policy evaluation (which may then skip for other reasons like
+    ticket_type not in low_risk, but crucially is reached).
+
+    We assert by checking _record_decision received a decision that is
+    NOT the build_sha_stale marker. The stale-sha skip short-circuits
+    before reaching _record_decision, so hitting it is proof the sha
+    check passed.
+    """
+    import auto_merge
+    import autonomy_policy as ap
+
+    auto_merge._clear_dedup()
+    ap._cache_clear()
+    monkeypatch.setenv("AUTO_MERGE_ENABLED", "false")
+
+    # Mock all downstream fetches so _evaluate_core actually runs
+    monkeypatch.setattr(
+        auto_merge, "fetch_profile_by_repo",
+        AsyncMock(return_value={
+            "client_profile": "acme",
+            "low_risk_ticket_types": ["bug"],
+            "auto_merge_enabled_yaml": True,
+        }),
+    )
+    monkeypatch.setattr(
+        auto_merge, "fetch_recommended_mode",
+        AsyncMock(return_value=("semi_autonomous", "good")),
+    )
+    monkeypatch.setattr(
+        auto_merge, "fetch_auto_merge_enabled", AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        auto_merge, "get_ado_pr_state",
+        AsyncMock(return_value={
+            "author": "xcagentrockwell",
+            "merged": False, "mergeable": True, "mergeable_state": "clean",
+            "head_sha": "matching_sha",  # matches webhook build_sha below
+            "approvals_count": 1, "human_approvals_count": 1,
+            "changes_requested_count": 0, "checks_passed": True,
+            "labels": ["bug"],
+        }),
+    )
+    merger = AsyncMock(return_value=(True, "merged"))
+    monkeypatch.setattr(auto_merge, "complete_ado_pr", merger)
+    record_decision = AsyncMock()
+    monkeypatch.setattr(auto_merge, "_record_decision", record_decision)
+
+    payload = _ado_build_payload(source_version="matching_sha")
+    from main import _handle_ado_build_complete
+    await _handle_ado_build_complete(payload)
+
+    # _record_decision being called at all means we made it past the
+    # stale-sha check — the stale-sha branch returns before reaching
+    # record_decision.
+    assert record_decision.call_count >= 1, (
+        "build_sha_stale short-circuited before policy evaluation — "
+        "matching sha should NOT trigger stale skip"
+    )
+    call_reason = record_decision.call_args.kwargs.get("reason", "")
+    assert call_reason != "build_sha_stale", (
+        f"matching sha was treated as stale: reason={call_reason!r}"
+    )
+
+
+@pytest.mark.usefixtures("_no_ado_token")
+async def test_ado_build_sha_stale_skips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When build's sourceVersion != PR head sha, _evaluate_core skips
+    with reason 'build_sha_stale' and does NOT call the merger."""
+    import auto_merge
+    import autonomy_policy as ap
+
+    auto_merge._clear_dedup()
+    ap._cache_clear()
+    monkeypatch.setenv("AUTO_MERGE_ENABLED", "true")
+
+    monkeypatch.setattr(
+        auto_merge, "fetch_profile_by_repo",
+        AsyncMock(return_value={
+            "client_profile": "acme",
+            "low_risk_ticket_types": ["bug"],
+            "auto_merge_enabled_yaml": True,
+        }),
+    )
+    monkeypatch.setattr(
+        auto_merge, "fetch_recommended_mode",
+        AsyncMock(return_value=("semi_autonomous", "good")),
+    )
+    monkeypatch.setattr(
+        auto_merge, "fetch_auto_merge_enabled", AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        auto_merge, "get_ado_pr_state",
+        AsyncMock(return_value={
+            "author": "xcagentrockwell",
+            "merged": False, "mergeable": True, "mergeable_state": "clean",
+            "head_sha": "current_pr_head",  # PR got force-pushed
+            "approvals_count": 1, "human_approvals_count": 1,
+            "changes_requested_count": 0, "checks_passed": True,
+            "labels": ["bug"],
+        }),
+    )
+    merger = AsyncMock(return_value=(True, "merged"))
+    monkeypatch.setattr(auto_merge, "complete_ado_pr", merger)
+    monkeypatch.setattr(auto_merge, "_record_decision", AsyncMock())
+
+    # Webhook's sourceVersion is the STALE sha (build ran on old head
+    # before force-push).
+    payload = _ado_build_payload(source_version="stale_build_sha")
+    from main import _handle_ado_build_complete
+    await _handle_ado_build_complete(payload)
+
+    # Merger must NOT have been called
+    assert merger.call_count == 0, (
+        "complete_ado_pr called despite stale build_sha — sha-check bypassed"
+    )
+
+    # The dedup outcome should be "skipped" (build_sha_stale)
+    dedup = auto_merge._dedup_key("my-project/repo-id", 42, "stale_build_sha")
+    outcome = auto_merge._dedup_store.get_outcome(dedup)
+    assert outcome == "skipped", (
+        f"Expected skipped for stale build, got {outcome}"
+    )

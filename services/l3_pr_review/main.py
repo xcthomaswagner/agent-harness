@@ -1550,13 +1550,27 @@ async def _handle_ado_build_complete(payload: dict[str, Any]) -> None:
     match = _ADO_BRANCH_PATTERN.match(source_branch or "")
     ticket_id = match.group(1) if match else ""
 
+    # Extract the commit sha the build ran against. ADO surfaces it as
+    # ``sourceVersion`` on the build resource, with ``sourceBranchCommit``
+    # as a legacy fallback. If a force-push landed AFTER the build
+    # started, this sha will no longer match the PR's current head —
+    # ``_evaluate_core`` does the comparison and skips with reason
+    # ``build_sha_stale``. The prior behavior passed ``head_sha=""``
+    # unconditionally, which meant the build was trusted even after
+    # a force-push invalidated the CI result.
+    build_sha = str(
+        resource.get("sourceVersion")
+        or resource.get("sourceBranchCommit")
+        or ""
+    )
+
     try:
         await evaluate_and_maybe_merge_ado(
             org_url=org_url,
             project=project,
             repo_id=repo_id,
             pr_id=pr_id,
-            head_sha="",  # Will be fetched by get_ado_pr_state
+            head_sha=build_sha,  # non-empty: build_sha_stale check runs
             ticket_id=ticket_id,
             ticket_type="",
             trigger_event="ci_passed",
