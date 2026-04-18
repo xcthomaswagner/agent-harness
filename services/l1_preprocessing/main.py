@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import hashlib
 import hmac
 import io
@@ -229,6 +230,19 @@ _ACTIVE_TICKET_TTL_SEC = 15 * 60  # 15 minutes
 _active_tickets: dict[str, float] = {}
 _active_tickets_lock = __import__("threading").Lock()
 
+# Jira webhook delivery dedup. Jira retries webhooks on any 5xx response
+# — if our L1 hiccups mid-processing after accepting the payload, Jira
+# re-sends the same logical event and the ticket gets processed twice
+# (which cascades into double-enriched Jira comments, double analyst
+# runs, and double-spawned agent teams). Dedup on the
+# ``X-Atlassian-Webhook-Identifier`` header that Jira attaches to each
+# delivery. FIFO-evicted at _JIRA_DELIVERY_DEDUP_MAX to bound memory.
+_JIRA_DELIVERY_DEDUP_MAX = 10_000
+_processed_jira_deliveries: collections.OrderedDict[str, None] = (
+    collections.OrderedDict()
+)
+_processed_jira_deliveries_lock = __import__("threading").Lock()
+
 # Per-ticket edge-detection memory for the trigger tag. See
 # _check_trigger_edge below for semantics, and
 # session_2026_04_10_p0_p2_sf_live.md Finding 4 for the cascade incident
@@ -290,6 +304,27 @@ def _release_ticket(ticket_id: str) -> None:
     """Release a ticket from the active set."""
     with _active_tickets_lock:
         _active_tickets.pop(ticket_id, None)
+
+
+def _jira_delivery_seen(delivery_id: str) -> bool:
+    """Check + record a Jira webhook delivery ID atomically.
+
+    Returns True if this delivery was already processed (caller should
+    skip), False otherwise. FIFO-evicts the oldest entry when the set
+    exceeds _JIRA_DELIVERY_DEDUP_MAX so a long-running process doesn't
+    leak memory one delivery ID at a time.
+
+    Callers should only invoke this with a non-empty ID — missing
+    header is handled by the caller and does NOT land here (we can't
+    dedup what we can't identify).
+    """
+    with _processed_jira_deliveries_lock:
+        if delivery_id in _processed_jira_deliveries:
+            return True
+        _processed_jira_deliveries[delivery_id] = None
+        while len(_processed_jira_deliveries) > _JIRA_DELIVERY_DEDUP_MAX:
+            _processed_jira_deliveries.popitem(last=False)
+        return False
 
 
 def _check_trigger_edge(
@@ -365,6 +400,8 @@ def _reset_state() -> None:
     with _webhook_counters_lock:
         for key in _webhook_counters:
             _webhook_counters[key] = 0
+    with _processed_jira_deliveries_lock:
+        _processed_jira_deliveries.clear()
 
 
 # --- Pipeline processing (background) ---
@@ -1350,9 +1387,33 @@ async def jira_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
     x_hub_signature: str | None = Header(default=None, alias="x-hub-signature"),
+    x_atlassian_webhook_identifier: str | None = Header(
+        default=None, alias="x-atlassian-webhook-identifier"
+    ),
 ) -> dict[str, str]:
-    """Receive a Jira automation webhook and enqueue for processing."""
+    """Receive a Jira automation webhook and enqueue for processing.
+
+    Dedups on ``X-Atlassian-Webhook-Identifier`` when present — Jira
+    retries webhooks on 5xx responses, so a transient L1 hiccup could
+    otherwise double-process the same logical event (double-enriched
+    Jira comments, double-spawned agent teams). Missing the header is
+    tolerated for older webhooks / custom senders — we skip dedup and
+    proceed (debug-logged).
+    """
     payload = await _validate_and_parse_webhook(request, x_hub_signature)
+
+    # Dedup must happen AFTER signature validation so an attacker can't
+    # spam dedup IDs with unsigned junk to evict legitimate entries.
+    if x_atlassian_webhook_identifier:
+        if _jira_delivery_seen(x_atlassian_webhook_identifier):
+            logger.info(
+                "jira_duplicate_delivery_skipped",
+                delivery_id=x_atlassian_webhook_identifier,
+            )
+            return {"status": "skipped", "reason": "duplicate delivery"}
+    else:
+        logger.debug("jira_webhook_no_delivery_id_proceeding")
+
     ticket = _get_jira_adapter().normalize(payload)
     return _dispatch_ticket(
         ticket,

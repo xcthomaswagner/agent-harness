@@ -768,6 +768,83 @@ async def test_jira_webhook_accepts_signature_without_prefix() -> None:
             assert response.status_code == 202
 
 
+# --- Jira Webhook: delivery-ID idempotency ---
+
+
+async def test_jira_webhook_dedups_on_delivery_id() -> None:
+    """Same X-Atlassian-Webhook-Identifier twice → first accepted, second skipped.
+
+    Jira retries deliveries on 5xx responses. Without dedup, a transient
+    L1 hiccup would cause the same logical event to be processed twice,
+    leading to double-enriched comments and double-spawned agent teams.
+    """
+    payload = json.loads((FIXTURES / "jira_webhook_story.json").read_text())
+    delivery_id = "delivery-abc-123"
+
+    async with await _make_client() as client:
+        # First delivery — normal processing.
+        first = await client.post(
+            "/webhooks/jira",
+            json=payload,
+            headers={"x-atlassian-webhook-identifier": delivery_id},
+        )
+        assert first.status_code == 202
+        assert first.json()["status"] == "accepted"
+
+        # Second delivery with same ID — skipped.
+        second = await client.post(
+            "/webhooks/jira",
+            json=payload,
+            headers={"x-atlassian-webhook-identifier": delivery_id},
+        )
+        assert second.status_code == 202
+        assert second.json() == {
+            "status": "skipped",
+            "reason": "duplicate delivery",
+        }
+
+
+async def test_jira_webhook_allows_different_delivery_ids() -> None:
+    """Two webhooks with different delivery IDs both process.
+
+    Dedup must be keyed on the ID, not on payload content — legitimate
+    back-to-back webhooks (e.g., two different ticket updates in the
+    same second) share the same JSON shape but have distinct IDs.
+    """
+    payload = json.loads((FIXTURES / "jira_webhook_story.json").read_text())
+
+    async with await _make_client() as client:
+        first = await client.post(
+            "/webhooks/jira",
+            json=payload,
+            headers={"x-atlassian-webhook-identifier": "id-one"},
+        )
+        assert first.status_code == 202
+        assert first.json()["status"] == "accepted"
+
+        second = await client.post(
+            "/webhooks/jira",
+            json=payload,
+            headers={"x-atlassian-webhook-identifier": "id-two"},
+        )
+        assert second.status_code == 202
+        assert second.json()["status"] == "accepted"
+
+
+async def test_jira_webhook_without_delivery_header_processes() -> None:
+    """Missing header → skip dedup gracefully, process normally.
+
+    Older webhooks or custom senders may not send the identifier; we
+    shouldn't block them. Just log at DEBUG and proceed.
+    """
+    payload = json.loads((FIXTURES / "jira_webhook_story.json").read_text())
+
+    async with await _make_client() as client:
+        response = await client.post("/webhooks/jira", json=payload)
+        assert response.status_code == 202
+        assert response.json()["status"] == "accepted"
+
+
 # --- Jira Bug Webhook ---
 
 
