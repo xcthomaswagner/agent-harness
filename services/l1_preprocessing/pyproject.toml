@@ -55,6 +55,8 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 # trace_dashboard.py has inline HTML with long lines — not worth splitting
 "trace_dashboard.py" = ["E501"]
+# live_stream.py embeds a CSS/JS page template — same rationale
+"live_stream.py" = ["E501"]
 ignore = ["N999"]
 
 [tool.mypy]

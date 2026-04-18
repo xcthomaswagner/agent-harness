@@ -77,6 +77,7 @@ from completion import router as completion_router
 from config import settings as settings
 from learning_api import router as learning_api_router
 from learning_dashboard import router as learning_dashboard_router
+from live_stream import router as live_stream_router
 from models import TicketPayload
 from pipeline import Pipeline
 from trace_bundle import _ARTIFACT_DOWNLOAD_MAP as _ARTIFACT_DOWNLOAD_MAP
@@ -144,6 +145,11 @@ app.include_router(
     trace_bundle_router, dependencies=[Depends(_require_dashboard_auth)]
 )
 app.include_router(completion_router)
+# live_stream handles its own auth per-route (query-param-or-header)
+# because EventSource cannot send custom headers. Mounted without the
+# global dashboard-auth dependency to keep both routes on the same
+# permission surface.
+app.include_router(live_stream_router)
 
 
 @app.on_event("startup")
