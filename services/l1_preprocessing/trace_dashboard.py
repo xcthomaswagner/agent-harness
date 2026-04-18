@@ -220,10 +220,16 @@ def _render_trace_table(traces: list[dict[str, Any]], total: int, page: int, per
             dots_html += f'<div style="width:8px;height:8px;border-radius:2px;background:{d["color"]}" title="{_e(label)}"></div>'
         dots_html += '</div>'
 
+        live_link = (
+            f' <a href="/traces/{tid}/live" title="Live activity stream" '
+            f'onclick="event.stopPropagation()" '
+            f'style="margin-left:0.4rem;font-size:10.5px;color:#1E40AF">live</a>'
+        )
         rows += (
             f'<tr data-status="{_e(status)}" data-mode="{_e(mode)}" data-ticket="{tid}" '
             f'onclick="location.href=\'/traces/{tid}\'" style="cursor:pointer">'
-            f'<td><a href="/traces/{tid}" style="font-weight:500">{tid}</a></td>'
+            f'<td><a href="/traces/{tid}" style="font-weight:500">{tid}</a>'
+            f'{live_link}</td>'
             f'<td style="overflow:hidden;text-overflow:ellipsis;max-width:300px" '
             f'title="{_e(title)}">'
             f'<span class="meta">{_e(title)}</span></td>'
@@ -291,7 +297,7 @@ tbody tr:last-child td {{ border-bottom:none }}
 .view-btn:hover:not(.active) {{ background:#F1F5F9 }}
 </style></head><body><div class="page">
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-  <h1>Traces <span class="meta" style="margin-left:12px;font-weight:400"><a href="/dashboard">Dashboard</a> | <a href="/autonomy">Autonomy</a></span></h1>
+  <h1>Traces <span class="meta" style="margin-left:12px;font-weight:400"><a href="/dashboard">Dashboard</a> | <a href="/autonomy">Autonomy</a> | <a href="/autonomy/learning">Learning</a></span></h1>
   <div class="view-toggle">
     <button class="view-btn active" onclick="location.href='/traces'">Table</button>
     <button class="view-btn" onclick="location.href='/traces?view=board'">Board</button>
@@ -574,13 +580,31 @@ def _render_detail(ticket_id: str) -> str:
     s = tree["summary"]
     durations = compute_phase_durations(entries, run_start_idx=run_start_idx)
 
-    # Breadcrumb
-    breadcrumb = f'<div class="meta" style="margin-bottom:8px"><a href="/traces">Traces</a> / {_e(ticket_id)}</div>'
+    # Breadcrumb + top nav
+    breadcrumb = (
+        f'<div class="meta" style="margin-bottom:8px;display:flex;'
+        f'justify-content:space-between;align-items:baseline">'
+        f'<span><a href="/traces">Traces</a> / {_e(ticket_id)}</span>'
+        f'<span><a href="/dashboard">Dashboard</a> | '
+        f'<a href="/autonomy">Autonomy</a> | '
+        f'<a href="/autonomy/learning">Learning</a></span>'
+        f'</div>'
+    )
 
-    # Title + status
+    # Title + status + Live button
     status = s.get("status", "Unknown")
     badge_cls = _STATUS_BADGE.get(status, "badge-secondary")
-    title = f'<h1 style="margin-bottom:16px">{_e(ticket_id)} {_badge(status, badge_cls)}</h1>'
+    live_button = (
+        f' <a href="/traces/{_e(ticket_id)}/live" '
+        f'style="margin-left:12px;padding:4px 10px;border:1px solid #1E40AF;'
+        f'border-radius:4px;color:#1E40AF;font-size:12px;font-weight:500;'
+        f'text-decoration:none;vertical-align:middle" '
+        f'title="Live activity stream">Live</a>'
+    )
+    title = (
+        f'<h1 style="margin-bottom:16px">{_e(ticket_id)} '
+        f'{_badge(status, badge_cls)}{live_button}</h1>'
+    )
 
     # Summary bar
     tokens_in = s.get("tokens_in", 0)
