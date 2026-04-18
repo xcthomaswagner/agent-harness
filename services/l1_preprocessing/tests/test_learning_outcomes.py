@@ -746,7 +746,7 @@ class TestRunOutcomes:
 
     def test_clone_failure_defers_measurement_for_old_lessons(
         self,
-        learning_conn,
+        learning_conn: object,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
@@ -758,8 +758,11 @@ class TestRunOutcomes:
         ``(0, [])`` for a lesson whose edit may have been reverted by an
         engineer — and the verdict would lock in as CONFIRMED.
         """
+        from typing import Any
+
         from config import settings
 
+        del learning_conn  # fixture side-effect only
         monkeypatch.setattr(
             settings, "autonomy_db_path", str(tmp_path / "a.db")
         )
@@ -773,10 +776,10 @@ class TestRunOutcomes:
         )
 
         # Capture structlog events by patching the module logger.
-        logged_events: list[tuple[str, dict]] = []
+        logged_events: list[tuple[str, dict[str, Any]]] = []
         orig_info = outcomes_mod.logger.info
 
-        def capture_info(event, **kwargs):
+        def capture_info(event: str, **kwargs: Any) -> Any:
             logged_events.append((event, dict(kwargs)))
             return orig_info(event, **kwargs)
 
@@ -806,7 +809,7 @@ class TestRunOutcomes:
 
     def test_clone_failure_proceeds_for_fresh_lessons(
         self,
-        learning_conn,
+        learning_conn: object,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
@@ -818,6 +821,7 @@ class TestRunOutcomes:
         """
         from config import settings
 
+        del learning_conn  # fixture side-effect only
         monkeypatch.setattr(
             settings, "autonomy_db_path", str(tmp_path / "a.db")
         )

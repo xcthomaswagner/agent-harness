@@ -1094,12 +1094,16 @@ class TestOpenRevertPr:
     def test_malformed_sha_fails_fast(
         self, tmp_path: Path
     ) -> None:
+        # Use a harness_repo_url that passes Phase-5 validation so the
+        # test reaches the sha-shape check. Previously this test used a
+        # made-up example.invalid URL — now rejected by the GitHub-only
+        # URL allowlist before the sha check fires.
         inputs = RevertPRInputs(
             lesson_id="LSN-a1b2c3d4",
             merged_commit_sha="not-a-sha",
             verdict="regressed",
             reason_md="x",
-            harness_repo_url="https://example.invalid/x.git",
+            harness_repo_url="https://github.com/acme/harness.git",
             dry_run=True,
         )
         out = open_revert_pr_for_lesson(inputs)
@@ -1107,12 +1111,14 @@ class TestOpenRevertPr:
         assert "malformed" in out.error
 
     def test_unsafe_lesson_id_fails_fast(self, tmp_path: Path) -> None:
+        # Same GitHub-only URL adjustment as above — a non-GitHub URL
+        # now fail-fasts at the URL check before the lesson_id check.
         inputs = RevertPRInputs(
             lesson_id="LSN-; rm",
             merged_commit_sha="a" * 40,
             verdict="regressed",
             reason_md="x",
-            harness_repo_url="https://example.invalid/x.git",
+            harness_repo_url="https://github.com/acme/harness.git",
             dry_run=True,
         )
         out = open_revert_pr_for_lesson(inputs)
@@ -1312,3 +1318,231 @@ class TestSafeStderrTail:
         from learning_miner._subprocess import safe_stderr_tail
 
         assert safe_stderr_tail("ok", limit=200) == "ok"
+
+
+# ---- Phase 5: input validation (branch + repo URL) -------------------
+
+
+def _valid_open_pr_inputs() -> OpenPRInputs:
+    """Baseline valid inputs; individual tests override one field."""
+    return OpenPRInputs(
+        lesson_id="LSN-valid001",
+        unified_diff=(
+            "--- a/runtime/skills/x/SKILL.md\n"
+            "+++ b/runtime/skills/x/SKILL.md\n"
+            "@@\n+rule\n"
+        ),
+        scope_key="xcsf30|salesforce",
+        detector_name="human_issue_cluster",
+        rationale_md="ok",
+        evidence_trace_ids=["T-1"],
+        harness_repo_url="https://github.com/acme/harness.git",
+        base_branch="main",
+        dry_run=True,
+    )
+
+
+def _valid_revert_inputs() -> RevertPRInputs:
+    return RevertPRInputs(
+        lesson_id="LSN-valid001",
+        merged_commit_sha="a" * 40,
+        verdict="regressed",
+        reason_md="regressed on post-window metrics",
+        harness_repo_url="https://github.com/acme/harness.git",
+        base_branch="main",
+        dry_run=True,
+    )
+
+
+class TestOpenPrInputValidation:
+    """Phase 5: base_branch + harness_repo_url attack-surface checks.
+
+    These fields are f-string interpolated into git argv. A crafted
+    value (``../evil`` branch, non-GitHub URL, shell-injection string)
+    must raise BEFORE any subprocess call, not silently proceed.
+    """
+
+    def test_open_pr_rejects_unsafe_base_branch_traversal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Spy on _run to prove no subprocess fires.
+        run_spy = MagicMock()
+        monkeypatch.setattr("learning_miner.pr_opener._run", run_spy)
+        inputs = OpenPRInputs(
+            **{**_valid_open_pr_inputs().__dict__, "base_branch": "../evil"}
+        )
+        with pytest.raises(ValueError, match="unsafe base_branch"):
+            open_pr_for_lesson(inputs)
+        run_spy.assert_not_called()
+
+    def test_open_pr_rejects_unsafe_base_branch_shell_injection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        run_spy = MagicMock()
+        monkeypatch.setattr("learning_miner.pr_opener._run", run_spy)
+        inputs = OpenPRInputs(
+            **{**_valid_open_pr_inputs().__dict__, "base_branch": "; rm -rf ~"}
+        )
+        with pytest.raises(ValueError, match="unsafe base_branch"):
+            open_pr_for_lesson(inputs)
+        run_spy.assert_not_called()
+
+    def test_open_pr_rejects_base_branch_with_double_dot(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        run_spy = MagicMock()
+        monkeypatch.setattr("learning_miner.pr_opener._run", run_spy)
+        inputs = OpenPRInputs(
+            **{**_valid_open_pr_inputs().__dict__, "base_branch": "main..origin"}
+        )
+        with pytest.raises(ValueError, match="unsafe base_branch"):
+            open_pr_for_lesson(inputs)
+        run_spy.assert_not_called()
+
+    def test_open_pr_rejects_unsafe_harness_repo_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        run_spy = MagicMock()
+        monkeypatch.setattr("learning_miner.pr_opener._run", run_spy)
+        inputs = OpenPRInputs(
+            **{
+                **_valid_open_pr_inputs().__dict__,
+                "harness_repo_url": "https://attacker.com/pwn.git",
+            }
+        )
+        with pytest.raises(ValueError, match="unsafe harness_repo_url"):
+            open_pr_for_lesson(inputs)
+        run_spy.assert_not_called()
+
+    def test_open_pr_rejects_file_scheme_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``file:///etc/passwd`` and similar escaping URLs are rejected."""
+        run_spy = MagicMock()
+        monkeypatch.setattr("learning_miner.pr_opener._run", run_spy)
+        inputs = OpenPRInputs(
+            **{
+                **_valid_open_pr_inputs().__dict__,
+                "harness_repo_url": "file:///etc/passwd",
+            }
+        )
+        with pytest.raises(ValueError, match="unsafe harness_repo_url"):
+            open_pr_for_lesson(inputs)
+        run_spy.assert_not_called()
+
+    def test_open_pr_accepts_valid_inputs(
+        self, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Valid branch + valid GitHub URL proceeds to normal flow.
+
+        Uses the existing ``origin_repo`` fixture and dry-run so no
+        network call happens. Just proves the validator doesn't reject
+        well-formed inputs.
+        """
+        # gh must not run in dry-run.
+        monkeypatch.setattr(
+            "learning_miner.pr_opener._gh",
+            MagicMock(
+                side_effect=AssertionError("gh must not run in dry-run")
+            ),
+        )
+        result = open_pr_for_lesson(_base_inputs(origin_repo, dry_run=True))
+        assert result.success is True, result.error
+
+
+class TestOpenRevertPrInputValidation:
+    """Same attack-surface checks on ``open_revert_pr_for_lesson``."""
+
+    def test_open_revert_rejects_unsafe_base_branch_traversal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        run_spy = MagicMock()
+        monkeypatch.setattr("learning_miner.pr_opener._run", run_spy)
+        inputs = RevertPRInputs(
+            **{**_valid_revert_inputs().__dict__, "base_branch": "../evil"}
+        )
+        with pytest.raises(ValueError, match="unsafe base_branch"):
+            open_revert_pr_for_lesson(inputs)
+        run_spy.assert_not_called()
+
+    def test_open_revert_rejects_base_branch_shell_injection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        run_spy = MagicMock()
+        monkeypatch.setattr("learning_miner.pr_opener._run", run_spy)
+        inputs = RevertPRInputs(
+            **{**_valid_revert_inputs().__dict__, "base_branch": "; rm -rf ~"}
+        )
+        with pytest.raises(ValueError, match="unsafe base_branch"):
+            open_revert_pr_for_lesson(inputs)
+        run_spy.assert_not_called()
+
+    def test_open_revert_rejects_base_branch_with_double_dot(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        run_spy = MagicMock()
+        monkeypatch.setattr("learning_miner.pr_opener._run", run_spy)
+        inputs = RevertPRInputs(
+            **{**_valid_revert_inputs().__dict__, "base_branch": "main..origin"}
+        )
+        with pytest.raises(ValueError, match="unsafe base_branch"):
+            open_revert_pr_for_lesson(inputs)
+        run_spy.assert_not_called()
+
+    def test_open_revert_rejects_unsafe_harness_repo_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        run_spy = MagicMock()
+        monkeypatch.setattr("learning_miner.pr_opener._run", run_spy)
+        inputs = RevertPRInputs(
+            **{
+                **_valid_revert_inputs().__dict__,
+                "harness_repo_url": "https://attacker.com/pwn.git",
+            }
+        )
+        with pytest.raises(ValueError, match="unsafe harness_repo_url"):
+            open_revert_pr_for_lesson(inputs)
+        run_spy.assert_not_called()
+
+    def test_open_revert_rejects_file_scheme_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        run_spy = MagicMock()
+        monkeypatch.setattr("learning_miner.pr_opener._run", run_spy)
+        inputs = RevertPRInputs(
+            **{
+                **_valid_revert_inputs().__dict__,
+                "harness_repo_url": "file:///etc/passwd",
+            }
+        )
+        with pytest.raises(ValueError, match="unsafe harness_repo_url"):
+            open_revert_pr_for_lesson(inputs)
+        run_spy.assert_not_called()
+
+    def test_open_revert_accepts_valid_inputs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Valid branch + valid URL proceeds past validation.
+
+        Uses a real scratch origin so revert can exercise clone+checkout;
+        the test still fails at the revert step because merged_commit_sha
+        ("a"*40) isn't reachable in the fake origin — but the key
+        assertion is that we didn't fail at the Phase-5 validator.
+        """
+        origin, _ = _origin_with_committed_change(tmp_path)
+        inputs = RevertPRInputs(
+            lesson_id="LSN-valid001",
+            merged_commit_sha="a" * 40,
+            verdict="regressed",
+            reason_md="x",
+            harness_repo_url=str(origin),  # local path — permitted
+            base_branch="main",
+            dry_run=True,
+        )
+        result = open_revert_pr_for_lesson(inputs)
+        # Validator didn't reject. The real run may still fail later
+        # (the sha isn't reachable), but the error must NOT be the
+        # Phase-5 validator's message.
+        if not result.success:
+            assert "unsafe base_branch" not in result.error
+            assert "unsafe harness_repo_url" not in result.error
