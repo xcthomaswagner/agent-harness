@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,50 @@ logger = structlog.get_logger()
 
 LOGS_DIR = Path(__file__).resolve().parents[2] / "data" / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# Per-ticket write lock, lazily created. Guards ``append_trace`` appends
+# and ``admin_re_redact`` in-place rewrites on the SAME ticket file so
+# they can't interleave.
+#
+# Why threading.Lock (not asyncio.Lock): ``append_trace`` is sync and
+# called from many sync callsites (queue worker, pipeline.py,
+# test fixtures). A thread-based lock is safe from both sync and
+# async contexts — an async FastAPI handler calling a sync-locked
+# function just blocks its event loop briefly, which is fine because
+# trace writes are microseconds.
+#
+# Why per-ticket (not global): concurrent appends for DIFFERENT tickets
+# are the common case (multiple tickets processing in parallel) and
+# must not serialize on each other. Only same-ticket operations need
+# mutual exclusion.
+#
+# Why atomicity matters: POSIX append atomicity only holds for writes
+# smaller than PIPE_BUF (4096 bytes on Linux, 512 on some BSD). Many
+# trace entries are well over 4KB once they embed debug_payload /
+# tool_result fields — without a lock two concurrent appends can
+# interleave bytes and corrupt the JSONL stream (an entry starts in
+# one thread, another thread's entry inserts mid-write, the first
+# continues, and readline() returns two half-entries separated by
+# a bogus interior newline).
+_ticket_locks: dict[str, threading.Lock] = {}
+_ticket_locks_mutex = threading.Lock()
+
+
+def _get_ticket_lock(ticket_id: str) -> threading.Lock:
+    """Return the per-ticket write lock, creating it under mutex.
+
+    The mutex serializes dict mutation; the returned Lock serializes
+    writes to the ticket's JSONL file. Once created, locks persist
+    for the lifetime of the process — there's no eviction. On a busy
+    day L1 sees ~50-100 distinct tickets, so memory is bounded.
+    """
+    with _ticket_locks_mutex:
+        lock = _ticket_locks.get(ticket_id)
+        if lock is None:
+            lock = threading.Lock()
+            _ticket_locks[ticket_id] = lock
+    return lock
 
 # Fields in imported pipeline.jsonl entries that may contain tool output /
 # error content and therefore may leak credentials. Redacted on import.
@@ -139,7 +184,12 @@ def append_trace(
     event: str,
     **kwargs: Any,
 ) -> None:
-    """Append a trace entry to the ticket's persistent log."""
+    """Append a trace entry to the ticket's persistent log.
+
+    Held under the per-ticket write lock for the duration of the write
+    so the append cannot interleave with a concurrent append to the
+    same file OR with ``/admin/re-redact``'s in-place rewrite.
+    """
     entry = {
         "trace_id": trace_id,
         "ticket_id": ticket_id,
@@ -149,7 +199,7 @@ def append_trace(
         **kwargs,
     }
     path = trace_path(ticket_id)
-    with path.open("a") as f:
+    with _get_ticket_lock(ticket_id), path.open("a") as f:
         f.write(json.dumps(entry) + "\n")
 
 

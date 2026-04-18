@@ -1133,9 +1133,13 @@ async def admin_re_redact() -> dict[str, int]:
       consolidation. Non-zero indicates either a pattern update or an
       idempotency violation in the redactor.
 
-    Concurrency: this endpoint rewrites trace files in place without file
-    locking. Run during quiet periods — a concurrent ``append_trace`` that
-    interleaves with the rewrite can race and lose the appended entry.
+    Concurrency: this endpoint takes the per-ticket write lock
+    (``tracer._get_ticket_lock``) around each read-rewrite-replace
+    cycle, so a concurrent ``append_trace`` for the same ticket either
+    lands before the rewrite begins or waits for it to complete. The
+    earlier version had no lock — a concurrent appender could silently
+    lose its entry when the rewritten file replaced the original via
+    ``os.replace``.
     """
     logs_dir = tracer.LOGS_DIR
     if not logs_dir.exists():
@@ -1151,63 +1155,77 @@ async def admin_re_redact() -> dict[str, int]:
 
     for trace_file in sorted(logs_dir.glob("*.jsonl")):
         traces_processed += 1
-        try:
-            raw = trace_file.read_text()
-        except OSError:
-            logger.exception("re_redact_read_failed", trace_file=str(trace_file))
-            continue
-
-        out_lines: list[str] = []
-        file_changed = False  # only rewrite the file if at least one line differed
-        for line in raw.splitlines():
-            if not line.strip():
-                out_lines.append(line)
-                continue
+        # Take the per-ticket write lock for the full read-rewrite-replace
+        # cycle. Without it a concurrent ``append_trace`` on the same
+        # ticket between our ``read_text()`` and ``os.replace()`` would
+        # have its appended line silently clobbered when the rewritten
+        # file replaces the original.
+        #
+        # ``ticket_id`` is the filename stem. Locks are per-ticket so
+        # re-redact over a large trace store doesn't serialize all
+        # pipeline traffic.
+        ticket_id = trace_file.stem
+        with tracer._get_ticket_lock(ticket_id):
             try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                # Corrupt/partial-write line (e.g. crash mid-append). A
-                # partial write may contain a live token, so run the raw
-                # string through redact() before writing it back rather
-                # than passing it through verbatim.
-                redacted_line, n = redact(line)
+                raw = trace_file.read_text()
+            except OSError:
+                logger.exception("re_redact_read_failed", trace_file=str(trace_file))
+                continue
+
+            out_lines: list[str] = []
+            file_changed = False  # only rewrite the file if at least one line differed
+            for line in raw.splitlines():
+                if not line.strip():
+                    out_lines.append(line)
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    # Corrupt/partial-write line (e.g. crash mid-append). A
+                    # partial write may contain a live token, so run the raw
+                    # string through redact() before writing it back rather
+                    # than passing it through verbatim.
+                    redacted_line, n = redact(line)
+                    if n:
+                        additional_patterns += n
+                        entries_redacted += 1
+                        file_changed = True
+                    out_lines.append(redacted_line)
+                    continue
+
+                # One helper call covers every known-risky string pocket in
+                # the entry (top-level _REDACT_IMPORTED_FIELDS + the nested
+                # index.first_tool_error.message pocket). Single source of
+                # truth shared with tracer.consolidate_worktree_logs, so new
+                # risky fields only need to be added in one place.
+                n = redact_entry_in_place(entry)
                 if n:
                     additional_patterns += n
                     entries_redacted += 1
                     file_changed = True
-                out_lines.append(redacted_line)
+                out_lines.append(json.dumps(entry))
+
+            # Skip the write entirely when nothing changed. This closes a real
+            # data-loss window: if a live pipeline was appending to this file
+            # between our read_text() and write_text(), an unconditional rewrite
+            # silently clobbered the appended entries. A no-op rewrite has no
+            # reason to exist and no reason to take that risk. The per-ticket
+            # lock above already prevents interleaving with an in-progress
+            # appender, so this check is the defense-in-depth belt on top of
+            # the lock's suspenders.
+            if not file_changed:
                 continue
 
-            # One helper call covers every known-risky string pocket in
-            # the entry (top-level _REDACT_IMPORTED_FIELDS + the nested
-            # index.first_tool_error.message pocket). Single source of
-            # truth shared with tracer.consolidate_worktree_logs, so new
-            # risky fields only need to be added in one place.
-            n = redact_entry_in_place(entry)
-            if n:
-                additional_patterns += n
-                entries_redacted += 1
-                file_changed = True
-            out_lines.append(json.dumps(entry))
-
-        # Skip the write entirely when nothing changed. This closes a real
-        # data-loss window: if a live pipeline was appending to this file
-        # between our read_text() and write_text(), an unconditional rewrite
-        # silently clobbered the appended entries. A no-op rewrite has no
-        # reason to exist and no reason to take that risk.
-        if not file_changed:
-            continue
-
-        new_text = "\n".join(out_lines)
-        if raw.endswith("\n") and not new_text.endswith("\n"):
-            new_text += "\n"
-        # Atomic replace via the shared tracer helper — a crash mid-write
-        # leaves the original file intact instead of producing a
-        # truncated one.
-        try:
-            atomic_write_text(trace_file, new_text)
-        except OSError:
-            logger.exception("re_redact_write_failed", trace_file=str(trace_file))
+            new_text = "\n".join(out_lines)
+            if raw.endswith("\n") and not new_text.endswith("\n"):
+                new_text += "\n"
+            # Atomic replace via the shared tracer helper — a crash mid-write
+            # leaves the original file intact instead of producing a
+            # truncated one.
+            try:
+                atomic_write_text(trace_file, new_text)
+            except OSError:
+                logger.exception("re_redact_write_failed", trace_file=str(trace_file))
 
     if additional_patterns:
         logger.warning(
