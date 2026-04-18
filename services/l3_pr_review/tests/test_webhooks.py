@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
+from collections.abc import Callable
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -14,6 +17,60 @@ import main as l3_main
 from main import app
 
 TEST_SECRET = "test-webhook-secret"
+
+
+async def _wait_for(
+    predicate: Callable[[], bool],
+    *,
+    timeout: float = 3.0,
+    poll: float = 0.01,
+) -> None:
+    """Poll ``predicate`` until truthy or ``timeout`` seconds elapse.
+
+    Replaces the fixed ``await asyncio.sleep(0.05)`` pattern that was
+    sprinkled through this file to wait for FastAPI BackgroundTasks
+    completion. Fixed sleeps are flaky on slow CI (0.05s isn't always
+    enough for a scheduler to schedule + run the background task) AND
+    wasteful on fast CI (the test pays 50ms even when the task runs
+    in 2ms). Polling exits as soon as the mock is observed, bounded
+    by ``timeout`` so a genuinely unfired task fails loud instead of
+    hanging the test session.
+
+    Usage:
+      await _wait_for(lambda: mock_forward.await_count >= 1)
+
+    The predicate is wrapped in ``bool()`` so simple integer counts
+    work directly. ``pytest.fail`` is not imported here because tests
+    that use ``_wait_for`` already assert the state right after — the
+    timeout surfaces as a fast assertion failure on the next line.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    while True:
+        if predicate():
+            return
+        if asyncio.get_event_loop().time() >= deadline:
+            return
+        await asyncio.sleep(poll)
+
+
+async def _settle(cycles: int = 10) -> None:
+    """Yield control to the event loop enough times to drain scheduled tasks.
+
+    Used by tests that assert ``await_count == 0`` after a background
+    handler was scheduled — we need a POSITIVE signal that any queued
+    task has had a chance to run. A chain of ``asyncio.sleep(0)``
+    passes control back to the scheduler repeatedly, which runs any
+    task that's already on the ready queue without adding wall-clock
+    delay. Ten cycles covers handler-to-forwarder-to-httpx chains
+    several levels deep on current CPython; very fast but deterministic.
+
+    Unlike ``asyncio.sleep(N)``, this doesn't wait wall-clock time —
+    it purely advances the event loop state. On a busy machine a
+    single ``sleep(0.05)`` could actually miss the scheduling window
+    (the loop might not preempt back to the test coroutine in time).
+    """
+    for _ in range(cycles):
+        await asyncio.sleep(0)
 
 
 async def _make_client() -> AsyncClient:
@@ -384,10 +441,19 @@ async def test_rejects_invalid_signature() -> None:
         assert response.status_code == 401
 
 
-async def test_accepts_without_secret_in_dev_mode() -> None:
-    """When WEBHOOK_SECRET is empty (dev mode), requests are accepted without signature."""
+async def test_github_webhook_skips_signature_when_no_secret_configured_with_allow_unsigned(
+    monkeypatch,
+) -> None:
+    """Phase 1: with no ``WEBHOOK_SECRET`` configured AND
+    ``ALLOW_UNSIGNED_WEBHOOKS=true`` (local-dev escape hatch), the
+    github webhook accepts unsigned requests. Renamed from
+    ``test_accepts_without_secret_in_dev_mode`` — previously the
+    no-secret path was always open; now it requires the explicit
+    env var, enforced at the webhook handler.
+    """
     payload = {"action": "opened", "pull_request": {"number": 1, "diff_url": "", "body": ""}}
 
+    monkeypatch.setenv("ALLOW_UNSIGNED_WEBHOOKS", "true")
     with (
         patch.object(l3_main, "WEBHOOK_SECRET", ""),
         patch.object(l3_main, "_get_spawner") as mock_get,
@@ -400,6 +466,47 @@ async def test_accepts_without_secret_in_dev_mode() -> None:
                 headers={"x-github-event": "pull_request"},
             )
         assert response.status_code == 202
+
+
+async def test_github_webhook_fails_closed_when_no_secret_configured(
+    monkeypatch,
+) -> None:
+    """Phase 1 fail-closed: with no ``WEBHOOK_SECRET`` and no
+    ``ALLOW_UNSIGNED_WEBHOOKS=true``, the github webhook raises 503.
+    This is the new default — previously the endpoint silently
+    accepted unsigned requests whenever no secret was configured.
+    """
+    monkeypatch.delenv("ALLOW_UNSIGNED_WEBHOOKS", raising=False)
+    payload = {"action": "opened"}
+    with patch.object(l3_main, "WEBHOOK_SECRET", ""):
+        async with await _make_client() as client:
+            response = await client.post(
+                "/webhooks/github",
+                json=payload,
+                headers={"x-github-event": "pull_request"},
+            )
+    assert response.status_code == 503
+
+
+async def test_github_webhook_accepts_when_allow_unsigned(
+    monkeypatch,
+) -> None:
+    """Phase 1 escape hatch: ``ALLOW_UNSIGNED_WEBHOOKS=true`` + no
+    secret accepts the request."""
+    monkeypatch.setenv("ALLOW_UNSIGNED_WEBHOOKS", "true")
+    payload = {"action": "opened", "pull_request": {"number": 1, "diff_url": "", "body": ""}}
+    with (
+        patch.object(l3_main, "WEBHOOK_SECRET", ""),
+        patch.object(l3_main, "_get_spawner") as mock_get,
+    ):
+        mock_get.return_value = MagicMock()
+        async with await _make_client() as client:
+            response = await client.post(
+                "/webhooks/github",
+                json=payload,
+                headers={"x-github-event": "pull_request"},
+            )
+    assert response.status_code == 202
 
 
 async def test_accepts_valid_signature() -> None:
@@ -524,8 +631,7 @@ async def test_pr_opened_forwards_autonomy_event() -> None:
 
         assert response.status_code == 202
         # Allow background task to run
-        import asyncio as _asyncio
-        await _asyncio.sleep(0.05)
+        await _wait_for(lambda: mock_forward.await_count >= 1)
 
         assert mock_forward.await_count >= 1
         event = mock_forward.await_args.args[0]
@@ -560,8 +666,7 @@ async def test_review_approved_forwards_autonomy_event() -> None:
             response = await _post_webhook(client, payload, "pull_request_review")
 
         assert response.status_code == 202
-        import asyncio as _asyncio
-        await _asyncio.sleep(0.05)
+        await _wait_for(lambda: mock_forward.await_count >= 1)
 
         assert mock_forward.await_count >= 1
         event = mock_forward.await_args.args[0]
@@ -589,8 +694,7 @@ async def test_pr_merged_forwards_autonomy_event() -> None:
         assert response.status_code == 202
         assert response.json()["event_type"] == "pr_merged"
 
-        import asyncio as _asyncio
-        await _asyncio.sleep(0.05)
+        await _wait_for(lambda: mock_forward.await_count >= 1)
 
         assert mock_forward.await_count >= 1
         event = mock_forward.await_args.args[0]
@@ -736,8 +840,7 @@ class TestHumanIssueForwarding:
                 response = await _post_webhook(client, payload, "pull_request_review")
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            await _wait_for(lambda: mock_forward.await_count >= 1)
 
             assert mock_forward.await_count == 1
             issue = mock_forward.await_args.args[0]
@@ -778,8 +881,10 @@ class TestHumanIssueForwarding:
                 response = await _post_webhook(client, payload, "pull_request_review")
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            # Handler runs but short-circuits on empty body; drain the
+            # event loop so any would-be forward has executed, then
+            # verify it didn't happen.
+            await _settle()
 
             assert mock_forward.await_count == 0
 
@@ -806,8 +911,9 @@ class TestHumanIssueForwarding:
                 response = await _post_webhook(client, payload, "pull_request_review")
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            # Handler runs but short-circuits on bot author; drain the
+            # event loop and verify no forward happened.
+            await _settle()
 
             assert mock_forward.await_count == 0
 
@@ -837,8 +943,7 @@ class TestHumanIssueForwarding:
                 response = await _post_webhook(client, payload, "pull_request_review")
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            await _wait_for(lambda: mock_forward.await_count >= 1)
 
             assert mock_forward.await_count == 1
             issue = mock_forward.await_args.args[0]
@@ -882,8 +987,7 @@ class TestHumanIssueForwarding:
 
             assert response.status_code == 202
             assert response.json()["event_type"] == "review_comment_created"
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            await _wait_for(lambda: mock_forward.await_count >= 1)
 
             assert mock_forward.await_count == 1
             issue = mock_forward.await_args.args[0]
@@ -927,8 +1031,7 @@ class TestHumanIssueForwarding:
                 )
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            await _wait_for(lambda: mock_forward.await_count >= 1)
 
             assert mock_forward.await_count == 1
 
@@ -963,9 +1066,9 @@ class TestHumanIssueForwarding:
                 )
 
             assert response.status_code == 202
-            # deleted is classified as IGNORED, so no handler runs
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            # deleted is classified as IGNORED, so no handler runs.
+            # Drain the event loop so we see any stray forward if one fires.
+            await _settle()
 
             assert mock_forward.await_count == 0
 
@@ -1000,8 +1103,9 @@ class TestHumanIssueForwarding:
                 )
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            # Handler runs but short-circuits on missing ticket_id;
+            # drain the event loop and verify no forward happened.
+            await _settle()
 
             assert mock_forward.await_count == 0
 
@@ -1161,9 +1265,7 @@ class TestAutoMergeTrigger:
                 )
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-
-            await _asyncio.sleep(0.1)
+            await _wait_for(lambda: mock_eval.await_count >= 1)
 
             assert mock_eval.await_count == 1
             kwargs = mock_eval.await_args.kwargs
@@ -1172,6 +1274,84 @@ class TestAutoMergeTrigger:
             assert kwargs["head_sha"] == "abc123"
             assert kwargs["ticket_id"] == "SCRUM-16"
             assert kwargs["trigger_event"] == "review_approved"
+
+    async def test_agent_complete_includes_auth_header(
+        self, monkeypatch,
+    ) -> None:
+        """Phase 1: the /api/agent-complete call to L1 must carry
+        ``X-API-Key`` sourced from ``L1_INTERNAL_API_TOKEN``. Previously
+        the call sent ``headers={}`` which only worked because L1 ran
+        with ``API_KEY`` unset. With Phase 1 enforcing the API key, the
+        call would 401 without an explicit header."""
+        monkeypatch.setenv("L1_INTERNAL_API_TOKEN", "shared-secret-abc")
+        payload = _base_pr_payload("submitted")
+        payload["review"] = {
+            "state": "approved",
+            "id": 1,
+            "body": "",
+            "html_url": "https://github.com/org/repo/pull/42",
+            "user": {"login": "lead"},
+        }
+
+        captured: list[dict[str, Any]] = []
+
+        class _CapturingClient:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            async def __aenter__(self) -> _CapturingClient:
+                return self
+
+            async def __aexit__(self, *args: Any) -> None:
+                return None
+
+            async def post(
+                self,
+                url: str,
+                json: Any = None,
+                headers: dict[str, str] | None = None,
+            ) -> MagicMock:
+                captured.append({"url": url, "headers": headers})
+                resp = MagicMock()
+                resp.status_code = 200
+                resp.raise_for_status = MagicMock()
+                return resp
+
+        with (
+            patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+            patch.object(
+                l3_main, "_forward_autonomy_event", new_callable=AsyncMock
+            ),
+            patch.object(
+                l3_main, "_forward_human_issue", new_callable=AsyncMock
+            ),
+            patch.object(
+                l3_main, "evaluate_and_maybe_merge",
+                AsyncMock(return_value={"status": "dry_run"}),
+            ),
+            patch("main.httpx.AsyncClient", _CapturingClient),
+        ):
+            async with await _make_client() as client:
+                response = await _post_webhook(
+                    client, payload, "pull_request_review"
+                )
+            assert response.status_code == 202
+            import asyncio as _asyncio
+
+            await _asyncio.sleep(0.1)
+
+        agent_complete_calls = [
+            c for c in captured if c["url"].endswith("/api/agent-complete")
+        ]
+        assert len(agent_complete_calls) == 1, (
+            f"expected exactly one /api/agent-complete call, got "
+            f"{[c['url'] for c in captured]}"
+        )
+        headers = agent_complete_calls[0]["headers"] or {}
+        assert headers.get("X-API-Key") == "shared-secret-abc", (
+            f"expected X-API-Key header sourced from L1_INTERNAL_API_TOKEN, "
+            f"got headers={headers!r}"
+        )
 
     async def test_ci_passed_calls_evaluate_and_maybe_merge(self) -> None:
         payload = {
@@ -1199,9 +1379,7 @@ class TestAutoMergeTrigger:
                 response = await _post_webhook(client, payload, "check_suite")
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-
-            await _asyncio.sleep(0.1)
+            await _wait_for(lambda: mock_eval.await_count >= 1)
 
             assert mock_eval.await_count == 1
             kwargs = mock_eval.await_args.kwargs
@@ -1246,9 +1424,7 @@ class TestAutoMergeTrigger:
                 )
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-
-            await _asyncio.sleep(0.1)
+            await _wait_for(lambda: mock_eval.await_count >= 1)
             assert mock_eval.await_count == 1
 
     async def test_review_approved_skips_non_ai_branch(self) -> None:
@@ -1294,9 +1470,9 @@ class TestAutoMergeTrigger:
                 )
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-
-            await _asyncio.sleep(0.1)
+            # Non-AI branch should short-circuit in the handler — no
+            # background work scheduled. Drain the loop and assert.
+            await _settle()
 
             # Neither L1 /api/agent-complete nor the auto-merge
             # evaluator should fire for a non-AI branch.

@@ -221,16 +221,25 @@ def test_apply_event_review_comment_is_noop(conn: Any) -> None:
 
 @pytest.fixture
 def test_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
-    # Per-test DB + fresh bucket + known token
+    # Per-test DB + fresh bucket + known tokens. The admin token
+    # protects the read-only GET routes (Phase 2 — /api/autonomy,
+    # /api/autonomy/auto-merge-toggle, /api/autonomy/auto-merge-decisions).
     db_path = tmp_path / "autonomy.db"
     monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
     monkeypatch.setattr(settings, "l1_internal_api_token", "test-token")
+    monkeypatch.setattr(settings, "autonomy_admin_token", "test-admin-token")
     monkeypatch.setattr(settings, "autonomy_internal_max_body_bytes", 262_144)
     # Reset rate limiter so tests don't share state
     autonomy_ingest._bucket = TokenBucket(capacity=100, refill_per_sec=100.0)
     app = FastAPI()
     app.include_router(router)
     return app
+
+
+# Header dict for authed admin GET requests in this file.
+_ADMIN_HEADERS: dict[str, str] = {
+    "X-Autonomy-Admin-Token": "test-admin-token",
+}
 
 
 def _payload(**overrides: Any) -> dict[str, Any]:
@@ -378,7 +387,7 @@ def test_post_event_approved_sets_fpa_in_db(test_app: FastAPI) -> None:
 
 def test_get_autonomy_empty_returns_empty_profiles(test_app: FastAPI) -> None:
     client = TestClient(test_app)
-    r = client.get("/api/autonomy")
+    r = client.get("/api/autonomy", headers=_ADMIN_HEADERS)
     assert r.status_code == 200
     body = r.json()
     assert body["profiles"] == []
@@ -401,7 +410,10 @@ def test_get_autonomy_single_profile_filter(test_app: FastAPI) -> None:
         ),
         headers={"X-Internal-Api-Token": "test-token"},
     )
-    r = client.get("/api/autonomy?client_profile=harness-test")
+    r = client.get(
+        "/api/autonomy?client_profile=harness-test",
+        headers=_ADMIN_HEADERS,
+    )
     assert r.status_code == 200
     body = r.json()
     assert body["client_profile"] == "harness-test"
@@ -422,7 +434,7 @@ def test_get_autonomy_list_shape_no_top_level_average(test_app: FastAPI) -> None
         ),
         headers={"X-Internal-Api-Token": "test-token"},
     )
-    r = client.get("/api/autonomy")
+    r = client.get("/api/autonomy", headers=_ADMIN_HEADERS)
     assert r.status_code == 200
     body = r.json()
     assert isinstance(body["profiles"], list)
@@ -1411,6 +1423,7 @@ def test_get_auto_merge_toggle_returns_yaml_default(
     r = c.get(
         "/api/autonomy/auto-merge-toggle",
         params={"client_profile": "no-runtime-toggle"},
+        headers={"X-Autonomy-Admin-Token": "admin-token"},
     )
     assert r.status_code == 200
     body = r.json()
@@ -1441,12 +1454,65 @@ def test_get_auto_merge_toggle_runtime_overrides_yaml(
     r = c.get(
         "/api/autonomy/auto-merge-toggle",
         params={"client_profile": "override-me"},
+        headers={"X-Autonomy-Admin-Token": "admin-token"},
     )
     assert r.status_code == 200
     body = r.json()
     assert body["source"] == "runtime_toggle"
     assert body["enabled"] is False
     assert body["yaml_default"] is True
+
+
+def test_get_auto_merge_toggle_requires_admin_token(
+    admin_app: FastAPI,
+) -> None:
+    """Phase 2 — Phase 1 leftover: GET /api/autonomy/auto-merge-toggle
+    was previously unauthenticated. Adding the admin guard means any
+    caller must present a valid X-Autonomy-Admin-Token header. Without
+    it, 401. With the wrong token, 401. This test pins the new
+    contract so a future refactor can't accidentally drop the guard."""
+    c = TestClient(admin_app)
+    # Missing header → 401.
+    r = c.get(
+        "/api/autonomy/auto-merge-toggle",
+        params={"client_profile": "any"},
+    )
+    assert r.status_code == 401
+
+    # Wrong token → 401.
+    r = c.get(
+        "/api/autonomy/auto-merge-toggle",
+        params={"client_profile": "any"},
+        headers={"X-Autonomy-Admin-Token": "nope"},
+    )
+    assert r.status_code == 401
+
+    # Correct token → 200.
+    r = c.get(
+        "/api/autonomy/auto-merge-toggle",
+        params={"client_profile": "any"},
+        headers={"X-Autonomy-Admin-Token": "admin-token"},
+    )
+    assert r.status_code == 200
+
+
+def test_get_auto_merge_toggle_503_when_admin_token_not_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the service has no admin token configured, every admin GET
+    returns 503 instead of silently allowing through. Fail-closed."""
+    monkeypatch.setattr(settings, "autonomy_db_path", str(tmp_path / "a.db"))
+    monkeypatch.setattr(settings, "autonomy_admin_token", "")
+    autonomy_ingest._bucket = TokenBucket(capacity=100, refill_per_sec=100.0)
+    app = FastAPI()
+    app.include_router(router)
+    c = TestClient(app)
+    r = c.get(
+        "/api/autonomy/auto-merge-toggle",
+        params={"client_profile": "any"},
+        headers={"X-Autonomy-Admin-Token": "anything"},
+    )
+    assert r.status_code == 503
 
 
 def test_get_auto_merge_decisions_lists_recent(test_app: FastAPI) -> None:
@@ -1465,7 +1531,11 @@ def test_get_auto_merge_decisions_lists_recent(test_app: FastAPI) -> None:
             },
             headers={"X-Internal-Api-Token": "test-token"},
         )
-    r = c.get("/api/autonomy/auto-merge-decisions", params={"limit": 10})
+    r = c.get(
+        "/api/autonomy/auto-merge-decisions",
+        params={"limit": 10},
+        headers=_ADMIN_HEADERS,
+    )
     assert r.status_code == 200
     decisions = r.json()["decisions"]
     assert len(decisions) == 3
@@ -1478,6 +1548,7 @@ def test_get_auto_merge_decisions_lists_recent(test_app: FastAPI) -> None:
     r = c.get(
         "/api/autonomy/auto-merge-decisions",
         params={"repo_full_name": "acme/widgets", "limit": 10},
+        headers=_ADMIN_HEADERS,
     )
     assert r.status_code == 200
     assert len(r.json()["decisions"]) == 3
@@ -1486,6 +1557,7 @@ def test_get_auto_merge_decisions_lists_recent(test_app: FastAPI) -> None:
     r = c.get(
         "/api/autonomy/auto-merge-decisions",
         params={"client_profile": "rockwell", "limit": 10},
+        headers=_ADMIN_HEADERS,
     )
     assert r.status_code == 200
     assert len(r.json()["decisions"]) == 3

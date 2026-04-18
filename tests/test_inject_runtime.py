@@ -198,6 +198,25 @@ def test_non_salesforce_profile_unaffected() -> None:
         assert "salesforce" not in mcp["mcpServers"]
 
 
+def test_runtime_version_stamp_written() -> None:
+    """inject_runtime.py must write .harness/runtime-version so agents can
+    report which harness version they're running under. Previously only the
+    shell variant did this, so production agents logged empty values.
+    """
+    runtime_version = (Path(__file__).resolve().parents[1] / "runtime" / "VERSION").read_text()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        client = Path(tmp) / "version-stamp"
+        client.mkdir()
+
+        result = run_inject(str(client))
+        assert result.returncode == 0, result.stderr
+
+        stamp = client / ".harness" / "runtime-version"
+        assert stamp.exists(), "runtime-version stamp not written"
+        assert stamp.read_text() == runtime_version
+
+
 if __name__ == "__main__":
     test_basic_injection()
     test_no_client_claude_md()
@@ -208,4 +227,5 @@ if __name__ == "__main__":
     test_salesforce_profile_skills_copied()
     test_non_salesforce_profile_skill_not_leaked()
     test_non_salesforce_profile_unaffected()
+    test_runtime_version_stamp_written()
     print("All tests passed")

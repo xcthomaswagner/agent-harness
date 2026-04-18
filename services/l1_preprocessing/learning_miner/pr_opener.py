@@ -39,6 +39,42 @@ _SAFE_BRANCH_RE = re.compile(r"^[A-Za-z0-9_./+-]+$")
 _BRANCH_PREFIX = "learning/lesson-"
 _REVERT_BRANCH_PREFIX = "learning/revert-"
 
+# Repo URL shape. ``inputs.harness_repo_url`` is f-string interpolated
+# into ``git clone <url> <dir>`` argv — without validation, an operator
+# who edits the setting to ``https://attacker.com/pwn.git`` or
+# ``file:///etc/passwd`` would have L1 clone from the wrong origin and
+# generate a PR against an attacker-controlled repo. The pattern only
+# accepts ``https://github.com/<owner>/<repo>[.git]`` shapes. No
+# whitespace, no path traversal.
+_SAFE_REPO_URL_RE = re.compile(
+    r"^https://github\.com/[^/\s]+/[^/\s]+(?:\.git)?$"
+)
+
+# Local filesystem paths — permitted for tests and local-dev flows
+# where the "origin" is a local bare repo. Must be an absolute path
+# (no ``..`` traversal) to avoid ambiguity with relative argv values
+# that could be reinterpreted by git.
+_SAFE_LOCAL_REPO_PATH_RE = re.compile(r"^/[^\s]+$")
+
+
+def _is_safe_repo_url(value: str) -> bool:
+    """Accept a known-safe GitHub URL OR an absolute local filesystem path.
+
+    Local paths are permitted because the integration test suite uses
+    tmp-path-backed bare repos as the "origin" for end-to-end clone
+    tests. Production deployments supply a ``https://github.com/...``
+    URL; attacker-crafted URLs (``https://attacker.com/pwn.git``,
+    ``file:///etc/passwd``, shell-injection strings) fall through both
+    patterns and are rejected.
+    """
+    if not value:
+        return False
+    if ".." in value:
+        return False
+    if _SAFE_REPO_URL_RE.fullmatch(value):
+        return True
+    return bool(_SAFE_LOCAL_REPO_PATH_RE.fullmatch(value))
+
 # Merge commit sha shape. ``git revert`` rejects non-shas loudly
 # anyway, but guarding input at the boundary prevents the shell
 # call from ever seeing a crafted string.
@@ -47,6 +83,28 @@ _SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 # Commit + PR defaults.
 _DEFAULT_AUTHOR_NAME = "XCentium Agent"
 _DEFAULT_AUTHOR_EMAIL = "xcagent.rockwell@xcentium.com"
+
+
+def _validate_pr_opener_inputs(base_branch: str, harness_repo_url: str) -> None:
+    """Fail fast before any subprocess when inputs look unsafe.
+
+    ``base_branch`` and ``harness_repo_url`` flow unchecked into git
+    argv in the current pr_opener. Operator/admin tooling builds these
+    values, but an accidentally malformed entry (e.g. ``base_branch =
+    "../evil"`` or a non-GitHub URL) would reach the shell and either
+    clone the wrong origin or escape the intended ref namespace.
+    Validation at the entry point of ``open_pr_for_lesson`` /
+    ``open_revert_pr_for_lesson`` means the subprocess layer never
+    sees a crafted value.
+
+    ``..`` is rejected in ``base_branch`` explicitly even though
+    _SAFE_BRANCH_RE tolerates ``.`` — a git ref traversal like
+    ``main..origin`` can reach sibling refs in downstream commands.
+    """
+    if not _SAFE_BRANCH_RE.fullmatch(base_branch) or ".." in base_branch:
+        raise ValueError(f"unsafe base_branch: {base_branch!r}")
+    if not _is_safe_repo_url(harness_repo_url):
+        raise ValueError(f"unsafe harness_repo_url: {harness_repo_url!r}")
 
 
 @dataclass(frozen=True)
@@ -334,7 +392,19 @@ def open_pr_for_lesson(inputs: OpenPRInputs) -> PROpenerResult:
     Returns a ``PROpenerResult``. Cleans up the scratch dir on
     success; leaves it in place on failure so an operator can
     investigate without re-running the LLM pipeline.
+
+    Raises ``ValueError`` BEFORE any subprocess call if ``base_branch``
+    or ``harness_repo_url`` look unsafe (see
+    ``_validate_pr_opener_inputs``). This is an attack-surface check,
+    not a data-quality check — the caller is expected to fix their
+    config, not retry with the same value.
     """
+    # Fail-fast input validation — BEFORE any subprocess. Both
+    # base_branch and harness_repo_url are f-string interpolated into
+    # git argv downstream; a crafted value (``../evil`` branch or a
+    # non-GitHub URL) would otherwise reach the shell layer.
+    _validate_pr_opener_inputs(inputs.base_branch, inputs.harness_repo_url)
+
     try:
         branch = _build_branch_name(inputs.lesson_id)
     except ValueError as exc:
@@ -716,7 +786,15 @@ def open_revert_pr_for_lesson(inputs: RevertPRInputs) -> PROpenerResult:
     Mirrors ``open_pr_for_lesson``: same scratch lifecycle, same
     auth env, same dry-run semantics. On success returns the revert
     PR URL in ``pr_url``.
+
+    Raises ``ValueError`` BEFORE any subprocess call if ``base_branch``
+    or ``harness_repo_url`` look unsafe.
     """
+    # Fail-fast input validation — BEFORE any subprocess. Same
+    # rationale as open_pr_for_lesson: crafted base_branch or repo URL
+    # must not reach the git clone / checkout argv.
+    _validate_pr_opener_inputs(inputs.base_branch, inputs.harness_repo_url)
+
     try:
         branch = _build_revert_branch_name(inputs.lesson_id)
     except ValueError as exc:

@@ -84,6 +84,15 @@ _RECURRENCE_REGRESS_THRESHOLD = 3
 # agent revert loop flips the verdict to HUMAN_REEDIT.
 _DEFAULT_AGENT_EMAIL = "xcagent.rockwell@xcentium.com"
 
+# When ``_provision_scratch`` returns None (clone failed) we can't
+# ``git log`` for human edits, so ``_detect_human_reedits`` falsely
+# returns ``(0, [])``. If the lesson is old enough that a real human
+# revert could exist, that silent zero would record CONFIRMED on a
+# lesson that was actually reverted. Defer measurement instead; the
+# next tick retries the clone. Aged-enough = updated_at is at least
+# ``_HUMAN_REEDIT_WINDOW_HOURS`` behind now.
+_HUMAN_REEDIT_WINDOW_HOURS = 48
+
 
 def _agent_email_lower() -> str:
     """Resolve the agent's git email at call time.
@@ -303,9 +312,25 @@ def _process_one_lesson(
     if _outcome_already_recorded(lesson_id):
         return
 
+    # Defer measurement when we can't run human-reedit detection on a
+    # lesson that's old enough for a human revert to have landed.
+    # ``_detect_human_reedits`` returns ``(0, [])`` when scratch_root is
+    # None, so proceeding here would record CONFIRMED on a lesson that
+    # may in fact have been reverted by an engineer. Staying at
+    # "pending measurement" lets a later tick (with a succeeding clone)
+    # score the lesson correctly.
+    scratch_root = scratch_provider()
+    if scratch_root is None and _lesson_aged_into_reedit_window(lesson):
+        logger.info(
+            "learning_outcomes_deferred_clone_failed",
+            lesson_id=lesson_id,
+            updated_at=str(lesson["updated_at"] or ""),
+        )
+        return
+
     try:
         _measure_lesson(
-            lesson, merged_commit_sha, scratch_root=scratch_provider()
+            lesson, merged_commit_sha, scratch_root=scratch_root
         )
         stats.outcomes_measured += 1
     except Exception as exc:
@@ -403,6 +428,27 @@ def _outcome_already_recorded(lesson_id: str) -> bool:
     """
     with autonomy_conn() as conn:
         return get_latest_outcome(conn, lesson_id) is not None
+
+
+def _lesson_aged_into_reedit_window(lesson: sqlite3.Row) -> bool:
+    """Return True when ``updated_at`` is at least the reedit window behind now.
+
+    Freshly-applied lessons (age < _HUMAN_REEDIT_WINDOW_HOURS) don't
+    need human-reedit detection yet — not enough wall time has passed
+    for a human to have reverted. Only defer clone-failure measurement
+    for lessons that have aged past that boundary.
+    """
+    updated_at = str(lesson["updated_at"] or "")
+    if not updated_at:
+        return False
+    try:
+        updated_dt = datetime.fromisoformat(updated_at)
+    except ValueError:
+        return False
+    if updated_dt.tzinfo is None:
+        updated_dt = updated_dt.replace(tzinfo=UTC)
+    age = datetime.now(UTC) - updated_dt
+    return age >= timedelta(hours=_HUMAN_REEDIT_WINDOW_HOURS)
 
 
 def _measure_lesson(

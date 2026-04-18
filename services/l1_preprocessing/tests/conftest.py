@@ -61,6 +61,23 @@ def _reset_singletons() -> None:
     main._reset_state()
 
 
+@pytest.fixture(autouse=True)
+def _open_phase1_dev_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 1 fail-closed defaults break pre-existing tests that assumed
+    "no secret = accept". The behavior change is intentional for
+    production but every test that touches a webhook or dashboard route
+    would otherwise need to individually patch
+    ``allow_unsigned_webhooks`` and ``dashboard_allow_anonymous``. Flip
+    both escape-hatches on here so the existing suite keeps exercising
+    business logic; tests that specifically assert the fail-closed path
+    re-disable them inside a targeted ``patch``/``monkeypatch`` block.
+    """
+    monkeypatch.setattr(main.settings, "allow_unsigned_webhooks", True)
+    monkeypatch.setattr(main.settings, "dashboard_allow_anonymous", True)
+
+
 @pytest.fixture
 async def client() -> AsyncGenerator[AsyncClient, None]:
     """Async HTTP client for testing FastAPI endpoints."""
