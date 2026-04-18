@@ -251,6 +251,82 @@ class TestRollingThresholdEmission:
         assert out == []
 
 
+class TestMultiPlatformWindow:
+    """Regression guard for the multi-platform window bug.
+
+    With 2+ active platforms each emitting WINDOW_RUNS high-rejection
+    runs in the window, ``_emit_if_rolling_threshold_met`` used to
+    fetch only ``limit=WINDOW_RUNS`` rows globally. Split 5/5 across
+    two platforms, neither platform's per-group check could satisfy
+    ``>= WINDOW_RUNS``, so neither lesson emitted. Fix fetches
+    ``WINDOW_RUNS * MAX_PLATFORMS`` rows so per-platform windows
+    can be satisfied independently.
+    """
+
+    def test_two_platforms_each_emit_their_lesson(
+        self,
+        conn,
+        archive_root: Path,
+        tmp_path: Path,
+    ) -> None:
+        from unittest.mock import patch
+
+        import client_profile as cp
+
+        # Scratch profiles with two distinct non-empty platforms. Any
+        # non-empty, distinct strings would do — values just flow
+        # through _resolve_platform_profile into the scope key.
+        profiles_dir = tmp_path / "profiles"
+        profiles_dir.mkdir()
+        (profiles_dir / "p-alpha.yaml").write_text(
+            "client: alpha\nplatform_profile: \"alpha_stack\"\n"
+        )
+        (profiles_dir / "p-beta.yaml").write_text(
+            "client: beta\nplatform_profile: \"beta_stack\"\n"
+        )
+
+        _resolve_platform_profile.cache_clear()
+        with patch.object(cp, "PROFILES_DIR", profiles_dir):
+            # Seed 5 high-rejection runs on each platform. opened_days_ago
+            # interleaves across platforms so the global ORDER BY
+            # observed_at DESC in list_recent_metrics would mix them.
+            for i in range(WINDOW_RUNS):
+                tid = f"ALPHA-{600+i}"
+                _seed_pr_run(
+                    conn,
+                    i + 1,
+                    tid,
+                    profile="p-alpha",
+                    opened_days_ago=2 * WINDOW_RUNS - 2 * i,
+                )
+                _write_judge_verdict(
+                    archive_root, tid, validated=1, rejected=9
+                )
+            for i in range(WINDOW_RUNS):
+                tid = f"BETA-{700+i}"
+                _seed_pr_run(
+                    conn,
+                    100 + i + 1,
+                    tid,
+                    profile="p-beta",
+                    opened_days_ago=2 * WINDOW_RUNS - 1 - 2 * i,
+                )
+                _write_judge_verdict(
+                    archive_root, tid, validated=1, rejected=9
+                )
+
+            out = ReviewerJudgeRejectionRateDetector().scan(
+                conn, window_days=14
+            )
+
+        # Each platform has 5 runs at 90% — each should emit one lesson.
+        platforms = sorted(p.platform_profile for p in out)
+        assert platforms == ["alpha_stack", "beta_stack"], (
+            "Expected one lesson per platform with 5 rows each "
+            f"(got {platforms})"
+        )
+
+
 class TestRegistry:
     def test_build_returns_instance(self) -> None:
         det = build()

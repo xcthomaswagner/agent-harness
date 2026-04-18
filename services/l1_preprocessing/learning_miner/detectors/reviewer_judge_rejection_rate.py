@@ -65,6 +65,18 @@ METRIC_NAME = "reviewer_judge_rejection_rate"
 WINDOW_RUNS = 5
 RATE_THRESHOLD = 0.7
 
+# ``list_recent_metrics`` returns rows globally sorted by observed_at
+# DESC, but each lesson is emitted per-platform. With only WINDOW_RUNS
+# rows fetched, a multi-platform deployment cannot satisfy the per-
+# platform "at least WINDOW_RUNS observations" check — the 5 rows
+# could be split 3/2 across two platforms and neither platform's
+# rolling window would pass. Fetching WINDOW_RUNS * MAX_PLATFORMS
+# guarantees that if any one platform has WINDOW_RUNS fresh rows
+# they are all visible, regardless of how many other platforms are
+# reporting simultaneously. Platform count is small and bounded so
+# this stays cheap.
+MAX_PLATFORMS = 4
+
 # Test override, same pattern as the other archive-reading detectors.
 JUDGE_ARCHIVE_ROOT: Path | None = None
 
@@ -255,14 +267,18 @@ class ReviewerJudgeRejectionRateDetector:
     def _emit_if_rolling_threshold_met(
         self, conn: sqlite3.Connection
     ) -> list[CandidateProposal]:
+        # Pull WINDOW_RUNS * MAX_PLATFORMS rows so a multi-platform
+        # deployment can independently satisfy the per-platform
+        # rolling-window check below. If we only fetched WINDOW_RUNS
+        # rows, a 3/2 split across two platforms would silently skip
+        # emission on both.
         metrics = list_recent_metrics(
-            conn, metric_name=METRIC_NAME, limit=WINDOW_RUNS
+            conn,
+            metric_name=METRIC_NAME,
+            limit=WINDOW_RUNS * MAX_PLATFORMS,
         )
         if len(metrics) < WINDOW_RUNS:
             # Insufficient history — do not emit yet.
-            return []
-        mean = sum(m.metric_value for m in metrics) / len(metrics)
-        if mean <= RATE_THRESHOLD:
             return []
 
         # Use the most recent ticket's client/platform as the scope.
