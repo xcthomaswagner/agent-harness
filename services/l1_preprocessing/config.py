@@ -41,8 +41,18 @@ class Settings(BaseSettings):
     # Webhook
     webhook_secret: str = ""
 
+    # Phase 1 fail-closed default: L1 webhooks reject unauthenticated
+    # traffic unless this is explicitly set true. Set in .env for local
+    # dev only.
+    allow_unsigned_webhooks: bool = False
+
     # Internal API auth (protects /api/* endpoints)
     api_key: str = ""  # Set to require X-API-Key header on control-plane endpoints
+
+    # Phase 1 fail-closed default: dashboard GETs require auth unless
+    # explicitly opened for anonymous access. Set true in .env for
+    # local dev only.
+    dashboard_allow_anonymous: bool = False
 
     # Figma (optional — extraction skipped if empty)
     figma_api_token: str = ""

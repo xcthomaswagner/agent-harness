@@ -285,8 +285,9 @@ async def _post_to_l1_with_retry(
     Returns True on 2xx, False on non-retryable 4xx or double-fail 5xx.
     Shared path for every L1 forwarder — both the internal autonomy
     pipelines (which use ``X-Internal-Api-Token``, the default) and
-    the ``/api/agent-complete`` caller (which today sends no auth
-    header because L1 runs with ``API_KEY`` unset in local dev).
+    the ``/api/agent-complete`` caller (which passes an explicit
+    ``X-API-Key`` header sourced from the shared
+    ``L1_INTERNAL_API_TOKEN`` env var — see ``_handle_review_approved``).
 
     ``log_context`` is merged into every failure log.
     """
@@ -946,9 +947,11 @@ async def _handle_review_approved(payload: dict[str, Any]) -> None:
     ticket_type = _ticket_type_from_labels(ctx.labels)
 
     # Notify L1 of the approval for autonomy tracking via the shared
-    # retry helper. ``headers={}`` preserves the current no-auth
-    # header behavior (L1 runs with API_KEY unset in dev); swap to
-    # ``{"X-API-Key": ...}`` once production enforces it.
+    # retry helper. Phase 1 auth: L1's /api/agent-complete is gated
+    # behind ``_require_api_key`` (X-API-Key header). Reuse the
+    # L1_INTERNAL_API_TOKEN env var as the shared secret — L1 and L3
+    # already share its value for the autonomy event path, and adding
+    # a second env var for the same shared secret invites drift.
     await _post_to_l1_with_retry(
         "/api/agent-complete",
         {
@@ -959,7 +962,7 @@ async def _handle_review_approved(payload: dict[str, Any]) -> None:
         },
         log_event="l1_agent_complete_failed",
         log_context={"ticket_id": ctx.ticket_id, "branch": ctx.branch},
-        headers={},
+        headers={"X-API-Key": os.getenv("L1_INTERNAL_API_TOKEN") or ""},
     )
 
     log.info(
@@ -1250,10 +1253,22 @@ async def github_webhook(
     x_github_event: str | None = Header(default=None, alias="x-github-event"),
     x_github_delivery: str | None = Header(default=None, alias="x-github-delivery"),
 ) -> dict[str, str]:
-    """Receive GitHub webhooks for PR events."""
+    """Receive GitHub webhooks for PR events.
+
+    Phase 1 fail-closed: when ``GITHUB_WEBHOOK_SECRET`` is unset and
+    ``ALLOW_UNSIGNED_WEBHOOKS=true`` is not set either, raise 503.
+    Previously we accepted unsigned requests whenever no secret was
+    configured ("dev mode"), which meant any misconfigured production
+    deploy silently accepted anonymous webhooks.
+    """
     body = await request.body()
 
-    # Validate signature — skip validation in dev mode (no secret configured)
+    # Validate signature — fail-closed by default.
+    allow_unsigned = os.getenv("ALLOW_UNSIGNED_WEBHOOKS", "").lower() == "true"
+    if not WEBHOOK_SECRET and not allow_unsigned:
+        raise HTTPException(
+            status_code=503, detail="GITHUB_WEBHOOK_SECRET not configured"
+        )
     if WEBHOOK_SECRET:
         if not x_hub_signature_256:
             raise HTTPException(status_code=401, detail="Missing webhook signature")
@@ -1559,7 +1574,16 @@ async def ado_build_webhook(
         default=None, alias="x-ado-webhook-token"
     ),
 ) -> dict[str, str]:
-    """Receive Azure DevOps Service Hook webhooks for build.complete events."""
+    """Receive Azure DevOps Service Hook webhooks for build.complete events.
+
+    Phase 1 fail-closed: when ``ADO_WEBHOOK_TOKEN`` is unset and
+    ``ALLOW_UNSIGNED_WEBHOOKS=true`` is not set either, raise 503.
+    """
+    allow_unsigned = os.getenv("ALLOW_UNSIGNED_WEBHOOKS", "").lower() == "true"
+    if not ADO_WEBHOOK_TOKEN and not allow_unsigned:
+        raise HTTPException(
+            status_code=503, detail="ADO_WEBHOOK_TOKEN not configured"
+        )
     if ADO_WEBHOOK_TOKEN and (
         not x_ado_webhook_token
         or not hmac.compare_digest(x_ado_webhook_token, ADO_WEBHOOK_TOKEN)
@@ -1607,8 +1631,17 @@ async def ado_pr_webhook(
         default=None, alias="x-ado-webhook-token"
     ),
 ) -> dict[str, str]:
-    """Receive Azure DevOps Service Hook webhooks for PR events."""
-    # Validate token if configured (constant-time comparison)
+    """Receive Azure DevOps Service Hook webhooks for PR events.
+
+    Phase 1 fail-closed: when ``ADO_WEBHOOK_TOKEN`` is unset and
+    ``ALLOW_UNSIGNED_WEBHOOKS=true`` is not set either, raise 503.
+    """
+    # Validate token if configured (constant-time comparison).
+    allow_unsigned = os.getenv("ALLOW_UNSIGNED_WEBHOOKS", "").lower() == "true"
+    if not ADO_WEBHOOK_TOKEN and not allow_unsigned:
+        raise HTTPException(
+            status_code=503, detail="ADO_WEBHOOK_TOKEN not configured"
+        )
     if ADO_WEBHOOK_TOKEN and (
         not x_ado_webhook_token
         or not hmac.compare_digest(x_ado_webhook_token, ADO_WEBHOOK_TOKEN)

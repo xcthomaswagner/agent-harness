@@ -85,17 +85,62 @@ def _require_api_key(x_api_key: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
 
 
+def _require_dashboard_auth(x_api_key: str | None = Header(default=None)) -> None:
+    """Dependency that enforces API key auth on dashboard / admin GET endpoints.
+
+    Phase 1 fail-closed default for dashboards: when neither
+    ``settings.api_key`` nor ``settings.dashboard_allow_anonymous``
+    is configured, raise 503 so operators discover the unprotected
+    state instead of silently exposing the UI. The escape hatch for
+    local dev is setting ``DASHBOARD_ALLOW_ANONYMOUS=true`` (which
+    logs a startup warning).
+
+    * ``settings.api_key`` set — require the X-API-Key header (same
+      constant-time compare as ``_require_api_key``).
+    * ``settings.api_key`` unset AND ``dashboard_allow_anonymous`` true —
+      open access (local dev opt-in, not the default).
+    * Both unset — fail closed with 503.
+    """
+    if settings.api_key:
+        if not x_api_key or not hmac.compare_digest(x_api_key, settings.api_key):
+            raise HTTPException(
+                status_code=401, detail="Invalid or missing X-API-Key"
+            )
+        return
+    if settings.dashboard_allow_anonymous:
+        return
+    raise HTTPException(status_code=503, detail="Dashboard auth not configured")
+
+
 app = FastAPI(
     title="Agentic Harness L1 Pre-Processing",
     description="Receives Jira/ADO webhooks, enriches tickets, dispatches to Agent Teams.",
     version="0.1.0",
 )
-app.include_router(unified_router)
-app.include_router(trace_router)
+# Dashboard routers are pure-GET views — apply _require_dashboard_auth
+# globally at the include site so every route requires X-API-Key (or
+# DASHBOARD_ALLOW_ANONYMOUS=true for local dev).
+app.include_router(
+    unified_router, dependencies=[Depends(_require_dashboard_auth)]
+)
+app.include_router(
+    trace_router, dependencies=[Depends(_require_dashboard_auth)]
+)
+# autonomy_router mixes internal-POST (own admin-token auth) and
+# dashboard-GET endpoints; leave existing per-route auth untouched.
 app.include_router(autonomy_router)
-app.include_router(autonomy_dashboard_router)
-app.include_router(learning_api_router)
-app.include_router(learning_dashboard_router)
+app.include_router(
+    autonomy_dashboard_router, dependencies=[Depends(_require_dashboard_auth)]
+)
+# learning_api_router has mixed GET/POST — GETs get dashboard auth via
+# the router-include dependency; POST admin writes retain their own
+# ``_guard_admin_request`` token check layered on top.
+app.include_router(
+    learning_api_router, dependencies=[Depends(_require_dashboard_auth)]
+)
+app.include_router(
+    learning_dashboard_router, dependencies=[Depends(_require_dashboard_auth)]
+)
 
 
 @app.on_event("startup")
@@ -105,6 +150,24 @@ async def _validate_config() -> None:
         logger.warning(
             "webhook_secret_not_configured",
             hint="Webhook signature validation is DISABLED. Set WEBHOOK_SECRET in .env",
+        )
+    if settings.allow_unsigned_webhooks:
+        logger.error(
+            "allow_unsigned_webhooks_enabled",
+            hint=(
+                "ALLOW_UNSIGNED_WEBHOOKS=true — webhook auth is DISABLED. "
+                "This MUST only be used for local development. Unset in "
+                "production or anyone on the network can inject tickets."
+            ),
+        )
+    if not settings.api_key and settings.dashboard_allow_anonymous:
+        logger.error(
+            "dashboard_allow_anonymous_enabled",
+            hint=(
+                "DASHBOARD_ALLOW_ANONYMOUS=true and no API_KEY set — "
+                "dashboards and trace bundles are unauthenticated. "
+                "Set API_KEY in production."
+            ),
         )
     if not settings.anthropic_api_key:
         logger.error("anthropic_api_key_missing", hint="Analyst will fail without API key")
@@ -480,18 +543,19 @@ async def _process_ticket(ticket: TicketPayload, trace_id: str = "") -> None:
 
 @app.get("/health")
 async def health() -> dict[str, object]:
-    """Health check with configuration status."""
-    return {
-        "status": "ok",
-        "anthropic_api_key": bool(settings.anthropic_api_key),
-        "jira_configured": bool(settings.jira_base_url and settings.jira_api_token),
-        "ado_configured": bool(settings.ado_org_url and settings.ado_pat),
-        "webhook_secret": bool(settings.webhook_secret),
-        "client_repo": bool(settings.default_client_repo),
-    }
+    """Health check.
+
+    Intentionally returns only liveness status — no secret-presence
+    booleans. Phase 1: prior fields like ``webhook_secret`` and
+    ``anthropic_api_key`` leaked information about which credentials
+    were configured to any unauthenticated caller that could probe
+    the endpoint. Operators checking config should look at startup
+    logs (warnings + errors for missing / open-mode config) instead.
+    """
+    return {"status": "ok"}
 
 
-@app.get("/stats/webhooks")
+@app.get("/stats/webhooks", dependencies=[Depends(_require_dashboard_auth)])
 async def webhook_stats() -> dict[str, object]:
     """Cumulative webhook outcome counts since process start / last reset.
 
@@ -831,7 +895,10 @@ def _build_bundle(ticket_id: str, entries: list[dict[str, Any]]) -> bytes:
 # FastAPI/Starlette matches by segment count before falling back to dynamic
 # path parameters. Do NOT add a catch-all like ``/{rest:path}`` to
 # trace_router or this route will be silently shadowed.
-@app.get("/traces/{ticket_id}/bundle")
+@app.get(
+    "/traces/{ticket_id}/bundle",
+    dependencies=[Depends(_require_dashboard_auth)],
+)
 async def trace_bundle(ticket_id: str) -> Response:
     """Return a gzipped tar of the full trace context for ``ticket_id``.
 
@@ -1028,7 +1095,10 @@ _ARTIFACT_DOWNLOAD_MAP: dict[str, tuple[str, str]] = {
 }
 
 
-@app.get("/traces/{ticket_id}/artifact/{artifact_type}")
+@app.get(
+    "/traces/{ticket_id}/artifact/{artifact_type}",
+    dependencies=[Depends(_require_dashboard_auth)],
+)
 async def trace_artifact(ticket_id: str, artifact_type: str) -> Response:
     """Return a single raw artifact file from a trace.
 
@@ -1231,34 +1301,6 @@ async def admin_re_redact() -> dict[str, int]:
     }
 
 
-async def _validate_and_parse_webhook(
-    request: Request, signature: str | None,
-) -> dict[str, Any]:
-    """Validate webhook signature and parse JSON body.
-
-    Shared by Jira and ADO webhook handlers.
-    """
-    body = await request.body()
-
-    if settings.webhook_secret:
-        if not signature:
-            raise HTTPException(status_code=401, detail="Missing webhook signature")
-        expected = hmac.new(
-            settings.webhook_secret.encode(), body, hashlib.sha256
-        ).hexdigest()
-        sig_value = signature.removeprefix("sha256=")
-        if not hmac.compare_digest(expected, sig_value):
-            raise HTTPException(status_code=401, detail="Invalid webhook signature")
-
-    try:
-        payload = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid JSON body: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=422, detail="Webhook payload must be a JSON object")
-    return payload
-
-
 async def _validate_and_parse_webhook_dual_auth(
     request: Request,
     signature: str | None,
@@ -1270,25 +1312,35 @@ async def _validate_and_parse_webhook_dual_auth(
 ) -> dict[str, Any]:
     """Dual-mode webhook auth: HMAC signature OR shared bearer token.
 
-    Shared by ``jira_bug_webhook`` and ``ado_webhook`` — both need to
-    accept either a signed body (for CI/CD pipelines that can compute
-    HMAC) or a shared header token (for Jira Automation / ADO Service
-    Hooks that cannot). Previously each handler had its own ~28 line
-    implementation, and one used raw ``==`` to compare the bearer
-    token (timing-attack hazard) while the other used
-    ``hmac.compare_digest``. Consolidating here guarantees both paths
-    use constant-time comparison.
+    Shared by every webhook handler — each one optionally supplies
+    a bearer-token fallback (Jira Automation / ADO Service Hooks
+    cannot compute HMAC), but callers that have no bearer fallback
+    pass ``bearer_token=None`` + ``bearer_token_secret=""`` and the
+    function degenerates into signature-only mode.
 
-    ``no_secret_behavior``:
-      * ``"fail_closed_503"`` — when neither the HMAC secret nor the
-        bearer token is configured, raise 503. Use this for endpoints
-        that must never accept unauthenticated requests.
-      * ``"open_local_dev"`` — same scenario, accept the request. Use
-        this for endpoints whose local-dev workflow relies on running
-        the service without any secrets at all.
+    Uses ``hmac.compare_digest`` for constant-time comparison on
+    both the HMAC digest and the bearer token so the check does not
+    leak byte-by-byte timing info about either secret via CPython's
+    short-circuited ``!=`` on strings.
 
-    ``auth_label`` goes into the 401 detail so the rejected side can
-    distinguish which webhook's auth failed.
+    Phase 1: fail-closed is now the default. The
+    ``no_secret_behavior`` parameter is retained for clarity at
+    call sites but its semantics are:
+
+      * ``"fail_closed_503"`` — strict. When neither secret is
+        configured, ALWAYS raise 503. Use for endpoints that must
+        never accept unauthenticated requests regardless of local-dev
+        convenience.
+      * ``"open_local_dev"`` — honors the
+        ``settings.allow_unsigned_webhooks`` escape hatch. When
+        neither secret is configured AND
+        ``allow_unsigned_webhooks=True``, accept the request
+        (startup hook loudly error-logs this state). When neither
+        secret is configured and ``allow_unsigned_webhooks=False``
+        (the default), raise 503 — matching fail_closed_503.
+
+    ``auth_label`` goes into the 401/503 detail so the rejected side
+    can distinguish which webhook's auth failed.
     """
     body = await request.body()
 
@@ -1321,7 +1373,13 @@ async def _validate_and_parse_webhook_dual_auth(
                     detail=f"{auth_label} not configured",
                 )
             if no_secret_behavior == "open_local_dev":
-                auth_ok = True
+                if settings.allow_unsigned_webhooks:
+                    auth_ok = True
+                else:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"{auth_label} not configured",
+                    )
             else:
                 raise ValueError(
                     f"Invalid no_secret_behavior: {no_secret_behavior!r}"
@@ -1351,8 +1409,23 @@ async def jira_webhook(
     background_tasks: BackgroundTasks,
     x_hub_signature: str | None = Header(default=None, alias="x-hub-signature"),
 ) -> dict[str, str]:
-    """Receive a Jira automation webhook and enqueue for processing."""
-    payload = await _validate_and_parse_webhook(request, x_hub_signature)
+    """Receive a Jira automation webhook and enqueue for processing.
+
+    Auth: HMAC signature via ``x-hub-signature`` header. No bearer
+    fallback — Jira Automation rules that cannot compute HMAC should
+    use ``/webhooks/jira-bug`` (which has a token fallback) or sign
+    via a webhook forwarder. Fails closed (503) when no secret is
+    configured — set ``ALLOW_UNSIGNED_WEBHOOKS=true`` in .env to opt
+    in to local-dev no-secret mode.
+    """
+    payload = await _validate_and_parse_webhook_dual_auth(
+        request,
+        x_hub_signature,
+        bearer_token=None,
+        bearer_token_secret="",
+        no_secret_behavior="open_local_dev",
+        auth_label="Jira webhook",
+    )
     ticket = _get_jira_adapter().normalize(payload)
     return _dispatch_ticket(
         ticket,
@@ -1406,9 +1479,9 @@ async def ado_webhook(
     """Receive an Azure DevOps Service Hook webhook and enqueue for processing.
 
     Auth: accepts HMAC signature (x-hub-signature) OR a shared token
-    (X-ADO-Webhook-Token). Opens access when neither secret is
-    configured so local development can send webhooks without any
-    secret management. Rejects otherwise.
+    (X-ADO-Webhook-Token). Phase 1 fail-closed default: when neither
+    secret is configured, raise 503 unless
+    ``ALLOW_UNSIGNED_WEBHOOKS=true`` is set for local dev.
     """
     payload = await _validate_and_parse_webhook_dual_auth(
         request,
@@ -1668,6 +1741,13 @@ async def github_webhook_proxy(request: Request) -> dict[str, str]:
 
     Since ngrok free tier only supports one tunnel, GitHub webhooks arrive
     at L1 (port 8000) and are forwarded to L3 (port 8001).
+
+    Phase 1 fail-closed behavior: when L3 is unreachable or returns an
+    error, raise 503 so GitHub retries the delivery on its standard
+    schedule. Previously we absorbed the failure and returned 202 with a
+    ``{"status": "l3_error"}`` body — GitHub treats any 2xx as "delivered
+    successfully" and never retries, silently dropping PR events while
+    the L3 service is down or misconfigured.
     """
     body = await request.body()
     headers = dict(request.headers)
@@ -1692,15 +1772,24 @@ async def github_webhook_proxy(request: Request) -> dict[str, str]:
                     "l3_proxy_http_error",
                     status=response.status_code,
                 )
-                return {"status": "l3_error", "http_status": str(response.status_code)}
+                raise HTTPException(
+                    status_code=503,
+                    detail="L3 PR review service unavailable",
+                )
             result: dict[str, str] = response.json()
             return result
-        except httpx.ConnectError:
+        except httpx.ConnectError as exc:
             logger.warning("l3_service_unavailable")
-            return {"status": "l3_unavailable"}
+            raise HTTPException(
+                status_code=503,
+                detail="L3 PR review service unavailable",
+            ) from exc
         except (httpx.HTTPError, ValueError) as exc:
             logger.warning("l3_proxy_failed", error=str(exc)[:200])
-            return {"status": "l3_error"}
+            raise HTTPException(
+                status_code=503,
+                detail="L3 PR review service unavailable",
+            ) from exc
 
 
 class FailedUnit(BaseModel):
@@ -1765,21 +1854,26 @@ def _derive_repo_full_name(worktree_path: str) -> str:
     return ""
 
 
-@app.post("/api/agent-trace", status_code=200)
+@app.post(
+    "/api/agent-trace",
+    status_code=200,
+    dependencies=[Depends(_require_api_key)],
+)
 async def agent_trace(request: Request) -> dict[str, str]:
     """Accept live trace events from running agents.
 
     Called by the file-watcher thread in spawn_team.py as the agent
-    writes to pipeline.jsonl. Entries appear in the dashboard in real-time.
-    No auth required — internal network only (same host as spawn_team.py).
+    writes to pipeline.jsonl. Entries appear in the dashboard in
+    real-time. Requires ``X-API-Key`` when ``API_KEY`` is set —
+    external callers (agent worktrees) already pass the key.
 
     ``ticket_id`` is validated against the trace-store id pattern BEFORE
     being passed to ``append_trace``: without validation, a path-like
     value (``../../tmp/pwn``) would escape ``LOGS_DIR`` and have
     attacker-controlled JSON appended to an arbitrary ``.jsonl`` file
     since ``append_trace`` builds ``LOGS_DIR / f"{ticket_id}.jsonl"``.
-    The endpoint is intentionally open to the local file-watcher, so
-    input sanitisation is the sole guardrail.
+    Input sanitisation remains a defense-in-depth guardrail on top of
+    the API-key gate.
     """
     body = await request.json()
     ticket_id = str(body.pop("ticket_id", ""))
