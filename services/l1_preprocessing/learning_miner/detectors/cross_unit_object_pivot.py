@@ -30,7 +30,6 @@ Archive layout expected (matches ``scripts/spawn_team.py``)::
 
 from __future__ import annotations
 
-import json
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -40,7 +39,10 @@ from typing import Any
 
 import structlog
 
-from learning_miner.detectors._archive import load_json_object
+from learning_miner.detectors._archive import (
+    build_append_section_delta,
+    load_json_object,
+)
 from learning_miner.detectors._archive import plans_dir as _plans_dir_helper
 from learning_miner.detectors.base import CandidateProposal, EvidenceItem
 from learning_miner.detectors.human_issue_cluster import (
@@ -169,16 +171,12 @@ def _build_proposed_delta(
         "update. Add a plan-review supplement so the plan reviewer "
         "flags this class of gap explicitly."
     )
-    delta = {
-        "target_path": target,
-        "edit_type": "append_section",
-        "anchor": "## Review Checklist",
-        "before": "",
-        "after": after_line,
-        "rationale_md": rationale,
-        "token_budget_delta": len(after_line.split()) * 2,
-    }
-    return json.dumps(delta, sort_keys=True)
+    return build_append_section_delta(
+        target_path=target,
+        anchor="## Review Checklist",
+        after_line=after_line,
+        rationale_md=rationale,
+    )
 
 
 class CrossUnitObjectPivotDetector:

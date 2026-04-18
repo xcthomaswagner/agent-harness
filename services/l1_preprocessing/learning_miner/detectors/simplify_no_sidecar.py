@@ -29,7 +29,6 @@ detector polices.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -37,6 +36,7 @@ from typing import Any
 
 import structlog
 
+from learning_miner.detectors._archive import build_append_section_delta
 from learning_miner.detectors.base import CandidateProposal, EvidenceItem
 from learning_miner.detectors.human_issue_cluster import (
     _resolve_platform_profile,
@@ -128,16 +128,12 @@ def _build_proposed_delta(
         "but no simplify.md sidecar landed in the trace archive. Reinforce "
         "the skill's post-condition so the output is written unconditionally."
     )
-    delta = {
-        "target_path": target,
-        "edit_type": "append_section",
-        "anchor": "## Output",
-        "before": "",
-        "after": after_line,
-        "rationale_md": rationale,
-        "token_budget_delta": len(after_line.split()) * 2,
-    }
-    return json.dumps(delta, sort_keys=True)
+    return build_append_section_delta(
+        target_path=target,
+        anchor="## Output",
+        after_line=after_line,
+        rationale_md=rationale,
+    )
 
 
 class SimplifyNoSidecarDetector:

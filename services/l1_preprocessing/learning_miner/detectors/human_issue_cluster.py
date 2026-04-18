@@ -17,7 +17,6 @@ and scope-key rationale.
 
 from __future__ import annotations
 
-import json
 import os
 import posixpath
 import sqlite3
@@ -28,6 +27,7 @@ from functools import lru_cache
 import structlog
 
 from client_profile import load_profile
+from learning_miner.detectors._archive import build_append_section_delta
 from learning_miner.detectors.base import CandidateProposal, EvidenceItem
 
 logger = structlog.get_logger()
@@ -192,16 +192,12 @@ def _build_proposed_delta(
         + (f" in {file_pattern}" if file_pattern else "")
         + "."
     )
-    delta = {
-        "target_path": target,
-        "edit_type": "append_section",
-        "anchor": "## Review Checklist",
-        "before": "",
-        "after": after_line,
-        "rationale_md": rationale,
-        "token_budget_delta": len(after_line.split()) * 2,
-    }
-    return json.dumps(delta, sort_keys=True)
+    return build_append_section_delta(
+        target_path=target,
+        anchor="## Review Checklist",
+        after_line=after_line,
+        rationale_md=rationale,
+    )
 
 
 class HumanIssueClusterDetector:

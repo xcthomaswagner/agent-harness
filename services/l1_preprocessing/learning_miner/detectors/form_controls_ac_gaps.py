@@ -59,7 +59,6 @@ taxonomy categories this detector covers.
 
 from __future__ import annotations
 
-import json
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -70,6 +69,7 @@ from typing import Any
 import structlog
 
 from learning_miner.detectors._archive import (
+    build_append_section_delta,
     load_json_object,
     ticket_json_path,
 )
@@ -255,16 +255,12 @@ def _build_proposed_delta(
         "matching finding. Extend the supplement so the reviewer checks "
         "for this class of issue explicitly."
     )
-    delta = {
-        "target_path": target,
-        "edit_type": "append_section",
-        "anchor": "## Review Checklist",
-        "before": "",
-        "after": after_line,
-        "rationale_md": rationale,
-        "token_budget_delta": len(after_line.split()) * 2,
-    }
-    return json.dumps(delta, sort_keys=True)
+    return build_append_section_delta(
+        target_path=target,
+        anchor="## Review Checklist",
+        after_line=after_line,
+        rationale_md=rationale,
+    )
 
 
 class FormControlsAcGapsDetector:

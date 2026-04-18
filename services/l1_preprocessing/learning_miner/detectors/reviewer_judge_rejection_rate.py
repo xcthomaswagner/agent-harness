@@ -37,7 +37,6 @@ runs and the metric is undefined — those runs contribute nothing.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -51,6 +50,7 @@ from autonomy_store import (
     upsert_pipeline_metric,
 )
 from learning_miner.detectors._archive import (
+    build_append_section_delta,
     judge_verdict_path,
     load_json_object,
 )
@@ -150,16 +150,12 @@ def _build_proposed_delta(
         f"examples: {sample}. Extend the code-review supplement so the "
         "reviewer self-checks false-positive risk before filing."
     )
-    delta = {
-        "target_path": target,
-        "edit_type": "append_section",
-        "anchor": "## Review Checklist",
-        "before": "",
-        "after": after_line,
-        "rationale_md": rationale,
-        "token_budget_delta": len(after_line.split()) * 2,
-    }
-    return json.dumps(delta, sort_keys=True)
+    return build_append_section_delta(
+        target_path=target,
+        anchor="## Review Checklist",
+        after_line=after_line,
+        rationale_md=rationale,
+    )
 
 
 class ReviewerJudgeRejectionRateDetector:

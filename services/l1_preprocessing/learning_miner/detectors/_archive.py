@@ -120,3 +120,46 @@ def load_json_object(
         )
         return None
     return doc if isinstance(doc, dict) else None
+
+
+def build_append_section_delta(
+    *,
+    target_path: str,
+    anchor: str,
+    after_line: str,
+    rationale_md: str,
+) -> str:
+    """Return the JSON-encoded ``append_section`` delta used by detectors.
+
+    Five detectors (human_issue_cluster, form_controls_ac_gaps,
+    cross_unit_object_pivot, reviewer_judge_rejection_rate,
+    simplify_no_sidecar) each constructed the same 6-key dict inline:
+
+        {
+            "target_path": ...,
+            "edit_type": "append_section",
+            "anchor": ...,
+            "before": "",
+            "after": after_line,
+            "rationale_md": ...,
+            "token_budget_delta": <estimate>,
+        }
+
+    Centralizing avoids drift when the proposed_delta schema grows a
+    field (a new key added in five places is five opportunities to
+    miss one). ``token_budget_delta`` is estimated as
+    ``len(after_line.split()) * 2`` — a simple word-count proxy for
+    "append this many tokens to the target." Callers supplied their
+    own estimate before; keeping the shared proxy here gives a
+    uniform estimate across the detector suite.
+    """
+    delta = {
+        "target_path": target_path,
+        "edit_type": "append_section",
+        "anchor": anchor,
+        "before": "",
+        "after": after_line,
+        "rationale_md": rationale_md,
+        "token_budget_delta": len(after_line.split()) * 2,
+    }
+    return json.dumps(delta, sort_keys=True)
