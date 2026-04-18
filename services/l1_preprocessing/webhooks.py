@@ -35,6 +35,7 @@ from claim_store import (
     _bump_webhook_counter,
     _check_trigger_edge,
     _clear_trigger_state,
+    _jira_delivery_seen,
     _try_claim_ticket,
 )
 from models import TicketPayload
@@ -272,11 +273,30 @@ async def jira_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
     x_hub_signature: str | None = Header(default=None, alias="x-hub-signature"),
+    x_atlassian_webhook_identifier: str | None = Header(
+        default=None, alias="x-atlassian-webhook-identifier"
+    ),
 ) -> dict[str, str]:
-    """Receive a Jira automation webhook and enqueue for processing."""
+    """Receive a Jira automation webhook and enqueue for processing.
+
+    Phase 5: dedup on ``X-Atlassian-Webhook-Identifier`` so Jira's
+    5xx-retry doesn't cause double-processing. Header is optional —
+    older payloads or custom senders fall through without dedup.
+    """
     from main import _get_jira_adapter
 
     payload = await _validate_and_parse_webhook(request, x_hub_signature)
+
+    if x_atlassian_webhook_identifier:
+        if _jira_delivery_seen(x_atlassian_webhook_identifier):
+            logger.info(
+                "jira_duplicate_delivery_skipped",
+                delivery_id=x_atlassian_webhook_identifier,
+            )
+            return {"status": "skipped", "reason": "duplicate delivery"}
+    else:
+        logger.debug("jira_webhook_no_delivery_header")
+
     ticket = _get_jira_adapter().normalize(payload)
     return _dispatch_ticket(
         ticket,
