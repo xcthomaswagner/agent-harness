@@ -67,15 +67,17 @@ git add <changed files>
 git commit -m "refactor(<ticket-id>): simplify implementation"
 ```
 
-## Output
+## Output — Mandatory Post-Condition
 
-Write a brief summary to `.harness/logs/simplify.md`:
+You MUST write `.harness/logs/simplify.md` before returning. This is a hard post-condition, not optional. The learning miner's `simplify_no_sidecar` detector reads this file to reconcile against the Team Lead's `pipeline.jsonl` entry `{phase: "simplify", changes_made: true|false}` — if `changes_made=true` but the sidecar is absent, the miner emits a warning lesson.
+
+### Template — changes were made
 
 ```markdown
 ## Simplification — <ticket-id>
 
 ### Changes Made
-- [description of each simplification]
+- [description of each simplification, one bullet per change]
 
 ### Skipped
 - [patterns noticed but intentionally left alone, with reason]
@@ -84,10 +86,21 @@ Write a brief summary to `.harness/logs/simplify.md`:
 All passing after changes.
 ```
 
-If no changes were warranted, write:
+### Template — no changes were warranted
 
 ```markdown
 ## Simplification — <ticket-id>
 
 No simplification opportunities found. Code is clean.
 ```
+
+### Verify before returning
+
+Run these checks in order. If any fails, fix it before returning:
+
+- [ ] `.harness/logs/simplify.md` exists.
+- [ ] The file is non-empty (at least the template header line).
+- [ ] If any `refactor(<ticket-id>)` commit was made this run, the file has a non-empty `### Changes Made` section listing the commits.
+- [ ] If no commits were made, the file uses the "no changes" template verbatim.
+
+The Team Lead will log `{"phase": "simplify", "changes_made": true|false}` to `pipeline.jsonl` based on whether a refactor commit was created. The presence of `simplify.md` is independent of that and is always required.
