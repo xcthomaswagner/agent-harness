@@ -69,7 +69,7 @@ from typing import Any
 
 import structlog
 
-from config import settings
+from learning_miner.detectors._archive import ticket_json_path
 from learning_miner.detectors.base import CandidateProposal, EvidenceItem
 from learning_miner.detectors.human_issue_cluster import (
     _resolve_platform_profile,
@@ -141,29 +141,14 @@ class _GapObservation:
     matched_phrases: tuple[str, ...]
 
 
-def _archive_root() -> Path | None:
-    """Return the configured archive root, or None if unresolvable."""
-    if TICKET_ARCHIVE_ROOT is not None:
-        return TICKET_ARCHIVE_ROOT
-    repo = settings.default_client_repo
-    if not repo:
-        return None
-    try:
-        return Path(repo).parent / "trace-archive"
-    except (OSError, ValueError):
-        return None
-
-
 def _locate_ticket_json(ticket_id: str) -> Path | None:
-    """Find the archived ticket.json for ``ticket_id``, or None."""
-    root = _archive_root()
-    if root is None:
-        return None
-    candidate = root / ticket_id / "ticket.json"
-    try:
-        return candidate if candidate.is_file() else None
-    except OSError:
-        return None
+    """Find the archived ticket.json for ``ticket_id``, or None.
+
+    Delegates to the shared ``_archive.ticket_json_path`` helper;
+    ``TICKET_ARCHIVE_ROOT`` (None by default) is the test override
+    the helper honors when non-None.
+    """
+    return ticket_json_path(ticket_id, TICKET_ARCHIVE_ROOT)
 
 
 def _load_ticket_json(path: Path) -> dict[str, Any] | None:

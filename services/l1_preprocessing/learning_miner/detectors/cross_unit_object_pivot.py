@@ -40,7 +40,7 @@ from typing import Any
 
 import structlog
 
-from config import settings
+from learning_miner.detectors._archive import plans_dir as _plans_dir_helper
 from learning_miner.detectors.base import CandidateProposal, EvidenceItem
 from learning_miner.detectors.human_issue_cluster import (
     _resolve_platform_profile,
@@ -77,27 +77,9 @@ class _PivotObservation:
     plan_versions: int
 
 
-def _archive_root() -> Path | None:
-    if PLAN_ARCHIVE_ROOT is not None:
-        return PLAN_ARCHIVE_ROOT
-    repo = settings.default_client_repo
-    if not repo:
-        return None
-    try:
-        return Path(repo).parent / "trace-archive"
-    except (OSError, ValueError):
-        return None
-
-
 def _locate_plans_dir(ticket_id: str) -> Path | None:
-    root = _archive_root()
-    if root is None:
-        return None
-    candidate = root / ticket_id / "plans"
-    try:
-        return candidate if candidate.is_dir() else None
-    except OSError:
-        return None
+    """Find the archived plans/ directory; delegates to shared helper."""
+    return _plans_dir_helper(ticket_id, PLAN_ARCHIVE_ROOT)
 
 
 def _load_plan(path: Path) -> dict[str, Any] | None:

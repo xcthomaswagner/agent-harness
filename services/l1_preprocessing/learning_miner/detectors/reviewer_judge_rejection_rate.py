@@ -50,7 +50,7 @@ from autonomy_store import (
     list_recent_metrics,
     upsert_pipeline_metric,
 )
-from config import settings
+from learning_miner.detectors._archive import judge_verdict_path
 from learning_miner.detectors.base import CandidateProposal, EvidenceItem
 from learning_miner.detectors.human_issue_cluster import (
     _resolve_platform_profile,
@@ -88,29 +88,13 @@ class _MetricObservation:
     value: float
 
 
-def _archive_root() -> Path | None:
-    if JUDGE_ARCHIVE_ROOT is not None:
-        return JUDGE_ARCHIVE_ROOT
-    repo = settings.default_client_repo
-    if not repo:
-        return None
-    try:
-        return Path(repo).parent / "trace-archive"
-    except (OSError, ValueError):
-        return None
-
-
 def _locate_judge_verdict(ticket_id: str) -> Path | None:
-    root = _archive_root()
-    if root is None:
-        return None
-    # The archive's logs directory matches the worktree convention:
-    # `<archive_root>/<ticket_id>/logs/judge-verdict.json`.
-    candidate = root / ticket_id / "logs" / "judge-verdict.json"
-    try:
-        return candidate if candidate.is_file() else None
-    except OSError:
-        return None
+    """Find the archived judge-verdict.json; delegates to shared helper.
+
+    The archive's logs directory matches the worktree convention:
+    ``<archive_root>/<ticket_id>/logs/judge-verdict.json``.
+    """
+    return judge_verdict_path(ticket_id, JUDGE_ARCHIVE_ROOT)
 
 
 def _load_judge_verdict(path: Path) -> dict[str, Any] | None:
