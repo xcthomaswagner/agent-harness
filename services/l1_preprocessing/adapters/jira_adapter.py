@@ -5,10 +5,12 @@ from __future__ import annotations
 import base64
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import structlog
 
+from adapters._url_guard import UnsafeAttachmentUrl, validate_attachment_url
 from adapters.attachment_utils import sanitize_attachment_filename
 from config import Settings
 from models import (
@@ -23,6 +25,15 @@ from models import (
 )
 
 logger = structlog.get_logger()
+
+# Hosts from which Jira attachments may legitimately be fetched. The
+# caller's site host derived from ``settings.jira_base_url`` is always
+# added at request time; these are the fixed vendor hosts for Atlassian
+# CDNs / shared asset infrastructure.
+_JIRA_CDN_HOSTS: list[str] = [
+    "atlassian.net",
+    "atlassian.com",
+]
 
 
 # Jira issue type name -> our TicketType
@@ -39,13 +50,49 @@ _JIRA_TYPE_MAP: dict[str, TicketType] = {
 class JiraAdapter:
     """Normalizes Jira webhook payloads and writes back to Jira REST API."""
 
-    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: httpx.AsyncClient | None = None,
+        attachment_client: httpx.AsyncClient | None = None,
+    ) -> None:
         self._settings = settings
         self._client = client or httpx.AsyncClient(
             base_url=settings.jira_base_url.rstrip("/"),
             headers=self._auth_headers(settings),
             timeout=30.0,
         )
+        # Separate client for fetching attacker-controlled attachment
+        # URLs. MUST NOT carry the Jira Basic auth header — the URL
+        # comes from the webhook payload and could point at an IMDS
+        # endpoint, attacker server, or other off-site host. Keeping
+        # the auth header off this client means even a guard bypass
+        # can't leak the PAT. Redirects are disabled so a 30x to a
+        # different host can't sidestep the allowlist either.
+        self._attachment_client = attachment_client or httpx.AsyncClient(
+            headers={"User-Agent": "agent-harness/jira-attachment-fetcher"},
+            timeout=30.0,
+            follow_redirects=False,
+        )
+
+    def _attachment_allowed_hosts(self) -> list[str]:
+        """Build the allowlist used by the SSRF guard for fetches.
+
+        Always includes the host parsed out of ``jira_base_url`` (so
+        operators who put their Jira at ``https://acme.atlassian.net``
+        get ``acme.atlassian.net`` in the allowlist) plus the fixed
+        Atlassian CDN hosts.
+        """
+        hosts = list(_JIRA_CDN_HOSTS)
+        base = (self._settings.jira_base_url or "").strip()
+        if base:
+            try:
+                host = urlparse(base).hostname or ""
+            except ValueError:
+                host = ""
+            if host:
+                hosts.append(host)
+        return hosts
 
     @staticmethod
     def _auth_headers(settings: Settings) -> dict[str, str]:
@@ -442,8 +489,26 @@ class JiraAdapter:
             )
             return attachment
 
+        # SSRF guard — validate the URL before ANY network call. The
+        # URL came from the webhook payload and is attacker-controlled.
+        # Blocking the fetch at this layer prevents leaking the
+        # adapter's PAT to IMDS (169.254.169.254) or an attacker host
+        # even if the unauthenticated attachment client were misused.
         try:
-            async with self._client.stream("GET", attachment.url) as response:
+            await validate_attachment_url(
+                attachment.url, self._attachment_allowed_hosts()
+            )
+        except UnsafeAttachmentUrl as exc:
+            log.warning(
+                "adapter_attachment_url_blocked",
+                reason=str(exc),
+            )
+            return attachment
+
+        try:
+            async with self._attachment_client.stream(
+                "GET", attachment.url
+            ) as response:
                 response.raise_for_status()
 
                 # Check Content-Length before downloading full body

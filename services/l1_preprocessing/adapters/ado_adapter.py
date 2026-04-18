@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, ClassVar
+from urllib.parse import urlparse
 
 import httpx
 import structlog
 
+from adapters._url_guard import UnsafeAttachmentUrl, validate_attachment_url
 from adapters.attachment_utils import sanitize_attachment_filename
 from config import Settings
 from models import (
@@ -22,6 +24,15 @@ from models import (
 )
 
 logger = structlog.get_logger()
+
+# Hosts from which ADO attachments may legitimately be fetched. The
+# caller's ADO org host parsed from ``settings.ado_org_url`` is added
+# at request time; these are the fixed Azure DevOps vendor hosts.
+_ADO_CDN_HOSTS: list[str] = [
+    "dev.azure.com",
+    "visualstudio.com",
+    "azure.com",
+]
 
 # ADO work item type -> our TicketType
 _ADO_TYPE_MAP: dict[str, TicketType] = {
@@ -299,6 +310,15 @@ class AdoAdapter:
         application/json-patch+json`` which is wrong for binary
         streams. This lazily-created client uses only the
         Authorization header.
+
+        Note: even though this client is scoped to downloads, the URL
+        it fetches is attacker-controlled (webhook payload). The
+        ``download_attachment`` caller runs ``validate_attachment_url``
+        against every URL BEFORE calling this method, so any link at
+        an IMDS endpoint, a private-network host, or an unrecognized
+        domain is rejected before the auth header touches the wire.
+        ``follow_redirects`` is disabled so a 30x cannot sidestep the
+        host allowlist by bouncing the request to an off-site host.
         """
         if self._download_client is None:
             import base64
@@ -308,8 +328,28 @@ class AdoAdapter:
             self._download_client = httpx.AsyncClient(
                 headers={"Authorization": f"Basic {token}"},
                 timeout=30.0,
+                follow_redirects=False,
             )
         return self._download_client
+
+    def _attachment_allowed_hosts(self) -> list[str]:
+        """Build the allowlist used by the SSRF guard for fetches.
+
+        Always includes the host parsed out of ``ado_org_url`` (so
+        operators with an on-prem Azure DevOps at ``https://ado.corp``
+        get ``ado.corp`` in the allowlist) plus the fixed cloud ADO
+        vendor hosts.
+        """
+        hosts = list(_ADO_CDN_HOSTS)
+        org = (self._settings.ado_org_url or "").strip()
+        if org:
+            try:
+                host = urlparse(org).hostname or ""
+            except ValueError:
+                host = ""
+            if host:
+                hosts.append(host)
+        return hosts
 
     async def download_attachment(
         self, attachment: Attachment, dest_dir: str
@@ -345,6 +385,21 @@ class AdoAdapter:
                 "attachment_download_skipped",
                 reason="resolved_outside_dest",
                 raw_filename=attachment.filename,
+            )
+            return attachment
+
+        # SSRF guard — reject attacker-controlled URLs before any HTTP
+        # call. Keeps the ADO PAT off the wire for URLs pointing at
+        # IMDS (169.254.169.254), RFC1918 private addresses, or any
+        # host not in the allowlist.
+        try:
+            await validate_attachment_url(
+                attachment.url, self._attachment_allowed_hosts()
+            )
+        except UnsafeAttachmentUrl as exc:
+            log.warning(
+                "adapter_attachment_url_blocked",
+                reason=str(exc),
             )
             return attachment
 
