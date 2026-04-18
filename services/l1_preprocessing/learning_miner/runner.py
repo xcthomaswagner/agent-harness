@@ -17,6 +17,7 @@ import sqlite3
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import structlog
 
@@ -29,6 +30,11 @@ from learning_miner.detectors.base import CandidateProposal, Detector
 from redaction import redact
 
 logger = structlog.get_logger()
+
+# Name used for the reflector synthetic "detector" in per-run stats.
+# Kept as a constant here so the integration test can reference it
+# without importing the private name from retrospective_ingest.
+REFLECTOR_STATS_NAME = "run_reflector"
 
 
 @dataclass
@@ -77,12 +83,21 @@ def run_miner(
     detectors: Iterable[Detector],
     *,
     window_days: int,
+    retrospective_search_roots: Iterable[Path] | None = None,
 ) -> MinerRunResult:
     """Run every detector, persist proposals, return aggregate stats.
 
     Clears detector-owned caches up front so a long-lived L1
     process picks up profile YAML edits between scans without a
     restart.
+
+    When ``retrospective_search_roots`` is provided, walk those paths
+    for ``retrospective.json`` files, convert them to proposals via
+    ``retrospective_ingest.ingest_retrospectives``, and persist them
+    alongside the detector output under a synthetic per-run stats
+    entry named ``run_reflector``. Passing ``None`` (the default)
+    preserves the pre-reflector behavior exactly — existing tests
+    and the nightly backfill script keep working without change.
     """
     _clear_per_run_caches()
     result = MinerRunResult(window_days=window_days)
@@ -110,6 +125,11 @@ def run_miner(
             )
             result.per_detector.append(stats)
 
+    if retrospective_search_roots is not None:
+        _ingest_reflector_proposals(
+            conn, retrospective_search_roots, result
+        )
+
     logger.info(
         "learning_miner_run",
         window_days=window_days,
@@ -120,6 +140,42 @@ def run_miner(
         duration_ms=result.total_duration_ms,
     )
     return result
+
+
+def _ingest_reflector_proposals(
+    conn: sqlite3.Connection,
+    search_roots: Iterable[Path],
+    result: MinerRunResult,
+) -> None:
+    """Load retrospectives + persist as synthetic detector output.
+
+    The reflector isn't a Detector (it reads filesystem, not SQL), so
+    we record its accounting under its own DetectorRunStats entry. A
+    failure here is logged and collapsed into ``stats.failed`` so the
+    overall run still completes — same contract as a crashing detector.
+    """
+    # Local import to avoid pulling retrospective_ingest (and its
+    # transitive path / yaml dependencies) at package load time for the
+    # many callers that never touch reflection.
+    from learning_miner.retrospective_ingest import ingest_retrospectives
+
+    stats = DetectorRunStats(detector_name=REFLECTOR_STATS_NAME)
+    det_start = time.perf_counter()
+    try:
+        proposals = ingest_retrospectives(search_roots)
+        stats.proposals_emitted = len(proposals)
+        for proposal in proposals:
+            _persist_proposal(conn, proposal, stats)
+    except Exception as exc:
+        stats.failed = True
+        stats.error = f"{type(exc).__name__}: {exc}"
+        logger.exception(
+            "learning_reflector_ingest_failed",
+            error=stats.error,
+        )
+    finally:
+        stats.duration_ms = int((time.perf_counter() - det_start) * 1000)
+        result.per_detector.append(stats)
 
 
 def _clear_per_run_caches() -> None:
