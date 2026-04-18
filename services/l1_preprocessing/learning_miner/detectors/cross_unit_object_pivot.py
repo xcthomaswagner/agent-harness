@@ -36,6 +36,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -99,7 +100,7 @@ def _locate_plans_dir(ticket_id: str) -> Path | None:
         return None
 
 
-def _load_plan(path: Path) -> dict | None:
+def _load_plan(path: Path) -> dict[str, Any] | None:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -142,7 +143,7 @@ def _list_plan_versions(plans_dir: Path) -> list[tuple[int, Path]]:
     return out
 
 
-def _extract_affected_files(plan: dict) -> list[list[str]]:
+def _extract_affected_files(plan: dict[str, Any]) -> list[list[str]]:
     """Return list-of-lists: each inner list is one unit's affected_files."""
     units = plan.get("units") or []
     if not isinstance(units, list):
@@ -269,7 +270,7 @@ class CrossUnitObjectPivotDetector:
                 # A single plan version is not a pivot — the plan
                 # reviewer didn't revise anything.
                 continue
-            latest_version, latest_path = versions[-1]
+            _latest_version, latest_path = versions[-1]
             plan = _load_plan(latest_path)
             if plan is None:
                 continue

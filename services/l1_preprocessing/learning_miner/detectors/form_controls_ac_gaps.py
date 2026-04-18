@@ -46,6 +46,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -146,7 +147,7 @@ def _locate_ticket_json(ticket_id: str) -> Path | None:
         return None
 
 
-def _load_ticket_json(path: Path) -> dict | None:
+def _load_ticket_json(path: Path) -> dict[str, Any] | None:
     """Read + parse the ticket.json file; log + skip on error."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -169,7 +170,7 @@ def _load_ticket_json(path: Path) -> dict | None:
     return doc if isinstance(doc, dict) else None
 
 
-def _extract_ac_list(ticket: dict) -> list[str]:
+def _extract_ac_list(ticket: dict[str, Any]) -> list[str]:
     """Return the combined authored + generated AC list (best-effort)."""
     out: list[str] = []
     for key in ("acceptance_criteria", "generated_acceptance_criteria"):

@@ -42,6 +42,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -100,7 +101,7 @@ def _locate_judge_verdict(ticket_id: str) -> Path | None:
         return None
 
 
-def _load_judge_verdict(path: Path) -> dict | None:
+def _load_judge_verdict(path: Path) -> dict[str, Any] | None:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -122,7 +123,7 @@ def _load_judge_verdict(path: Path) -> dict | None:
     return doc if isinstance(doc, dict) else None
 
 
-def _compute_rejection_rate(verdict: dict) -> float | None:
+def _compute_rejection_rate(verdict: dict[str, Any]) -> float | None:
     """Return rejected / (validated + rejected), or None if undefined."""
     validated = verdict.get("validated_issues") or []
     rejected = verdict.get("rejected_issues") or []
@@ -291,18 +292,18 @@ class ReviewerJudgeRejectionRateDetector:
             ).append(obs)
 
         proposals: list[CandidateProposal] = []
-        for (client_profile, platform_profile), obs in by_platform.items():
-            if len(obs) < WINDOW_RUNS:
+        for (client_profile, platform_profile), group_obs in by_platform.items():
+            if len(group_obs) < WINDOW_RUNS:
                 # Every grouped window must independently satisfy the
                 # threshold count — otherwise we'd emit on partial
                 # cross-platform noise.
                 continue
-            group_mean = sum(o.value for o in obs) / len(obs)
+            group_mean = sum(o.value for o in group_obs) / len(group_obs)
             if group_mean <= RATE_THRESHOLD:
                 continue
             proposals.append(
                 self._build_proposal(
-                    client_profile, platform_profile, group_mean, obs
+                    client_profile, platform_profile, group_mean, group_obs
                 )
             )
         return proposals

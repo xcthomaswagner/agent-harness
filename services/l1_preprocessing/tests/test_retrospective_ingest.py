@@ -328,13 +328,14 @@ class TestCandidateValidation:
         assert "XCSF30-42" in out[0].scope_key
 
     def test_severity_variants_normalized(self, tmp_path: Path) -> None:
-        for raw, expected in [
-            ("warning", "warn"),
-            ("warn", "warn"),
-            ("critical", "critical"),
-            ("info", "info"),
-            ("unknown-word", "info"),
-        ]:
+        raw_severities = [
+            "warning",
+            "warn",
+            "critical",
+            "info",
+            "unknown-word",
+        ]
+        for raw in raw_severities:
             target = tmp_path / f"sev-{raw}"
             target.mkdir(exist_ok=True, parents=True)
             doc = _valid_doc(ticket_id=f"T-{raw}")
