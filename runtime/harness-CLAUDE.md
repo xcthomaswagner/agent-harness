@@ -17,6 +17,37 @@ Read the enriched ticket at `.harness/ticket.json`. Check `size_assessment.estim
 - **Single unit (estimated_units == 1 or missing):** Use the Simple Pipeline
 - **Multiple units (estimated_units > 1):** Use the Full Pipeline
 
+## Platform Detection (pre-flight, run once)
+
+Before you spawn any sub-agent, detect what platform the repo is. This determines which skills the developer must invoke. Run these checks at the repo root and remember the result — you'll inject it into every developer prompt.
+
+```bash
+# Salesforce detection
+test -f sfdx-project.json && echo "PLATFORM=salesforce"
+```
+
+**If `sfdx-project.json` exists, the platform is Salesforce.** This is non-negotiable regardless of what other tooling the repo has (Node.js scaffolding, Python scripts, etc.). Every developer agent you spawn MUST be told:
+
+1. To invoke the `/salesforce-dev-loop` skill (via `Skill(salesforce-dev-loop)`) before writing any code that touches `force-app/`.
+2. To use the `mcp__salesforce__*` MCP tools (not `sf` CLI via Bash) for ALL Salesforce operations. The `salesforce` MCP server is connected — check `mcp__salesforce__sf_org_list()` as a pre-flight.
+3. That the 5-phase dev loop (bootstrap → dry-run → deploy → test → handoff) is mandatory, not optional. In particular, Phase 1 (scratch org provisioning with `mcp__salesforce__sf_scratch_create`, alias `ai-<ticket-id-lowercased>`) is a hard gate — no deploy or test may target a Dev Hub or sandbox directly.
+4. That shelling out to `sf` via Bash is explicitly forbidden when `mcp__salesforce__*` tools are available. History from session 2026-04-10 shows agents silently defaulting to the CLI and bypassing the MCP — do not let this happen.
+
+Embed the following block **verbatim** in the prompt of every developer agent you spawn when the platform is Salesforce (Simple pipeline, Full pipeline parallel devs, post-review fix devs, QA-fix devs):
+
+```
+PLATFORM: SALESFORCE. The repo contains sfdx-project.json.
+You MUST invoke the /salesforce-dev-loop skill before touching force-app/.
+You MUST use mcp__salesforce__* MCP tools for ALL SF operations.
+You MUST NOT shell out to `sf` via Bash — the MCP is connected, verify with
+mcp__salesforce__sf_org_list() and use the tools directly.
+Phase 1 (scratch org bootstrap) is a hard gate: create ai-<ticket-id-lowercased>
+via mcp__salesforce__sf_scratch_create BEFORE any deploy or test step.
+Never target DevHub directly — read SCRATCH_ORG_LIFECYCLE.md.
+```
+
+**If no platform-specific tooling is detected**, proceed with the generic developer prompt as before.
+
 ## Simple Pipeline (Single Unit)
 
 For small tickets with one implementation unit.
@@ -33,11 +64,13 @@ Log: `{"phase": "ticket_read", "ticket_id": "<id>", "timestamp": "<ISO>", "event
 
 Log start: `{"phase": "implementation", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "phase_started"}`
 
-Spawn one developer:
+Spawn one developer. **If the Platform Detection step identified Salesforce, inject the PLATFORM: SALESFORCE block (verbatim, from the Platform Detection section above) into the prompt before the rest of the instructions.**
 
 ```
 Agent(
-  prompt="You are a developer. Read the enriched ticket at .harness/ticket.json.
+  prompt="[IF PLATFORM=salesforce, insert the verbatim PLATFORM: SALESFORCE block here]
+
+         You are a developer. Read the enriched ticket at .harness/ticket.json.
          Implement the required changes following the project's conventions in CLAUDE.md.
          Write tests for every change per the test scenarios in the ticket.
          Run the full test suite. Fix failures (up to 3 attempts).
@@ -152,13 +185,15 @@ Read the approved plan. Build the dependency graph and identify independent unit
 
 **Branch naming convention:** Each worktree dev creates a branch named `ai/<ticket-id>/unit-<N>` (e.g., `ai/PROJ-42/unit-1`). This naming is critical -- the merge coordinator uses it to find and merge unit branches.
 
-**Spawn developer agents in parallel.** Use multiple Agent calls in a SINGLE message so they run concurrently. Each dev gets `isolation: "worktree"` for its own git copy:
+**Spawn developer agents in parallel.** Use multiple Agent calls in a SINGLE message so they run concurrently. Each dev gets `isolation: "worktree"` for its own git copy. **If the Platform Detection step identified Salesforce, inject the PLATFORM: SALESFORCE block (verbatim) at the top of EVERY developer prompt.**
 
 ```
 # In ONE message, spawn all independent devs:
 
 Agent(
-  prompt="You are a developer assigned to unit-1: <unit description>.
+  prompt="[IF PLATFORM=salesforce, insert the PLATFORM: SALESFORCE block here]
+
+         You are a developer assigned to unit-1: <unit description>.
          Read the full plan at .harness/plans/plan-v<N>.json for context.
          Read the enriched ticket at .harness/ticket.json.
          FIRST: create and checkout branch ai/<ticket-id>/unit-1
@@ -173,7 +208,9 @@ Agent(
 )
 
 Agent(
-  prompt="You are a developer assigned to unit-2: <unit description>.
+  prompt="[IF PLATFORM=salesforce, insert the PLATFORM: SALESFORCE block here]
+
+         You are a developer assigned to unit-2: <unit description>.
          ...(same pattern, different unit, branch: ai/<ticket-id>/unit-2)...",
   description="Dev unit-2 <ticket-id>",
   mode="bypassPermissions",
@@ -419,11 +456,15 @@ This screenshot will be automatically uploaded to the Jira ticket as visual proo
 
 Only after code review and QA are complete:
 
+First, read `.harness/source-control.json` to determine the source control type. If the file does not exist, default to GitHub.
+
 ```bash
 git push -u origin ai/<ticket-id>
 ```
 
-Open a draft PR. The body MUST include the review and QA content. When pasting content from review/QA files, escape any backticks (`` ` ``) that would break the PR body's markdown:
+Open a draft PR. The body MUST include the review and QA content. When pasting content from review/QA files, escape any backticks (`` ` ``) that would break the PR body's markdown.
+
+### GitHub (source_control.type == "github" or no source-control.json)
 
 ```bash
 gh pr create --draft --title "feat(<ticket-id>): <description>" --body "$(cat <<'PRBODY'
@@ -448,6 +489,28 @@ Generated by XCentium Review Agent
 PRBODY
 )"
 ```
+
+### Azure Repos (source_control.type == "azure-repos")
+
+Read `repositoryId` and `ado_project` from `.harness/source-control.json`. Use the ADO MCP tools:
+
+```
+mcp__ado__repo_create_pull_request(
+  repositoryId="<from source-control.json>",
+  sourceRefName="refs/heads/ai/<ticket-id>",
+  targetRefName="refs/heads/<default_branch from source-control.json>",
+  title="feat(<ticket-id>): <description>",
+  description="<PR body — see below>",
+  isDraft=true,
+  workItems="<numeric work item ID>"
+)
+```
+
+Notes:
+- `sourceRefName` and `targetRefName` must use the `refs/heads/` prefix.
+- `workItems` accepts space-separated numeric IDs (e.g., "123"). This automatically links the work item to the PR.
+- `workItemId` must be the numeric ADO work item ID (e.g., `123`), not a composite key like `PROJ-123`. Extract just the number from the ticket ID.
+- The `description` field has a **4000-character limit**. If the full PR body (Summary + Code Review + QA Matrix + Test Results) exceeds 4000 characters, truncate the QA Matrix and Code Review to summaries in the description and post the full details as a follow-up comment thread using `mcp__ado__repo_create_pull_request_thread`.
 
 Log: `{"phase": "pr_created", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "PR created", "pr_url": "<url>"}`
 

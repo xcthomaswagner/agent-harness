@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
+from typing import Any, ClassVar
+from urllib.parse import urlparse
 
 import httpx
 import structlog
 
+from adapters._url_guard import UnsafeAttachmentUrl, validate_attachment_url
+from adapters.attachment_utils import sanitize_attachment_filename
 from config import Settings
 from models import (
+    IMAGE_CONTENT_TYPES,
+    MAX_IMAGE_ATTACHMENT_BYTES,
     Attachment,
     CallbackConfig,
     LinkedItem,
@@ -18,6 +24,15 @@ from models import (
 )
 
 logger = structlog.get_logger()
+
+# Hosts from which ADO attachments may legitimately be fetched. The
+# caller's ADO org host parsed from ``settings.ado_org_url`` is added
+# at request time; these are the fixed Azure DevOps vendor hosts.
+_ADO_CDN_HOSTS: list[str] = [
+    "dev.azure.com",
+    "visualstudio.com",
+    "azure.com",
+]
 
 # ADO work item type -> our TicketType
 _ADO_TYPE_MAP: dict[str, TicketType] = {
@@ -29,8 +44,76 @@ _ADO_TYPE_MAP: dict[str, TicketType] = {
 }
 
 
+def _tags_include(tags_str: str, tag_name: str) -> bool:
+    """Case-insensitive exact-tag match within a semicolon-separated tag string.
+
+    ADO serializes multiple tags as ``"Foo; Bar; Baz"``. Substring matching
+    on the raw string would falsely accept ``"ai-implement-later"`` as a
+    match for ``"ai-implement"`` — a real bug we've hit before. Split and
+    strip first; then compare lowered.
+    """
+    if not tags_str or not tag_name:
+        return False
+    wanted = tag_name.strip().lower()
+    return any(t.strip().lower() == wanted for t in tags_str.split(";"))
+
+
+def extract_tag_transition(
+    webhook_payload: dict[str, Any], tag_names: list[str],
+) -> tuple[bool | None, bool]:
+    """Return ``(was_present_before, is_present_now)`` for any tag in
+    ``tag_names`` from an ADO ``workitem.updated`` (or ``.created``) payload.
+
+    Note: this function intentionally re-parses the raw webhook payload
+    rather than reading ``TicketPayload.labels``. ``normalize()`` produces
+    labels from the *post-state* only; the edge-trigger decision needs the
+    *delta* (``resource.fields``), which ``normalize()`` discards.
+
+    ADO Service Hooks carry two different field blocks:
+      - ``resource.fields`` — the *delta* for ``workitem.updated`` events,
+        shaped ``{"System.Tags": {"oldValue": "...", "newValue": "..."}}``.
+        Only fields that actually changed appear here.
+      - ``resource.revision.fields`` — the full *post-state* of all fields,
+        present on both created and updated events.
+
+    For edge-trigger decisions we want to know whether the trigger tag
+    transitioned absent→present *on this webhook*. If the delta contains
+    ``System.Tags``, we can answer precisely. If not (tag didn't change
+    in this update, or this is a ``workitem.created`` event), we return
+    ``(None, is_present_now)`` — caller falls back to in-process memory.
+
+    Any match across the supplied ``tag_names`` counts (supports both
+    ai_label and quick_label).
+    """
+    resource = webhook_payload.get("resource", {}) or {}
+
+    # Post-state from revision (always present).
+    work_item = resource.get("revision", resource) or {}
+    post_fields = work_item.get("fields", {}) or {}
+    post_tags = str(post_fields.get("System.Tags", "") or "")
+    is_present_now = any(_tags_include(post_tags, t) for t in tag_names)
+
+    # Delta from resource.fields. Only present for workitem.updated and
+    # only when the field actually changed in the update.
+    delta_fields = resource.get("fields", {}) or {}
+    tag_delta = delta_fields.get("System.Tags")
+    if not isinstance(tag_delta, dict):
+        return (None, is_present_now)
+    # ADO emits either {"oldValue": "...", "newValue": "..."} or sometimes
+    # only one side when one is empty. Default to empty string so the
+    # absence of oldValue is treated as "no tag before".
+    old_value = str(tag_delta.get("oldValue", "") or "")
+    was_present_before = any(_tags_include(old_value, t) for t in tag_names)
+    return (was_present_before, is_present_now)
+
+
 class AdoAdapter:
     """Normalizes Azure DevOps Service Hook payloads and writes back via ADO REST API."""
+
+    # Class-level map: project_key prefix → real ADO project name.
+    # Shared across all instances so the webhook handler's registration
+    # is visible to the Pipeline's adapter instance.
+    _project_key_map: ClassVar[dict[str, str]] = {}
 
     def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
         self._settings = settings
@@ -39,6 +122,13 @@ class AdoAdapter:
             headers=self._auth_headers(settings),
             timeout=30.0,
         )
+        self._download_client: httpx.AsyncClient | None = None
+
+    async def aclose(self) -> None:
+        """Close owned HTTP clients."""
+        if self._download_client is not None:
+            await self._download_client.aclose()
+            self._download_client = None
 
     @staticmethod
     def _auth_headers(settings: Settings) -> dict[str, str]:
@@ -68,6 +158,8 @@ class AdoAdapter:
         # Type mapping
         raw_type = (fields.get("System.WorkItemType", "") or "").lower()
         ticket_type = _ADO_TYPE_MAP.get(raw_type, TicketType.TASK)
+        if raw_type and raw_type not in _ADO_TYPE_MAP:
+            logger.warning("ado_unknown_work_item_type", raw_type=raw_type)
 
         # Extract acceptance criteria (HTML field in ADO)
         raw_ac = fields.get("Microsoft.VSTS.Common.AcceptanceCriteria", "") or ""
@@ -105,6 +197,7 @@ class AdoAdapter:
             ticket_id=work_item_id,
             source=TicketSource.ADO,
             auth_token=self._settings.ado_pat,
+            ado_project=project,
         ) if org_url else None
 
         return TicketPayload(
@@ -208,11 +301,166 @@ class AdoAdapter:
                 )
         return attachments
 
+    # --- Attachment download ---
+
+    def _get_download_client(self) -> httpx.AsyncClient:
+        """Return an httpx client suitable for binary downloads.
+
+        The default ``self._client`` carries ``Content-Type:
+        application/json-patch+json`` which is wrong for binary
+        streams. This lazily-created client uses only the
+        Authorization header.
+
+        Note: even though this client is scoped to downloads, the URL
+        it fetches is attacker-controlled (webhook payload). The
+        ``download_attachment`` caller runs ``validate_attachment_url``
+        against every URL BEFORE calling this method, so any link at
+        an IMDS endpoint, a private-network host, or an unrecognized
+        domain is rejected before the auth header touches the wire.
+        ``follow_redirects`` is disabled so a 30x cannot sidestep the
+        host allowlist by bouncing the request to an off-site host.
+        """
+        if self._download_client is None:
+            import base64
+
+            credentials = f":{self._settings.ado_pat}"
+            token = base64.b64encode(credentials.encode()).decode()
+            self._download_client = httpx.AsyncClient(
+                headers={"Authorization": f"Basic {token}"},
+                timeout=30.0,
+                follow_redirects=False,
+            )
+        return self._download_client
+
+    def _attachment_allowed_hosts(self) -> list[str]:
+        """Build the allowlist used by the SSRF guard for fetches.
+
+        Always includes the host parsed out of ``ado_org_url`` (so
+        operators with an on-prem Azure DevOps at ``https://ado.corp``
+        get ``ado.corp`` in the allowlist) plus the fixed cloud ADO
+        vendor hosts.
+        """
+        hosts = list(_ADO_CDN_HOSTS)
+        org = (self._settings.ado_org_url or "").strip()
+        if org:
+            try:
+                host = urlparse(org).hostname or ""
+            except ValueError:
+                host = ""
+            if host:
+                hosts.append(host)
+        return hosts
+
+    async def download_attachment(
+        self, attachment: Attachment, dest_dir: str
+    ) -> Attachment:
+        """Download an attachment from ADO, returning updated Attachment with local_path.
+
+        Skips if the file is too large (>5 MB) or the download fails.
+        Returns the original attachment unchanged on failure.
+        """
+        log = logger.bind(filename=attachment.filename, url=attachment.url)
+
+        if not attachment.url:
+            log.warning("attachment_download_skipped", reason="empty url")
+            return attachment
+
+        safe_name = sanitize_attachment_filename(attachment.filename)
+        if safe_name is None:
+            log.warning(
+                "attachment_download_skipped",
+                reason="invalid_filename",
+                raw_filename=attachment.filename,
+            )
+            return attachment
+
+        dest = Path(dest_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        file_path = dest / safe_name
+        # Defense in depth: refuse any path that resolves outside dest.
+        try:
+            file_path.resolve().relative_to(dest.resolve())
+        except ValueError:
+            log.warning(
+                "attachment_download_skipped",
+                reason="resolved_outside_dest",
+                raw_filename=attachment.filename,
+            )
+            return attachment
+
+        # SSRF guard — reject attacker-controlled URLs before any HTTP
+        # call. Keeps the ADO PAT off the wire for URLs pointing at
+        # IMDS (169.254.169.254), RFC1918 private addresses, or any
+        # host not in the allowlist.
+        try:
+            await validate_attachment_url(
+                attachment.url, self._attachment_allowed_hosts()
+            )
+        except UnsafeAttachmentUrl as exc:
+            log.warning(
+                "adapter_attachment_url_blocked",
+                reason=str(exc),
+            )
+            return attachment
+
+        try:
+            client = self._get_download_client()
+            # ADO attachment URLs are absolute — use them directly.
+            async with client.stream("GET", attachment.url) as response:
+                response.raise_for_status()
+
+                # Check Content-Length before downloading full body
+                content_length = response.headers.get("content-length")
+                try:
+                    cl_size = int(content_length) if content_length else 0
+                except ValueError:
+                    cl_size = 0
+                if cl_size > MAX_IMAGE_ATTACHMENT_BYTES:
+                    log.warning(
+                        "attachment_too_large",
+                        size=content_length,
+                        limit=MAX_IMAGE_ATTACHMENT_BYTES,
+                    )
+                    return attachment
+
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > MAX_IMAGE_ATTACHMENT_BYTES:
+                        log.warning("attachment_too_large_streaming", size=total)
+                        return attachment
+                    chunks.append(chunk)
+
+            file_path.write_bytes(b"".join(chunks))
+            log.info("attachment_downloaded", path=str(file_path), size=total)
+            return attachment.model_copy(update={"local_path": str(file_path)})
+
+        except httpx.HTTPError as exc:
+            log.error("attachment_download_failed", error=str(exc))
+            return attachment.model_copy(update={"download_failed": True})
+
+    async def download_image_attachments(
+        self, attachments: list[Attachment], dest_dir: str
+    ) -> list[Attachment]:
+        """Download all image attachments, returning updated list with local_paths set."""
+        result: list[Attachment] = []
+        for att in attachments:
+            if att.content_type.lower() in IMAGE_CONTENT_TYPES:
+                updated = await self.download_attachment(att, dest_dir)
+                result.append(updated)
+            else:
+                result.append(att)
+        return result
+
     # --- Write-back operations ---
 
-    @staticmethod
-    def _parse_ticket_id(ticket_id: str) -> tuple[str, str]:
+    def _parse_ticket_id(self, ticket_id: str) -> tuple[str, str]:
         """Extract (project, work_item_id) from composite ticket ID.
+
+        The project prefix may be a short alias (e.g., "XCSF30") rather than
+        the real ADO project name (e.g., "XC-SF-30in30"). If a mapping was
+        registered during normalize(), use the real name for API calls.
 
         Raises ValueError if the ID has no project prefix (no dash).
         """
@@ -220,8 +468,10 @@ class AdoAdapter:
             raise ValueError(
                 f"Invalid ADO ticket ID '{ticket_id}': expected 'PROJECT-123' format"
             )
-        project, wi_id = ticket_id.rsplit("-", 1)
-        return project, wi_id
+        project_key, wi_id = ticket_id.rsplit("-", 1)
+        # Resolve to real ADO project name if mapped
+        real_project = self._project_key_map.get(project_key, project_key)
+        return real_project, wi_id
 
     async def write_comment(self, ticket_id: str, comment: str) -> None:
         """Post a comment on an ADO work item."""
@@ -232,7 +482,14 @@ class AdoAdapter:
         response = await self._client.post(
             url, json=body, headers={"Content-Type": "application/json"}
         )
-        response.raise_for_status()
+        if response.status_code >= 400:
+            logger.warning(
+                "ado_comment_failed",
+                ticket_id=ticket_id,
+                status=response.status_code,
+                body=response.text[:200],
+            )
+            response.raise_for_status()
         logger.info("ado_comment_posted", ticket_id=ticket_id)
 
     async def update_fields(self, ticket_id: str, fields: dict[str, str]) -> None:
@@ -253,17 +510,90 @@ class AdoAdapter:
         await self.update_fields(ticket_id, {"System.State": target_status})
         logger.info("ado_status_transitioned", ticket_id=ticket_id, target=target_status)
 
+    async def link_work_item_to_pr(
+        self, ticket_id: str, pr_url: str, repo_id: str = ""
+    ) -> None:
+        """Link an ADO work item to a pull request via ArtifactLink relation.
+
+        Args:
+            ticket_id: Composite ticket ID (e.g., "PROJECT-123").
+            pr_url: Full PR URL or just the PR ID. Used to construct the artifact URI.
+            repo_id: Azure Repos repository GUID (needed for artifact URI construction).
+        """
+        project, wi_id = self._parse_ticket_id(ticket_id)
+
+        # Extract PR ID from URL if needed (e.g., ".../pullrequests/42" → "42")
+        pr_id = pr_url.rsplit("/", 1)[-1] if "/" in pr_url else pr_url
+
+        # ADO artifact URI format for pull requests
+        artifact_uri = (
+            f"vstfs:///Git/PullRequestId/{project}%2F{repo_id}%2F{pr_id}"
+            if repo_id
+            else f"vstfs:///Git/PullRequestId/{project}%2F{pr_id}"
+        )
+
+        url = f"/{project}/_apis/wit/workItems/{wi_id}?api-version=7.1"
+        patch_ops = [
+            {
+                "op": "add",
+                "path": "/relations/-",
+                "value": {
+                    "rel": "ArtifactLink",
+                    "url": artifact_uri,
+                    "attributes": {"name": "Pull Request"},
+                },
+            }
+        ]
+        response = await self._client.patch(url, json=patch_ops)
+        response.raise_for_status()
+        logger.info(
+            "ado_work_item_linked_to_pr",
+            ticket_id=ticket_id,
+            pr_id=pr_id,
+        )
+
     async def add_label(self, ticket_id: str, label: str) -> None:
-        """Add a tag to an ADO work item."""
+        """Add a tag to an ADO work item, idempotently.
+
+        Short-circuits when the tag is already present (case-insensitive
+        exact match on a ``;``-separated element). Without this guard,
+        calling ``add_label("PROJ-1", "ai_complete")`` twice produced
+        ``System.Tags = "ai_complete; ai_complete"``, and over many
+        retries (judge → fix cycles, re-runs, manual re-labels) the
+        tag list would grow unbounded — polluting the edge-detection
+        state machine and inflating ``labels`` in downstream tracing.
+        """
         project, wi_id = self._parse_ticket_id(ticket_id)
 
         # First, get current tags
         url = f"/{project}/_apis/wit/workItems/{wi_id}?api-version=7.1&$select=System.Tags"
         response = await self._client.get(url)
-        response.raise_for_status()
+        if response.status_code >= 400:
+            logger.warning(
+                "ado_get_tags_failed",
+                ticket_id=ticket_id,
+                status=response.status_code,
+            )
+            response.raise_for_status()
         current_tags = response.json().get("fields", {}).get("System.Tags", "")
 
+        # Idempotency guard — case-insensitive exact match on any
+        # existing ``;``-separated tag element.
+        label_stripped = label.strip()
+        existing_tags = {
+            t.strip().lower()
+            for t in current_tags.split(";")
+            if t.strip()
+        }
+        if label_stripped.lower() in existing_tags:
+            logger.info(
+                "ado_label_already_present",
+                ticket_id=ticket_id,
+                label=label,
+            )
+            return
+
         # Append new tag
-        new_tags = f"{current_tags}; {label}" if current_tags else label
+        new_tags = f"{current_tags}; {label_stripped}" if current_tags else label_stripped
         await self.update_fields(ticket_id, {"System.Tags": new_tags})
         logger.info("ado_label_added", ticket_id=ticket_id, label=label)

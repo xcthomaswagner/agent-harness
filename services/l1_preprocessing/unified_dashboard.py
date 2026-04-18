@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import html
 import json
 import sqlite3
 from typing import Any
@@ -22,6 +21,29 @@ from autonomy_store import (
 )
 from client_profile import load_profile
 from config import settings
+from dashboard_common import (
+    LANGFUSE_BASE_CSS,
+    STANDARD_CARD_CSS,
+    STANDARD_TABLE_CSS,
+)
+from dashboard_common import (
+    MODE_BADGE as _MODE_BADGE,
+)
+from dashboard_common import (
+    badge as _badge,
+)
+from dashboard_common import (
+    escape_html as _e,
+)
+from dashboard_common import (
+    fmt_pct as _fmt_pct,
+)
+from dashboard_common import (
+    fmt_ts as _fmt_ts,
+)
+from dashboard_common import (
+    safe_url as _safe_url,
+)
 from tracer import build_trace_list_row, list_traces, read_trace
 
 logger = structlog.get_logger()
@@ -32,33 +54,10 @@ router = APIRouter()
 # Styles — copied from trace_dashboard to avoid coupling
 # ---------------------------------------------------------------------------
 
-_LANGFUSE_STYLES = """
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  font-feature-settings: "rlig" 1, "calt" 1;
-  background: #FFFFFF; color: #0F172A; font-size: 13.2px; line-height: 1.5;
-}
-a { color: #4D45E5; text-decoration: none; }
-a:hover { text-decoration: underline; }
-.page { max-width: 1400px; margin: 0 auto; padding: 24px; }
-h1 { font-size: 20.8px; font-weight: 600; color: #0F172A; }
-h2 { font-size: 15px; font-weight: 600; color: #0F172A; margin-bottom: 8px; }
-.meta { font-size: 11.2px; color: #64748B; }
-.badge {
-  display: inline-flex; align-items: center; border-radius: 6px;
-  font-weight: 600; font-size: 11.2px; padding: 1px 8px; white-space: nowrap;
-}
-.badge-success { background: #DBFBE7; color: #124D49; }
-.badge-error { background: #FBE6F1; color: #DB2626; }
-.badge-warning { background: #FEFCE8; color: #C79004; }
-.badge-blue { background: #DAEAFD; color: #3B82F5; }
-.badge-secondary { background: #F1F5F9; color: #0F172A; }
-.card {
-  border: 1px solid #E2E8F0; border-radius: 8px; padding: 16px;
-  background: #FFFFFF; margin-bottom: 12px;
-}
+# Base CSS + shared card/table chrome come from dashboard_common;
+# unified-specific rules (card-grid sizing = 260px, separated border
+# table chrome, nav links) are appended here.
+_UNIFIED_LOCAL_CSS = """
 .card-grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 12px; margin: 16px 0;
@@ -67,8 +66,6 @@ h2 { font-size: 15px; font-weight: 600; color: #0F172A; margin-bottom: 8px; }
   display: flex; justify-content: space-between; padding: 2px 0;
   font-size: 12px;
 }
-.metric-label { color: #64748B; }
-.metric-value { font-weight: 600; color: #0F172A; }
 table { width: 100%; border-collapse: separate; border-spacing: 0;
   border: 1px solid #E2E8F0; border-radius: 8px; overflow: hidden;
   margin-top: 12px; font-size: 12px; }
@@ -77,36 +74,22 @@ thead th {
   text-align: left; padding: 10px 12px; border-bottom: 1px solid #E2E8F0;
   white-space: nowrap;
 }
-tbody td { padding: 8px 12px; border-bottom: 1px solid #E2E8F0; vertical-align: middle; }
-tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover { background: rgba(241,245,249,0.5); }
 .nav-link { font-size: 12.5px; padding: 4px 10px; border-radius: 6px; }
 .nav-link.active { background: #0F172A; color: #F7F9FB; font-weight: 600; }
 """
 
-# Status badge mapping (same as trace_dashboard)
-_STATUS_BADGE: dict[str, str] = {
-    "Complete": "badge-success",
-    "PR Created": "badge-success",
-    "Escalated": "badge-error",
-    "Agent Done (no PR)": "badge-error",
-    "Dispatched": "badge-error",
-    "QA Done": "badge-warning",
-    "Review Done": "badge-blue",
-    "Implementing": "badge-blue",
-    "Planned": "badge-blue",
-    "Merged": "badge-blue",
-    "CI Fix": "badge-warning",
-    "Processing": "badge-blue",
-    "Enriched": "badge-secondary",
-    "Received": "badge-secondary",
-}
+_LANGFUSE_STYLES = (
+    LANGFUSE_BASE_CSS + STANDARD_CARD_CSS + STANDARD_TABLE_CSS + _UNIFIED_LOCAL_CSS
+)
 
-_MODE_BADGE: dict[str, str] = {
-    "conservative": "badge-secondary",
-    "semi_autonomous": "badge-warning",
-    "full_autonomous": "badge-success",
-}
+# Status badge mapping — imported from dashboard_common so the mapping
+# here can't drift from trace_dashboard's. Previously this copy was
+# missing Failed / Timed Out / Cleaned Up (silently rendered as the
+# secondary-fallback class), which the shared module now fixes.
+from dashboard_common import STATUS_BADGE as _STATUS_BADGE  # noqa: E402
+
+# _MODE_BADGE now imported at the top of this module from dashboard_common.
 
 _AUTO_MERGE_DECISION_BADGE: dict[str, str] = {
     "merged": "badge-success",
@@ -121,44 +104,9 @@ _AUTO_MERGE_DECISION_BADGE: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 
-def _e(text: Any) -> str:
-    """HTML-escape a value."""
-    return html.escape(str(text), quote=True)
-
-
-def _fmt_pct(value: float | None) -> str:
-    if value is None:
-        return "\u2014"
-    return f"{value * 100:.0f}%"
-
-
-def _safe_url(url: str) -> str:
-    s = url.strip().lower()
-    return url if s.startswith("https://") or s.startswith("http://") else "#"
-
-
-def _fmt_ts(ts: str) -> str:
-    """Format ISO timestamp for short display."""
-    if not ts:
-        return ""
-    try:
-        from datetime import datetime
-
-        dt = datetime.fromisoformat(ts)
-        return dt.strftime("%b %d, %H:%M")
-    except (ValueError, TypeError):
-        return ts[:16]
-
-
-def _fmt_dur(seconds: float) -> str:
-    if seconds <= 0:
-        return "0s"
-    m, s = int(seconds // 60), int(seconds % 60)
-    return f"{m}m {s}s" if m else f"{s}s"
-
-
-def _badge(text: str, cls: str) -> str:
-    return f'<span class="badge {cls}">{_e(text)}</span>'
+# _e, _safe_url, _fmt_ts, _fmt_dur, _badge, _fmt_pct are imported from
+# dashboard_common at the top of this file. Historically they were
+# duplicated across four dashboard modules.
 
 
 def _resolve_auto_merge_label(
@@ -191,12 +139,56 @@ def _render_nav(active: str = "dashboard") -> str:
         ("Dashboard", "/dashboard"),
         ("Traces", "/traces"),
         ("Autonomy", "/autonomy"),
+        ("Learning", "/autonomy/learning"),
     ]
     parts: list[str] = []
     for label, href in links:
         cls = "nav-link active" if label.lower() == active else "nav-link"
         parts.append(f'<a href="{href}" class="{cls}">{_e(label)}</a>')
     return " ".join(parts)
+
+
+def _render_learning_strip(conn: sqlite3.Connection) -> str:
+    """Compact summary of lesson-candidate counts by status.
+
+    Clicks through to ``/autonomy/learning`` with the corresponding
+    status filter so the dashboard is a single-click triage entry.
+    """
+    rows = conn.execute(
+        "SELECT status, COUNT(*) AS n FROM lesson_candidates GROUP BY status"
+    ).fetchall()
+    counts = {str(r["status"]): int(r["n"]) for r in rows}
+    if not counts:
+        return (
+            '<p class="meta">No lesson candidates yet. '
+            "Run <code>scripts/run_learning_backfill.py</code> "
+            "to seed them.</p>"
+        )
+    order = [
+        ("Proposed", "proposed", "badge-secondary"),
+        ("Draft ready", "draft_ready", "badge-blue"),
+        ("Approved", "approved", "badge-success"),
+        ("Applied", "applied", "badge-success"),
+        ("Snoozed", "snoozed", "badge-warning"),
+        ("Rejected", "rejected", "badge-error"),
+    ]
+    cells: list[str] = []
+    for label, key, cls in order:
+        n = counts.get(key, 0)
+        cells.append(
+            '<a href="/autonomy/learning?status='
+            + _e(key)
+            + f'" style="margin-right:12px">'
+            f'<span class="metric-label">{_e(label)}:</span> '
+            f'<span class="badge {cls}">{n}</span></a>'
+        )
+    return (
+        '<div class="card" style="padding:12px">'
+        f'{"".join(cells)}'
+        '<div class="meta" style="margin-top:8px">'
+        '<a href="/autonomy/learning">Triage all &rarr;</a></div>'
+        "</div>"
+    )
 
 
 def _render_autonomy_strip(conn: sqlite3.Connection) -> str:
@@ -252,7 +244,10 @@ def _render_recent_traces() -> str:
     enriched: list[dict[str, Any]] = []
     for t in traces:
         entries = t.pop("_raw_entries", None) or read_trace(t["ticket_id"])
-        enriched.append(build_trace_list_row(t, entries))
+        run_start_idx = t.pop("_run_start_idx", None)
+        enriched.append(
+            build_trace_list_row(t, entries, run_start_idx=run_start_idx)
+        )
 
     rows_html = ""
     for t in enriched:
@@ -264,7 +259,7 @@ def _render_recent_traces() -> str:
         pr = t.get("pr_url", "")
         pr_html = (
             f'<a href="{_e(_safe_url(pr))}" target="_blank" style="font-size:11.2px">'
-            f'#{pr.split("/")[-1]}</a>'
+            f'#{_e(pr.split("/")[-1])}</a>'
             if pr
             else '<span class="meta">&mdash;</span>'
         )
@@ -370,6 +365,7 @@ async def unified_dashboard() -> str:
     try:
         ensure_schema(conn)
         autonomy_strip = _render_autonomy_strip(conn)
+        learning_strip = _render_learning_strip(conn)
         auto_merge_html = _render_auto_merge_decisions(conn)
     finally:
         conn.close()
@@ -386,6 +382,8 @@ async def unified_dashboard() -> str:
 </div>
 <h2>Autonomy Summary</h2>
 {autonomy_strip}
+<h2 style="margin-top:24px">Self-learning</h2>
+{learning_strip}
 <h2 style="margin-top:24px">Recent Traces</h2>
 {traces_html}
 {auto_merge_html}

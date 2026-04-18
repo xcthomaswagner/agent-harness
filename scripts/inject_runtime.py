@@ -11,9 +11,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import re
 import shutil
 import sys
 from pathlib import Path
+from typing import Any
 
 HARNESS_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = HARNESS_ROOT / "runtime"
@@ -24,6 +28,53 @@ SUPPLEMENT_MAP = {
     "CODE_REVIEW_SUPPLEMENT.md": "code-review",
     "QA_SUPPLEMENT.md": "qa-validation",
 }
+
+# Matches ${VAR} and ${VAR:-default} for env expansion in MCP configs
+_ENV_VAR_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
+
+
+def _inject_skill_dir(src_skill: Path, skills_dest: Path, label: str) -> None:
+    """Copy a single skill directory into the client's .claude/skills/.
+
+    Handles collision with existing client skills via a `.harness-injected`
+    marker: harness-owned skills are cleaned and re-copied; client-owned
+    skills trigger a fallback to a `harness-<name>` prefixed target.
+
+    `label` is the log prefix used when announcing the copy (e.g. "Skill"
+    or "Profile skill") so base and profile-level injections stay
+    distinguishable in output.
+    """
+    skill_name = src_skill.name
+    target_skill = skills_dest / skill_name
+
+    if target_skill.exists():
+        marker = target_skill / ".harness-injected"
+        if marker.exists():
+            shutil.rmtree(target_skill)
+        else:
+            print(f"[inject] WARNING: Client skill '{skill_name}' exists — prefixing with 'harness-'")
+            target_skill = skills_dest / f"harness-{skill_name}"
+            if target_skill.exists():
+                shutil.rmtree(target_skill)
+
+    shutil.copytree(src_skill, target_skill, dirs_exist_ok=True)
+    (target_skill / ".harness-injected").touch()
+    print(f"[inject] {label}: {skill_name}")
+
+
+def expand_env_vars(value: Any) -> Any:
+    """Recursively expand ${VAR} and ${VAR:-default} in strings within a JSON-like structure."""
+    if isinstance(value, str):
+        def _sub(match: re.Match[str]) -> str:
+            var_name = match.group(1)
+            default = match.group(2) or ""
+            return os.environ.get(var_name, default)
+        return _ENV_VAR_RE.sub(_sub, value)
+    if isinstance(value, dict):
+        return {k: expand_env_vars(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [expand_env_vars(v) for v in value]
+    return value
 
 
 def inject(target_dir: Path, platform_profile: str = "") -> None:
@@ -39,28 +90,8 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
     skills_dest.mkdir(parents=True, exist_ok=True)
 
     for skill_dir in sorted((RUNTIME_DIR / "skills").iterdir()):
-        if not skill_dir.is_dir():
-            continue
-        skill_name = skill_dir.name
-        target_skill = skills_dest / skill_name
-
-        # Check for naming collision with existing client skills
-        if target_skill.exists():
-            # If this is a harness skill (re-injection), clean it first
-            marker = target_skill / ".harness-injected"
-            if marker.exists():
-                shutil.rmtree(target_skill)
-            else:
-                print(f"[inject] WARNING: Client skill '{skill_name}' exists — prefixing with 'harness-'")
-                target_skill = skills_dest / f"harness-{skill_name}"
-                # Clean stale prefixed dir from previous injection
-                if target_skill.exists():
-                    shutil.rmtree(target_skill)
-
-        shutil.copytree(skill_dir, target_skill, dirs_exist_ok=True)
-        # Mark as harness-injected for clean re-injection
-        (target_skill / ".harness-injected").touch()
-        print(f"[inject] Skill: {skill_name}")
+        if skill_dir.is_dir():
+            _inject_skill_dir(skill_dir, skills_dest, label="Skill")
 
     # --- Step 2: Inject agent definitions ---
     agents_dest = target_dir / ".claude" / "agents"
@@ -73,6 +104,9 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
 
     # --- Step 3: Platform profile supplements ---
     if platform_profile:
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", platform_profile):
+            print(f"Error: Invalid platform profile name: {platform_profile!r}")
+            sys.exit(1)
         profile_dir = RUNTIME_DIR / "platform-profiles" / platform_profile
 
         if not profile_dir.is_dir():
@@ -80,6 +114,13 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
             print(f"Error: Platform profile not found: {platform_profile}")
             print(f"Available profiles: {', '.join(available)}")
             sys.exit(1)
+
+        # Copy profile-local skills into .claude/skills/ (same semantics as Step 1)
+        profile_skills_dir = profile_dir / "skills"
+        if profile_skills_dir.is_dir():
+            for profile_skill in sorted(profile_skills_dir.iterdir()):
+                if profile_skill.is_dir():
+                    _inject_skill_dir(profile_skill, skills_dest, label="Profile skill")
 
         # Append supplements to relevant skills
         for supplement in profile_dir.glob("*_SUPPLEMENT.md"):
@@ -136,17 +177,49 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
             f.write(harness_claude.read_text())
         print("[inject] CLAUDE.md created (harness only, no client conventions)")
 
-    # --- Step 5: Generate .mcp.json ---
+    # --- Step 5: Generate .mcp.json (base + optional platform profile MCP merge) ---
     mcp_template = RUNTIME_DIR / "harness-mcp.json"
     if mcp_template.exists():
-        shutil.copy2(mcp_template, target_dir / ".mcp.json")
-        print("[inject] MCP config copied")
+        base_mcp = json.loads(mcp_template.read_text())
+        base_servers = base_mcp.setdefault("mcpServers", {})
+
+        if platform_profile:
+            profile_mcp_path = RUNTIME_DIR / "platform-profiles" / platform_profile / "harness-mcp.json"
+            if profile_mcp_path.exists():
+                profile_mcp = json.loads(profile_mcp_path.read_text())
+                profile_servers = profile_mcp.get("mcpServers", {})
+                # Profile keys override base on collision
+                for server_name, server_cfg in profile_servers.items():
+                    base_servers[server_name] = server_cfg
+                    print(f"[inject] MCP server from profile: {server_name}")
+
+        # Expand ${VAR} and ${VAR:-default} placeholders
+        merged_mcp = expand_env_vars(base_mcp)
+
+        (target_dir / ".mcp.json").write_text(json.dumps(merged_mcp, indent=2) + "\n")
+        print("[inject] MCP config written")
 
     # --- Step 6: Create harness directories ---
     for subdir in ("logs", "messages", "plans"):
         (target_dir / ".harness" / subdir).mkdir(parents=True, exist_ok=True)
 
     print("[inject] Harness directories created")
+
+    # --- Step 7: Write runtime version stamp ---
+    # Previously only the shell variant (inject-runtime.sh) wrote this
+    # marker, so production agents launched through the Python injector
+    # ended up with empty ``runtime_version`` fields in their telemetry.
+    # Copying the source-of-truth VERSION file directly keeps both
+    # injectors in lockstep.
+    version_file = RUNTIME_DIR / "VERSION"
+    if version_file.exists():
+        stamp = target_dir / ".harness" / "runtime-version"
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(version_file.read_text())
+        print(f"[inject] Runtime version: {version_file.read_text().strip()}")
+    else:
+        print("[inject] WARNING: runtime/VERSION not found — skipping version marker")
+
     print("[inject] Done.")
 
 

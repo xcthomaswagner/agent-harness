@@ -8,7 +8,6 @@ cards side-by-side and MUST NOT display a single averaged headline metric
 
 from __future__ import annotations
 
-import html
 import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
@@ -32,6 +31,16 @@ from autonomy_store import (
 )
 from client_profile import load_profile
 from config import settings
+from dashboard_common import (
+    LANGFUSE_BASE_CSS,
+    STANDARD_CARD_CSS,
+    STANDARD_TABLE_CSS,
+)
+from dashboard_common import (
+    MODE_BADGE as _MODE_BADGE,
+)
+from dashboard_common import escape_html as _e
+from dashboard_common import fmt_pct as _fmt_pct
 
 logger = structlog.get_logger()
 
@@ -40,33 +49,10 @@ router = APIRouter()
 
 # --- Langfuse Design System (copied from trace_dashboard) ---
 
-_LANGFUSE_STYLES = """
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  font-feature-settings: "rlig" 1, "calt" 1;
-  background: #FFFFFF; color: #0F172A; font-size: 13.2px; line-height: 1.5;
-}
-a { color: #4D45E5; text-decoration: none; }
-a:hover { text-decoration: underline; }
-.page { max-width: 1400px; margin: 0 auto; padding: 24px; }
-h1 { font-size: 20.8px; font-weight: 600; color: #0F172A; }
-h2 { font-size: 15px; font-weight: 600; color: #0F172A; margin-bottom: 8px; }
-.meta { font-size: 11.2px; color: #64748B; }
-.badge {
-  display: inline-flex; align-items: center; border-radius: 6px;
-  font-weight: 600; font-size: 11.2px; padding: 1px 8px; white-space: nowrap;
-}
-.badge-success { background: #DBFBE7; color: #124D49; }
-.badge-error { background: #FBE6F1; color: #DB2626; }
-.badge-warning { background: #FEFCE8; color: #C79004; }
-.badge-blue { background: #DAEAFD; color: #3B82F5; }
-.badge-secondary { background: #F1F5F9; color: #0F172A; }
-.card {
-  border: 1px solid #E2E8F0; border-radius: 8px; padding: 16px;
-  background: #FFFFFF; margin-bottom: 12px;
-}
+# Base CSS + shared card/table pieces come from dashboard_common;
+# autonomy-specific rules (card-grid sizing = 320px, table with
+# collapse borders, the selector bar chrome) are appended here.
+_AUTONOMY_LOCAL_CSS = """
 .card-grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 16px; margin: 16px 0;
@@ -75,37 +61,24 @@ h2 { font-size: 15px; font-weight: 600; color: #0F172A; margin-bottom: 8px; }
   display: flex; justify-content: space-between; padding: 4px 0;
   font-size: 12.5px;
 }
-.metric-label { color: #64748B; }
-.metric-value { font-weight: 600; color: #0F172A; }
 table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 12px; }
 thead th {
   text-align: left; padding: 8px 12px; border-bottom: 1px solid #E2E8F0;
   font-weight: 600; color: #64748B; background: #F8FAFC;
 }
-tbody td { padding: 8px 12px; border-bottom: 1px solid #E2E8F0; vertical-align: middle; }
-tbody tr:last-child td { border-bottom: none; }
 .selector { margin: 16px 0; font-size: 12.5px; }
 .selector a { margin: 0 4px; }
 .selector .sep { color: #CBD5E1; }
 """
 
-
-_MODE_BADGE: dict[str, str] = {
-    "conservative": "badge-secondary",
-    "semi_autonomous": "badge-warning",
-    "full_autonomous": "badge-success",
-}
+_LANGFUSE_STYLES = (
+    LANGFUSE_BASE_CSS + STANDARD_CARD_CSS + STANDARD_TABLE_CSS + _AUTONOMY_LOCAL_CSS
+)
 
 
-def _e(text: Any) -> str:
-    """HTML-escape a value."""
-    return html.escape(str(text), quote=True)
-
-
-def _fmt_pct(value: float | None) -> str:
-    if value is None:
-        return "—"
-    return f"{value * 100:.0f}%"
+# _MODE_BADGE imported from dashboard_common (was duplicated identically
+# between unified_dashboard and autonomy_dashboard). _fmt_pct similarly
+# — previously duplicated with a subtle em-dash drift.
 
 
 def _compute_profile_metrics(
@@ -120,6 +93,29 @@ _DQ_STATUS_BADGE: dict[str, str] = {
     "degraded": "badge-warning",
     "insufficient_data": "badge-secondary",
 }
+
+
+def _metric_row(label: str, value_html: str) -> str:
+    """Render one ``<div class="metric-row">`` block.
+
+    Previously _render_profile_card hand-rolled ~8 identical copies
+    of this HTML, with subtle variation between "label + plain text"
+    and "label + badge". Consolidating kills ~30 lines of mechanical
+    duplication and makes adding a new metric a one-line call.
+    ``value_html`` is trusted HTML — callers who pass user data must
+    run it through ``_e`` first (the helper uses ``_e`` on the label
+    but not the value, mirroring the previous hand-rolled shape).
+    """
+    return (
+        '<div class="metric-row">'
+        f'<span class="metric-label">{_e(label)}</span>'
+        f'<span class="metric-value">{value_html}</span></div>'
+    )
+
+
+def _badge_span(cls: str, text: str) -> str:
+    """Render a ``<span class="badge ...">`` pill with escaped text."""
+    return f'<span class="badge {cls}">{_e(text)}</span>'
 
 
 def _catch_rate_badge_class(value: float | None) -> str:
@@ -247,49 +243,36 @@ def _render_profile_card(metrics: dict[str, Any]) -> str:
     else:
         notes_html = ""
 
+    rows = [
+        _metric_row("First-pass acceptance", _e(fpa_line)),
+        _metric_row("Merged", str(merged)),
+        _metric_row(
+            "Defect escape",
+            _badge_span(defect_escape_cls, defect_escape_text),
+        ),
+        _metric_row(
+            "Self-review catch", _badge_span(catch_cls, catch_display)
+        ),
+        _metric_row(
+            "Sidecar coverage",
+            _badge_span(sidecar_cls, sidecar_display),
+        ),
+        _metric_row("Human issues", _e(humans_line)),
+        _metric_row("Sample size", f"{sample} PRs"),
+        _metric_row("Recommended mode", _badge_span(mode_cls, mode)),
+        # Data quality has a trailing notes_html fragment inline; fold
+        # both into the row's value_html.
+        _metric_row(
+            "Data quality",
+            f"{_badge_span(dq_badge_cls, dq_status)}{notes_html}",
+        ),
+    ]
     return (
         '<div class="card">'
         f'<h2>{_e(profile)}</h2>'
-        '<div class="metric-row">'
-        '<span class="metric-label">First-pass acceptance</span>'
-        f'<span class="metric-value">{_e(fpa_line)}</span></div>'
-        '<div class="metric-row">'
-        '<span class="metric-label">Merged</span>'
-        f'<span class="metric-value">{merged}</span></div>'
-        '<div class="metric-row">'
-        '<span class="metric-label">Defect escape</span>'
-        f'<span class="metric-value">'
-        f'<span class="badge {defect_escape_cls}">{_e(defect_escape_text)}</span>'
-        '</span></div>'
-        '<div class="metric-row">'
-        '<span class="metric-label">Self-review catch</span>'
-        f'<span class="metric-value">'
-        f'<span class="badge {catch_cls}">{_e(catch_display)}</span>'
-        '</span></div>'
-        '<div class="metric-row">'
-        '<span class="metric-label">Sidecar coverage</span>'
-        f'<span class="metric-value">'
-        f'<span class="badge {sidecar_cls}">{_e(sidecar_display)}</span>'
-        '</span></div>'
-        '<div class="metric-row">'
-        '<span class="metric-label">Human issues</span>'
-        f'<span class="metric-value">{_e(humans_line)}</span></div>'
-        '<div class="metric-row">'
-        '<span class="metric-label">Sample size</span>'
-        f'<span class="metric-value">{sample} PRs</span></div>'
-        '<div class="metric-row">'
-        '<span class="metric-label">Recommended mode</span>'
-        f'<span class="metric-value">'
-        f'<span class="badge {mode_cls}">{_e(mode)}</span></span></div>'
-        '<div class="metric-row">'
-        '<span class="metric-label">Data quality</span>'
-        f'<span class="metric-value">'
-        f'<span class="badge {dq_badge_cls}">{_e(dq_status)}</span>'
-        f'{notes_html}'
-        '</span></div>'
-        f'{auto_merge_html}'
-        f'{sparkline_html}'
-        '</div>'
+        + "".join(rows)
+        + f"{auto_merge_html}{sparkline_html}"
+        + "</div>"
     )
 
 
@@ -468,19 +451,29 @@ def _render_escaped_defects_section(
     since_iso = (
         datetime.now(UTC) - timedelta(days=window_days)
     ).isoformat()
+    # Push the confirmed/category filter down into SQL so the LIMIT
+    # applies to escaped rows only. Previously we fetched the top N
+    # defect_links (any category) per profile and THEN filtered in
+    # Python — a profile with 25+ more-recent non-escaped rows would
+    # silently drop every escaped row and the panel would render
+    # empty. See the regression test in test_autonomy_dashboard.
     all_rows: list[sqlite3.Row] = []
     for p in profiles:
         rows = list_defect_links_for_profile(
-            conn, p, since_iso=since_iso, limit=limit
+            conn,
+            p,
+            since_iso=since_iso,
+            limit=limit,
+            confirmed=1,
+            category="escaped",
         )
         all_rows.extend(rows)
 
-    escaped = [
-        r for r in all_rows
-        if int(r["confirmed"]) == 1 and r["category"] == "escaped"
-    ]
-    escaped.sort(key=lambda r: r["reported_at"] or "", reverse=True)
-    escaped = escaped[:limit]
+    # Already filtered + per-profile limited; sort cross-profile then
+    # cap at the global limit for the final table.
+    escaped = sorted(
+        all_rows, key=lambda r: r["reported_at"] or "", reverse=True
+    )[:limit]
 
     header = '<h2 style="margin-top:24px">Escaped Defects</h2>'
     if not escaped:

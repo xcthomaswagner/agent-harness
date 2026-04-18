@@ -15,6 +15,8 @@ This profile activates when any of these are detected:
 | `CODE_REVIEW_SUPPLEMENT.md` | `/code-review` skill |
 | `QA_SUPPLEMENT.md` | `/qa-validation` skill |
 | `CONVENTIONS.md` | Copied to `/implement/CONVENTIONS.md` |
+| `DEPLOYMENT_GOTCHAS.md` | Referenced from IMPLEMENT_SUPPLEMENT — load when deploying |
+| `LWR_EXPERIENCE_CLOUD_GOTCHAS.md` | Referenced from IMPLEMENT_SUPPLEMENT — load for Experience Cloud / B2B Commerce work |
 
 ## Salesforce Technologies Covered
 

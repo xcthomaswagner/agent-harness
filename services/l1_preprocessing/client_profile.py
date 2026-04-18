@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,12 @@ import yaml
 logger = structlog.get_logger()
 
 PROFILES_DIR = Path(__file__).resolve().parents[2] / "runtime" / "client-profiles"
+
+# Profile names are filesystem-backed (``<name>.yaml``) and show up in HTTP
+# query parameters (``/api/autonomy/auto-merge-toggle?client_profile=...``),
+# so restrict them to a conservative charset that cannot escape the profiles
+# directory via traversal (``..``), absolute paths, or glob characters.
+_PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
 class ClientProfile:
@@ -23,22 +31,28 @@ class ClientProfile:
 
     @property
     def ticket_source(self) -> dict[str, Any]:
-        result: dict[str, Any] = self._data.get("ticket_source", {})
-        return result
+        val = self._data.get("ticket_source", {})
+        return val if isinstance(val, dict) else {}
 
     @property
     def source_control(self) -> dict[str, Any]:
-        result: dict[str, Any] = self._data.get("source_control", {})
-        return result
+        val = self._data.get("source_control", {})
+        return val if isinstance(val, dict) else {}
 
     @property
     def ci_pipeline(self) -> dict[str, Any]:
-        result: dict[str, Any] = self._data.get("ci_pipeline", {})
-        return result
+        val = self._data.get("ci_pipeline", {})
+        return val if isinstance(val, dict) else {}
 
     @property
     def client_repo_path(self) -> str:
-        return str(self._data.get("client_repo", {}).get("local_path", ""))
+        val = self._data.get("client_repo", {})
+        raw = str(val.get("local_path", "")) if isinstance(val, dict) else ""
+        # Expand ~ here so every downstream consumer (pipeline, spawn,
+        # _extract_ticket_payload) sees an absolute filesystem path.
+        # Profiles historically used absolute /tmp paths; moving to
+        # ~/.harness/clients/* requires expansion at the source.
+        return os.path.expanduser(raw) if raw else ""
 
     @property
     def ai_label(self) -> str:
@@ -51,6 +65,10 @@ class ClientProfile:
     @property
     def done_status(self) -> str:
         return str(self.ticket_source.get("done_status", "Done"))
+
+    @property
+    def in_progress_status(self) -> str:
+        return str(self.ticket_source.get("in_progress_status", "In Progress"))
 
     @property
     def jira_instance(self) -> str:
@@ -69,6 +87,28 @@ class ClientProfile:
     def ado_project_name(self) -> str:
         """Read ticket_source.ado_project_name from YAML."""
         return str(self.ticket_source.get("ado_project_name", ""))
+
+    # --- Source control properties ---
+
+    @property
+    def source_control_type(self) -> str:
+        """Read source_control.type from YAML (github | azure-repos)."""
+        return str(self.source_control.get("type", "github"))
+
+    @property
+    def is_azure_repos(self) -> bool:
+        """True when source_control.type is azure-repos."""
+        return self.source_control_type == "azure-repos"
+
+    @property
+    def ado_project(self) -> str:
+        """Read source_control.ado_project from YAML (Azure Repos only)."""
+        return str(self.source_control.get("ado_project", ""))
+
+    @property
+    def ado_repository_id(self) -> str:
+        """Read source_control.ado_repository_id from YAML (Azure Repos only)."""
+        return str(self.source_control.get("ado_repository_id", ""))
 
     @property
     def auto_merge_enabled(self) -> bool:
@@ -97,7 +137,19 @@ def load_profile(name: str, profiles_dir: Path | None = None) -> ClientProfile |
 
     Looks for `<name>.yaml` in the profiles directory.
     Returns None if not found.
+
+    Rejects names that don't match ``^[A-Za-z0-9][A-Za-z0-9_-]*$`` — any
+    attempt at path traversal (``..``), absolute paths, or glob characters
+    is dropped at the entry point. Callers get None with a
+    ``client_profile_invalid_name`` warning instead of a filesystem hit.
+    The parse-error branch no longer echoes YAML error text (which could
+    contain file contents) into the log, in case a caller does manage to
+    pass the regex via a legitimate-looking but unexpected file.
     """
+    if not isinstance(name, str) or not _PROFILE_NAME_RE.match(name):
+        logger.warning("client_profile_invalid_name", name=name)
+        return None
+
     directory = profiles_dir or PROFILES_DIR
     path = directory / f"{name}.yaml"
 
@@ -107,8 +159,8 @@ def load_profile(name: str, profiles_dir: Path | None = None) -> ClientProfile |
 
     try:
         data = yaml.safe_load(path.read_text())
-    except yaml.YAMLError as exc:
-        logger.warning("client_profile_parse_error", name=name, error=str(exc)[:200])
+    except yaml.YAMLError:
+        logger.warning("client_profile_parse_error", name=name)
         return None
     if not isinstance(data, dict):
         logger.warning("client_profile_invalid", name=name, reason="YAML is not a dict")
@@ -192,6 +244,49 @@ def find_profile_by_ado_project(
     return None
 
 
+def find_profile_by_ado_repo(
+    ado_repository_id: str, profiles_dir: Path | None = None
+) -> ClientProfile | None:
+    """Find a client profile whose source_control.ado_repository_id matches.
+
+    Used by L3 to resolve an ADO PR webhook to a client profile.
+    Only considers profiles with source_control.type == 'azure-repos'.
+    Returns None if no profile matches.
+    """
+    directory = profiles_dir or PROFILES_DIR
+    if not directory.exists() or not ado_repository_id:
+        return None
+
+    target = ado_repository_id.strip().lower()
+    if not target:
+        return None
+
+    for path in sorted(directory.glob("*.yaml")):
+        if path.stem == "schema":
+            continue
+        try:
+            data = yaml.safe_load(path.read_text())
+        except yaml.YAMLError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        sc = data.get("source_control", {})
+        if not isinstance(sc, dict):
+            continue
+        if str(sc.get("type", "")).lower() != "azure-repos":
+            continue
+        profile_repo_id = str(sc.get("ado_repository_id", "")).strip().lower()
+        if profile_repo_id and profile_repo_id == target:
+            logger.info(
+                "client_profile_matched_by_ado_repo",
+                name=path.stem,
+                ado_repository_id=ado_repository_id,
+            )
+            return ClientProfile(data, path.stem)
+
+    return None
+
+
 def find_profile_by_repo(
     repo_full_name: str, profiles_dir: Path | None = None
 ) -> ClientProfile | None:
@@ -233,8 +328,14 @@ def find_profile_by_repo(
             return ClientProfile(data, path.stem)
         if url:
             # URL may be https://github.com/owner/repo[.git] — match suffix.
+            # Require the owner/repo segment to be preceded by a slash so
+            # ``alpha/service`` does NOT match an unrelated profile whose
+            # URL ends with ``team-alpha/service``. The previous bare
+            # ``endswith(target)`` clause admitted any suffix match and
+            # could route webhooks to the wrong client profile (wrong
+            # credentials, wrong callbacks).
             url_clean = url.rstrip("/").removesuffix(".git")
-            if url_clean.endswith("/" + target) or url_clean.endswith(target):
+            if url_clean == target or url_clean.endswith("/" + target):
                 logger.info(
                     "client_profile_matched_by_repo",
                     name=path.stem,

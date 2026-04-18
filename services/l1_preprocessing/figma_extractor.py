@@ -13,9 +13,24 @@ from typing import Any
 import httpx
 import structlog
 
+from adapters._url_guard import UnsafeAttachmentUrl, validate_attachment_url
 from models import Attachment, DesignSpec
 
 logger = structlog.get_logger()
+
+# Hosts the Figma CDN may serve rendered-image URLs from. ``amazonaws.com``
+# is broader than strictly needed — Figma's rendered images live at
+# ``figma-alpha-api.s3.us-west-2.amazonaws.com`` — but keeping the apex
+# domain avoids brittle breakage if the region slug changes or an
+# alternate bucket name ships. The SSRF guard still rejects any
+# RFC1918 / link-local / loopback resolution on top of the host match,
+# so ``amazonaws.com`` accepting isn't a free pass.
+_FIGMA_CDN_HOSTS: list[str] = [
+    "s3-alpha.figma.com",
+    "s3-alpha-sig.figma.com",
+    "figma-alpha-api.s3.us-west-2.amazonaws.com",
+    "amazonaws.com",
+]
 
 # Regex to match Figma URLs
 FIGMA_URL_PATTERN = re.compile(
@@ -53,12 +68,27 @@ class FigmaExtractor:
         self,
         api_token: str = "",
         client: httpx.AsyncClient | None = None,
+        cdn_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._token = api_token
         self._client = client or httpx.AsyncClient(
             base_url="https://api.figma.com",
             headers={"X-Figma-Token": api_token} if api_token else {},
             timeout=30.0,
+        )
+        # Separate client for downloading rendered frame images from
+        # the Figma CDN (figma-alpha-api.s3.*.amazonaws.com). These
+        # URLs are pre-signed and require no auth — but previously the
+        # main ``self._client`` was reused to fetch them, which sent
+        # the ``X-Figma-Token`` default header to AWS on every image
+        # download. The token then ended up in S3 access logs and any
+        # edge/redirect targets outside the operator's trust boundary.
+        # Keeping the CDN client header-free cleanly scopes the token.
+        # ``follow_redirects=False`` is the paired SSRF guard: a 30x
+        # bouncing to an internal host can't sidestep the allowlist
+        # in ``validate_attachment_url``.
+        self._cdn_client = cdn_client or httpx.AsyncClient(
+            timeout=30.0, follow_redirects=False
         )
 
     async def extract(
@@ -168,8 +198,10 @@ class FigmaExtractor:
         self, file_key: str, node_id: str
     ) -> dict[str, Any] | None:
         """Fetch a specific node from a Figma file."""
+        from urllib.parse import quote
+        encoded_id = quote(node_id, safe="")
         response = await self._fetch_with_retry(
-            f"/v1/files/{file_key}/nodes?ids={node_id}", "node_fetch"
+            f"/v1/files/{file_key}/nodes?ids={encoded_id}", "node_fetch"
         )
         if not response:
             return None
@@ -264,10 +296,30 @@ class FigmaExtractor:
             safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
             file_path = dest / f"figma-{safe_name}.png"
 
+            # SSRF guard — Figma's image API returns an attacker-
+            # influenced URL (the file is user-owned). Validate the
+            # host against the known Figma CDN allowlist before the
+            # CDN client touches it. Any URL that resolves into a
+            # private / loopback / link-local IP (IMDS, LAN) is
+            # rejected.
             try:
-                img_resp = await self._client.get(
-                    url, follow_redirects=True
+                await validate_attachment_url(url, _FIGMA_CDN_HOSTS)
+            except UnsafeAttachmentUrl as exc:
+                logger.warning(
+                    "figma_frame_url_blocked",
+                    frame=name,
+                    reason=str(exc),
                 )
+                continue
+
+            try:
+                # Use the no-auth CDN client so X-Figma-Token isn't
+                # leaked to AWS S3 — image URLs are pre-signed.
+                # ``follow_redirects=False`` on the client itself is
+                # the paired guard: a 30x bounce to an internal host
+                # cannot sneak past the validator that only ran against
+                # the initial URL.
+                img_resp = await self._cdn_client.get(url)
                 if img_resp.status_code == 200:
                     file_path.write_bytes(img_resp.content)
                     rendered.append(str(file_path))

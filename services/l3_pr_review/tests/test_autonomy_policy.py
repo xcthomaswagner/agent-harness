@@ -55,6 +55,7 @@ def _pr(**overrides: Any) -> dict[str, Any]:
         mergeable=True,
         mergeable_state="clean",
         approvals_count=1,
+        human_approvals_count=1,
         changes_requested_count=0,
         checks_passed=True,
         head_sha="abc123",
@@ -135,9 +136,55 @@ def test_already_merged_blocks() -> None:
 
 
 def test_no_approval_blocks() -> None:
-    ok, reason, _ = evaluate_policy_gates(_ctx(), _pr(approvals_count=0))
+    ok, reason, _ = evaluate_policy_gates(
+        _ctx(), _pr(approvals_count=0, human_approvals_count=0)
+    )
     assert ok is False
     assert reason == REASON_NO_APPROVAL
+
+
+def test_bot_only_approval_blocks() -> None:
+    """Regression: a PR with 1 bot approval and 0 human approvals must
+    fail the has_approval gate. Previously the gate used approvals_count
+    which includes bots, so a Dependabot approval would pass the gate."""
+    ok, reason, _ = evaluate_policy_gates(
+        _ctx(),
+        _pr(approvals_count=1, human_approvals_count=0),
+    )
+    assert ok is False
+    assert reason == REASON_NO_APPROVAL, (
+        "bot-only approvals must NOT satisfy has_approval — "
+        "regression for default-OPEN bot-auto-merge bug"
+    )
+
+
+def test_human_approval_passes_even_with_bot_approval() -> None:
+    """1 human + 1 bot approval still satisfies the gate."""
+    ok, reason, _ = evaluate_policy_gates(
+        _ctx(),
+        _pr(approvals_count=2, human_approvals_count=1),
+    )
+    assert ok is True
+    assert reason == REASON_OK
+
+
+def test_missing_human_approvals_fails_closed() -> None:
+    """Regression: iter 19 had a fallback to approvals_count when
+    human_approvals_count was absent, which let ADO PRs (which
+    didn't yet emit the human field) bypass the bot-approval
+    defense — an ADO service-principal vote=10 became
+    approvals_count=1 and the gate passed. Iter 20 removes the
+    fallback: any pr_state missing human_approvals_count now fails
+    closed. Both github_api and ado_api now emit the field."""
+    pr_state = _pr(approvals_count=1)
+    pr_state.pop("human_approvals_count", None)
+    ok, reason, _ = evaluate_policy_gates(_ctx(), pr_state)
+    assert ok is False
+    assert reason == REASON_NO_APPROVAL, (
+        "Missing human_approvals_count must fail-CLOSED — the "
+        "old fallback to approvals_count was a default-OPEN bypass "
+        "on ADO service-principal auto-approvals."
+    )
 
 
 def test_changes_requested_blocks() -> None:
@@ -254,6 +301,42 @@ async def test_fetch_auto_merge_enabled_happy() -> None:
         "profile1", l1_url="http://l1", client=client
     )
     assert result is True
+
+
+@pytest.mark.asyncio
+async def test_fetch_recommended_mode_sends_autonomy_admin_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When AUTONOMY_ADMIN_TOKEN is set, L3 forwards it on /api/autonomy GETs."""
+    monkeypatch.setenv("AUTONOMY_ADMIN_TOKEN", "admin-secret")
+    client = _mock_httpx_client(
+        200,
+        {"recommended_mode": "semi_autonomous", "data_quality": {"status": "good"}},
+    )
+    await fetch_recommended_mode("profile1", l1_url="http://l1", client=client)
+    _args, kwargs = client.get.call_args
+    assert kwargs["headers"]["X-Autonomy-Admin-Token"] == "admin-secret"
+
+
+@pytest.mark.asyncio
+async def test_fetch_recommended_mode_omits_header_when_no_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When no token configured, header is omitted (not sent as empty string)."""
+    monkeypatch.delenv("AUTONOMY_ADMIN_TOKEN", raising=False)
+    client = _mock_httpx_client(
+        200,
+        {"recommended_mode": "conservative", "data_quality": {"status": "unknown"}},
+    )
+    await fetch_recommended_mode("profile1", l1_url="http://l1", client=client)
+    _args, kwargs = client.get.call_args
+    assert "X-Autonomy-Admin-Token" not in (kwargs.get("headers") or {})
+
+
+@pytest.mark.asyncio
+async def test_fetch_auto_merge_enabled_sends_autonomy_admin_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """auto-merge-toggle GET also forwards the token."""
+    monkeypatch.setenv("AUTONOMY_ADMIN_TOKEN", "admin-secret")
+    client = _mock_httpx_client(200, {"enabled": True})
+    await fetch_auto_merge_enabled("profile1", l1_url="http://l1", client=client)
+    _args, kwargs = client.get.call_args
+    assert kwargs["headers"]["X-Autonomy-Admin-Token"] == "admin-secret"
 
 
 @pytest.mark.asyncio

@@ -94,6 +94,47 @@ class TestLoadProfile:
         assert profile is not None
         assert profile.name == "minimal"
 
+    def test_rejects_path_traversal(
+        self, tmp_path: Path, profiles_dir: Path
+    ) -> None:
+        """Bug regression: names with path separators, ``..``, or
+        absolute paths used to reach arbitrary .yaml files on disk via
+        ``directory / f"{name}.yaml"`` (pathlib happily resolves
+        traversal segments). Fixed by validating the name against a
+        conservative regex before any filesystem access."""
+        # Plant a file one directory up from the profiles dir — an
+        # attacker would have to get through the regex to see it.
+        outside = tmp_path / "captured.yaml"
+        outside.write_text("client: Captured\n")
+
+        # Every variant must return None and never touch the outside file.
+        for evil in (
+            "../captured",
+            "../../etc/passwd",
+            "/etc/passwd",
+            "name/with/slashes",
+            "..",
+            "",
+            ".hidden",
+            "has space",
+            "name*glob",
+        ):
+            assert load_profile(evil, profiles_dir=profiles_dir) is None, (
+                f"{evil!r} must be rejected by the name validator"
+            )
+
+    def test_accepts_conservative_names(self, profiles_dir: Path) -> None:
+        """Names that match the allow regex must still work — otherwise
+        the fix would break every legitimate client like ``xcsf30`` or
+        ``fleet-pride``."""
+        for good in ("xcsf30", "fleet-pride", "abc_123", "Sitecore", "a"):
+            (profiles_dir / f"{good}.yaml").write_text(
+                f"client: {good}\n"
+            )
+            profile = load_profile(good, profiles_dir=profiles_dir)
+            assert profile is not None
+            assert profile.name == good
+
 
 class TestListProfiles:
     def test_lists_yaml_files(self, profiles_dir: Path) -> None:
@@ -166,6 +207,49 @@ class TestFindProfileByRepo:
 
     def test_find_profile_by_repo_empty_input(self, profiles_dir: Path) -> None:
         assert find_profile_by_repo("", profiles_dir=profiles_dir) is None
+
+    def test_find_profile_by_repo_does_not_partial_match_owner(
+        self, profiles_dir: Path
+    ) -> None:
+        """Bug regression: the url-match fallback used bare
+        ``url_clean.endswith(target)`` which admitted any suffix match.
+        ``find_profile_by_repo("alpha/service")`` would match a profile
+        with ``url: https://gitlab.example.com/team-alpha/service``
+        because the URL's trailing characters happened to contain the
+        target. Fixed by requiring the preceding ``/`` separator (or
+        exact match), so ``alpha/service`` cannot cross-match an
+        unrelated ``team-alpha/service`` profile."""
+        (profiles_dir / "team_alpha.yaml").write_text(
+            "client: Team Alpha\n"
+            "client_repo:\n"
+            "  url: https://gitlab.example.com/team-alpha/service\n"
+        )
+        # A separate profile legitimately owns alpha/service (different org).
+        (profiles_dir / "alpha.yaml").write_text(
+            "client: Alpha Inc\n"
+            "client_repo:\n"
+            "  url: https://github.com/alpha/service\n"
+        )
+
+        # The target alpha/service must match ``alpha.yaml``, not
+        # ``team_alpha.yaml``. Before the fix the alphabetically-first
+        # profile (``alpha.yaml``) wins by the ``/``-separator clause
+        # anyway, so we also verify that a bare name that ONLY ends in
+        # an unrelated suffix cannot match.
+        profile = find_profile_by_repo(
+            "alpha/service", profiles_dir=profiles_dir
+        )
+        assert profile is not None
+        assert profile.name == "alpha"
+
+        # And a name that only exists as a suffix substring of the
+        # team_alpha URL (not preceded by /) must NOT match.
+        assert (
+            find_profile_by_repo(
+                "lpha/service", profiles_dir=profiles_dir
+            )
+            is None
+        )
 
 
 class TestAdoProperties:

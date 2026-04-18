@@ -27,6 +27,42 @@ _lock: asyncio.Lock = asyncio.Lock()
 ForwarderFn = Callable[[dict[str, Any]], Awaitable[bool]]
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` atomically, fsyncing before rename.
+
+    Previously ``_enforce_size_cap`` used ``Path.write_text`` which
+    opens the target in truncate mode: a process crash between the
+    truncate and the write completing leaves the backlog file empty
+    and silently wipes every buffered autonomy event — exactly the
+    data the backlog exists to protect during an L1 outage. The
+    drain path already used tmp-file + rename; this helper makes the
+    guarantee sharable so every writer honours the same invariant.
+
+    Writes to a sibling ``<path>.tmp`` file, fsyncs both the file
+    and (best-effort) the parent directory, then ``os.replace``s the
+    tmp onto the target. ``os.replace`` is atomic on POSIX and
+    Windows per the Python docs.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tmp.open("w", encoding="utf-8") as f:
+        f.write(content)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    # Best-effort parent directory fsync so the rename itself is
+    # durable across power loss on POSIX. On Windows fsync on a
+    # directory fd is not supported — swallow the error.
+    try:
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
+
+
 async def append_backlog(
     endpoint: str, payload: dict[str, Any], attempts: int = 1
 ) -> None:
@@ -78,7 +114,11 @@ async def drain_backlog(forwarders: dict[str, ForwarderFn]) -> dict[str, int]:
                 continue
             forwarder = forwarders.get(endpoint)
             if forwarder is None:
-                corrupt += 1
+                # Preserve — handler may be temporarily missing (import
+                # error, registration typo). Next drain will retry once
+                # the handler is registered. Destroying the entry here
+                # would permanently lose the event with no recovery path.
+                survivors.append(entry)
                 logger.warning("l3_backlog_unknown_endpoint", endpoint=endpoint)
                 continue
             try:
@@ -91,13 +131,15 @@ async def drain_backlog(forwarders: dict[str, ForwarderFn]) -> dict[str, int]:
             else:
                 entry["attempts"] = attempts + 1
                 survivors.append(entry)
-        # Write survivors (atomic rename)
-        tmp = BACKLOG_PATH.with_suffix(".jsonl.tmp")
+        # Write survivors atomically — uses the shared
+        # _atomic_write_text helper so fsync semantics are identical
+        # to the trim path. Previously this path wrote without fsync
+        # before rename, so a power-loss event between the rename and
+        # the OS flushing could leave the rewritten backlog in an
+        # inconsistent state on POSIX.
         if survivors:
-            with tmp.open("w", encoding="utf-8") as f:
-                for s in survivors:
-                    f.write(json.dumps(s) + "\n")
-            tmp.replace(BACKLOG_PATH)
+            content = "".join(json.dumps(s) + "\n" for s in survivors)
+            _atomic_write_text(BACKLOG_PATH, content)
         else:
             BACKLOG_PATH.unlink(missing_ok=True)
         result = {
@@ -112,10 +154,12 @@ async def drain_backlog(forwarders: dict[str, ForwarderFn]) -> dict[str, int]:
 
 def backlog_status() -> dict[str, Any]:
     """Return file size + count + oldest/newest timestamps."""
-    if not BACKLOG_PATH.exists():
-        return {"entries": 0, "bytes": 0, "oldest_ts": "", "newest_ts": ""}
-    size = BACKLOG_PATH.stat().st_size
-    lines = BACKLOG_PATH.read_text(encoding="utf-8").splitlines()
+    empty = {"entries": 0, "bytes": 0, "oldest_ts": "", "newest_ts": ""}
+    try:
+        size = BACKLOG_PATH.stat().st_size
+        lines = BACKLOG_PATH.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return empty
     entries: list[dict[str, Any]] = []
     for line in lines:
         if not line.strip():
@@ -145,6 +189,7 @@ async def _enforce_size_cap() -> None:
     lines = BACKLOG_PATH.read_text(encoding="utf-8").splitlines()
     # Drop oldest 20% of lines
     keep_count = max(1, len(lines) * 4 // 5)
-    kept = lines[-keep_count:]
-    BACKLOG_PATH.write_text("\n".join(kept) + "\n", encoding="utf-8")
-    logger.warning("l3_backlog_overflow_dropped", dropped=len(lines) - keep_count)
+    kept = [ln for ln in lines[-keep_count:] if ln.strip()]
+    content = "\n".join(kept) + ("\n" if kept else "")
+    _atomic_write_text(BACKLOG_PATH, content)
+    logger.warning("l3_backlog_overflow_dropped", dropped=len(lines) - len(kept))

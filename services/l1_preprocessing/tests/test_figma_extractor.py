@@ -226,28 +226,34 @@ class TestFigmaExtractor:
 
 class TestFrameRendering:
     @pytest.fixture
-    def mock_client_with_images(self) -> AsyncMock:
-        """Mock client that handles both file fetch and image render."""
+    def mock_api_client(self) -> AsyncMock:
+        """Mock Figma API client (handles /v1/files/ and /v1/images/)."""
         client = AsyncMock(spec=httpx.AsyncClient)
 
         file_resp = httpx.Response(
             200, json=_FILE_RESPONSE_JSON, request=_DUMMY_REQUEST,
         )
+        # Use the real Figma CDN host so the SSRF guard (which checks
+        # both allowlist membership and DNS resolution) accepts it.
+        # The host is in ``_FIGMA_CDN_HOSTS`` and resolves to public
+        # AWS IPs — the guard only rejects RFC1918/loopback/link-local,
+        # so public DNS results pass.
         image_api_resp = httpx.Response(
             200,
             json={
                 "err": None,
                 "images": {
-                    "1:10": "https://figma-s3.amazonaws.com/img1.png",
-                    "2:20": "https://figma-s3.amazonaws.com/img2.png",
+                    "1:10": (
+                        "https://figma-alpha-api.s3.us-west-2"
+                        ".amazonaws.com/img1.png"
+                    ),
+                    "2:20": (
+                        "https://figma-alpha-api.s3.us-west-2"
+                        ".amazonaws.com/img2.png"
+                    ),
                 },
             },
             request=_DUMMY_REQUEST,
-        )
-        # Image download response (fake PNG bytes)
-        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
-        img_download_resp = httpx.Response(
-            200, content=png_bytes, request=_DUMMY_REQUEST,
         )
 
         async def routed_get(url: str, **kwargs: object) -> httpx.Response:
@@ -255,17 +261,43 @@ class TestFrameRendering:
                 return file_resp
             if "/v1/images/" in url:
                 return image_api_resp
-            # Image download (S3 URL)
+            raise AssertionError(
+                f"API client got unexpected URL {url!r} — CDN downloads "
+                f"must go to the cdn_client (the X-Figma-Token header "
+                f"must not be sent to S3)."
+            )
+
+        client.get = AsyncMock(side_effect=routed_get)
+        return client
+
+    @pytest.fixture
+    def mock_cdn_client(self) -> AsyncMock:
+        """Mock CDN client for the S3 image-download path."""
+        client = AsyncMock(spec=httpx.AsyncClient)
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+        img_download_resp = httpx.Response(
+            200, content=png_bytes, request=_DUMMY_REQUEST,
+        )
+
+        async def routed_get(url: str, **kwargs: object) -> httpx.Response:
+            assert "amazonaws.com" in url or "s3" in url, (
+                f"CDN client got non-S3 URL {url!r}"
+            )
             return img_download_resp
 
         client.get = AsyncMock(side_effect=routed_get)
         return client
 
     async def test_renders_frames_to_files(
-        self, mock_client_with_images: AsyncMock, tmp_path: Path
+        self,
+        mock_api_client: AsyncMock,
+        mock_cdn_client: AsyncMock,
+        tmp_path: Path,
     ) -> None:
         extractor = FigmaExtractor(
-            api_token="test-token", client=mock_client_with_images
+            api_token="test-token",
+            client=mock_api_client,
+            cdn_client=mock_cdn_client,
         )
         spec = await extractor.extract(
             "https://www.figma.com/file/abc/Test",
@@ -279,10 +311,15 @@ class TestFrameRendering:
             assert Path(path).stat().st_size > 0
 
     async def test_rendered_frame_filenames(
-        self, mock_client_with_images: AsyncMock, tmp_path: Path
+        self,
+        mock_api_client: AsyncMock,
+        mock_cdn_client: AsyncMock,
+        tmp_path: Path,
     ) -> None:
         extractor = FigmaExtractor(
-            api_token="test-token", client=mock_client_with_images
+            api_token="test-token",
+            client=mock_api_client,
+            cdn_client=mock_cdn_client,
         )
         spec = await extractor.extract(
             "https://www.figma.com/file/abc/Test",
@@ -293,6 +330,48 @@ class TestFrameRendering:
         names = [Path(p).name for p in spec.rendered_frames]
         assert "figma-Header.png" in names
         assert "figma-Footer.png" in names
+
+    async def test_cdn_download_does_not_leak_figma_token(
+        self,
+        mock_api_client: AsyncMock,
+        mock_cdn_client: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """Bug regression: previously the main API client (with
+        ``X-Figma-Token`` set as a default header) was reused to fetch
+        the CDN images — leaking the token to AWS S3. After the fix the
+        CDN path uses a dedicated no-auth client, and the mock api
+        client asserts no S3 URL is ever requested through it."""
+        extractor = FigmaExtractor(
+            api_token="secret-token",
+            client=mock_api_client,
+            cdn_client=mock_cdn_client,
+        )
+        spec = await extractor.extract(
+            "https://www.figma.com/file/abc/Test",
+            image_dest_dir=str(tmp_path),
+        )
+        assert spec is not None
+        assert len(spec.rendered_frames) == 2
+
+        # CDN client was used for image downloads.
+        assert mock_cdn_client.get.call_count == 2
+        # Every CDN call must be to an S3-style URL — the mock's routed_get
+        # asserts that inline, so reaching here proves the token path.
+        cdn_urls = [
+            call.args[0] if call.args else call.kwargs["url"]
+            for call in mock_cdn_client.get.await_args_list
+        ]
+        assert all("amazonaws" in u or "s3" in u for u in cdn_urls)
+        # And the main API client saw only Figma API URLs (its
+        # routed_get raises AssertionError on anything else).
+        api_urls = [
+            call.args[0] if call.args else call.kwargs["url"]
+            for call in mock_api_client.get.await_args_list
+        ]
+        assert all(
+            "/v1/files/" in u or "/v1/images/" in u for u in api_urls
+        )
 
     async def test_image_api_error_returns_empty_frames(
         self, tmp_path: Path
@@ -324,11 +403,16 @@ class TestFrameRendering:
         assert spec.rendered_frames == []
 
     async def test_specific_node_id_renders_that_frame(
-        self, mock_client_with_images: AsyncMock, tmp_path: Path
+        self,
+        mock_api_client: AsyncMock,
+        mock_cdn_client: AsyncMock,
+        tmp_path: Path,
     ) -> None:
         """When URL has node-id pointing to a specific frame, render it."""
         extractor = FigmaExtractor(
-            api_token="test-token", client=mock_client_with_images
+            api_token="test-token",
+            client=mock_api_client,
+            cdn_client=mock_cdn_client,
         )
         spec = await extractor.extract(
             "https://www.figma.com/file/abc/Test?node-id=1:10",
@@ -338,7 +422,7 @@ class TestFrameRendering:
         assert spec is not None
         # Should have requested images for just the one node
         image_calls = [
-            c for c in mock_client_with_images.get.call_args_list
+            c for c in mock_api_client.get.call_args_list
             if "/v1/images/" in str(c)
         ]
         assert len(image_calls) == 1

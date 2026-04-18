@@ -7,6 +7,7 @@ per-client-profile aggregates over a rolling window.
 
 from __future__ import annotations
 
+import hmac
 import json
 import sqlite3
 import threading
@@ -14,7 +15,7 @@ import time
 from typing import Any, Literal
 
 import structlog
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
 from autonomy_attribution import attribute_human_issues_to_commits
@@ -23,9 +24,9 @@ from autonomy_matching import match_human_issues_for_pr_run
 from autonomy_metrics import compute_profile_metrics
 from autonomy_store import (
     PrRunUpsert,
+    autonomy_conn,
     create_manual_match,
     drain_pending_ai_issues,
-    ensure_schema,
     find_latest_merged_pr_run_by_ticket,
     get_auto_merge_toggle,
     get_pr_run_by_unique,
@@ -37,11 +38,9 @@ from autonomy_store import (
     list_human_issues_for_pr_run,
     list_pr_commits,
     list_recent_auto_merge_decisions,
-    open_connection,
     promote_match_to_counted,
     record_auto_merge_decision,
     record_defect_sweep_heartbeat,
-    resolve_db_path,
     set_auto_merge_toggle,
     set_human_issue_code_change_flag,
     upsert_pr_run,
@@ -525,11 +524,16 @@ async def _guard_internal_request(
     """Shared auth/size/rate-limit guard for internal POST endpoints.
 
     Returns the request body bytes on success. Raises HTTPException for
-    auth (503/401), size (413), or rate-limit (429) failures.
+    auth (503/401), size (413), or rate-limit (429) failures. Uses
+    ``hmac.compare_digest`` for constant-time token comparison so the
+    check does not leak byte-by-byte timing info about the configured
+    secret via CPython's short-circuited ``!=`` on strings.
     """
     if not settings.l1_internal_api_token:
         raise HTTPException(status_code=503, detail="Internal API not configured")
-    if not token_header or token_header != settings.l1_internal_api_token:
+    if not token_header or not hmac.compare_digest(
+        token_header, settings.l1_internal_api_token
+    ):
         raise HTTPException(status_code=401, detail="Invalid or missing token")
     body = await request.body()
     if len(body) > settings.autonomy_internal_max_body_bytes:
@@ -598,13 +602,6 @@ def _upsert_human_issue(
     return new_id, "inserted"
 
 
-def _open_conn() -> sqlite3.Connection:
-    db_path = resolve_db_path(settings.autonomy_db_path)
-    conn = open_connection(db_path)
-    ensure_schema(conn)
-    return conn
-
-
 @router.post("/api/internal/autonomy/events")
 async def post_autonomy_event(
     request: Request,
@@ -638,11 +635,8 @@ async def post_autonomy_event(
             ticket_id=event.ticket_id,
         )
 
-    conn = _open_conn()
-    try:
+    with autonomy_conn() as conn:
         pr_run_id = apply_event(conn, event, profile_name)
-    finally:
-        conn.close()
 
     logger.info(
         "autonomy_event_ingested",
@@ -696,8 +690,7 @@ async def post_autonomy_human_issue(
         1 if human.event_type == "review_changes_requested" else 0
     )
 
-    conn = _open_conn()
-    try:
+    with autonomy_conn() as conn:
         # Ensure pr_run exists (stub if missing).
         existing = get_pr_run_by_unique(
             conn, human.repo_full_name, human.pr_number, human.head_sha
@@ -731,8 +724,6 @@ async def post_autonomy_human_issue(
         )
 
         match_summary = match_human_issues_for_pr_run(conn, pr_run_id)
-    finally:
-        conn.close()
 
     logger.info(
         "autonomy_human_issue_ingested",
@@ -783,8 +774,7 @@ async def post_github_defect_link(
 
     defect_key = f"gh-issue:{payload.issue_number}"
 
-    conn = _open_conn()
-    try:
+    with autonomy_conn() as conn:
         # Find the most recently merged pr_run matching (repo, pr_number).
         row = conn.execute(
             "SELECT * FROM pr_runs WHERE repo_full_name = ? AND pr_number = ? "
@@ -843,8 +833,6 @@ async def post_github_defect_link(
             ),
             created_by="github_defect_webhook",
         )
-    finally:
-        conn.close()
 
     logger.info(
         "autonomy_github_defect_recorded",
@@ -868,11 +856,15 @@ async def _guard_admin_request(
     """Auth + payload size + rate-limit for admin endpoints.
 
     Returns the request body bytes on success. Raises HTTPException for
-    auth (503/401), size (413), or rate-limit (429) failures.
+    auth (503/401), size (413), or rate-limit (429) failures. Uses
+    ``hmac.compare_digest`` for constant-time token comparison to
+    avoid leaking timing info about ``autonomy_admin_token``.
     """
     if not settings.autonomy_admin_token:
         raise HTTPException(status_code=503, detail="Admin API not configured")
-    if not token or token != settings.autonomy_admin_token:
+    if not token or not hmac.compare_digest(
+        token, settings.autonomy_admin_token
+    ):
         raise HTTPException(status_code=401, detail="Invalid admin token")
     body = await request.body()
     if len(body) > settings.autonomy_internal_max_body_bytes:
@@ -880,6 +872,34 @@ async def _guard_admin_request(
     if not _bucket.try_consume():
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
     return body
+
+
+async def _guard_admin_read(
+    x_autonomy_admin_token: str | None = Header(
+        default=None, alias="x-autonomy-admin-token"
+    ),
+) -> None:
+    """FastAPI dependency for read-only admin GET endpoints.
+
+    Validates the admin token with the same constant-time comparison
+    as ``_guard_admin_request`` but without reading the body or
+    consuming the shared rate-limit bucket — reads don't carry a
+    payload and shouldn't compete with writes for the limiter.
+
+    Phase 1 left three GET routes unauthenticated
+    (``/api/autonomy/auto-merge-toggle``,
+    ``/api/autonomy/auto-merge-decisions``, and ``/api/autonomy``).
+    Attaching this guard via ``dependencies=[Depends(_guard_admin_read)]``
+    protects them consistently. 503 if the admin token isn't set on
+    the service, 401 otherwise — same shape as the write guard so
+    clients can reuse their error handling.
+    """
+    if not settings.autonomy_admin_token:
+        raise HTTPException(status_code=503, detail="Admin API not configured")
+    if not x_autonomy_admin_token or not hmac.compare_digest(
+        x_autonomy_admin_token, settings.autonomy_admin_token
+    ):
+        raise HTTPException(status_code=401, detail="Invalid admin token")
 
 
 class ManualDefectIn(BaseModel):
@@ -939,8 +959,7 @@ async def post_manual_defect(
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    conn = _open_conn()
-    try:
+    with autonomy_conn() as conn:
         if payload.pr_run_id is not None:
             pr_run_id = payload.pr_run_id
             exists = conn.execute(
@@ -994,8 +1013,6 @@ async def post_manual_defect(
             target_id=str(defect_id),
             payload_json=json.dumps(payload.model_dump()),
         )
-    finally:
-        conn.close()
 
     logger.info(
         "autonomy_manual_defect_recorded",
@@ -1031,8 +1048,7 @@ async def post_manual_match(
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    conn = _open_conn()
-    try:
+    with autonomy_conn() as conn:
         if payload.mode == "promote":
             if payload.match_id is None:
                 raise HTTPException(
@@ -1085,8 +1101,6 @@ async def post_manual_match(
             "mode": "create",
             "match_id": match_id,
         }
-    finally:
-        conn.close()
 
 
 @router.post("/api/autonomy/defect-sweep-heartbeat")
@@ -1108,15 +1122,12 @@ async def post_defect_sweep_heartbeat(
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    conn = _open_conn()
-    try:
+    with autonomy_conn() as conn:
         override_id = record_defect_sweep_heartbeat(
             conn,
             client_profile=payload.client_profile,
             swept_through_iso=payload.swept_through,
         )
-    finally:
-        conn.close()
 
     logger.info(
         "autonomy_defect_sweep_heartbeat_recorded",
@@ -1200,8 +1211,7 @@ async def post_auto_merge_decision(
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    conn = _open_conn()
-    try:
+    with autonomy_conn() as conn:
         decision_id = record_auto_merge_decision(
             conn,
             repo_full_name=payload.repo_full_name,
@@ -1211,8 +1221,6 @@ async def post_auto_merge_decision(
             payload=payload.model_dump(),
             created_by="l3_auto_merge",
         )
-    finally:
-        conn.close()
 
     logger.info(
         "autonomy_auto_merge_decision_recorded",
@@ -1244,16 +1252,13 @@ async def post_auto_merge_toggle(
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    conn = _open_conn()
-    try:
+    with autonomy_conn() as conn:
         row_id = set_auto_merge_toggle(
             conn,
             client_profile=payload.client_profile,
             enabled=payload.enabled,
             created_by=payload.created_by,
         )
-    finally:
-        conn.close()
 
     logger.info(
         "autonomy_auto_merge_toggle_set",
@@ -1264,7 +1269,10 @@ async def post_auto_merge_toggle(
     return {"status": "ok", "override_id": row_id, "enabled": payload.enabled}
 
 
-@router.get("/api/autonomy/auto-merge-toggle")
+@router.get(
+    "/api/autonomy/auto-merge-toggle",
+    dependencies=[Depends(_guard_admin_read)],
+)
 async def get_auto_merge_toggle_effective(
     client_profile: str,
 ) -> dict[str, Any]:
@@ -1272,11 +1280,8 @@ async def get_auto_merge_toggle_effective(
 
     Precedence: runtime toggle (if ever set) > YAML auto_merge_enabled.
     """
-    conn = _open_conn()
-    try:
+    with autonomy_conn() as conn:
         runtime_toggle = get_auto_merge_toggle(conn, client_profile)
-    finally:
-        conn.close()
     yaml_enabled = False
     profile = load_profile(client_profile)
     if profile is not None:
@@ -1296,23 +1301,23 @@ async def get_auto_merge_toggle_effective(
     }
 
 
-@router.get("/api/autonomy/auto-merge-decisions")
+@router.get(
+    "/api/autonomy/auto-merge-decisions",
+    dependencies=[Depends(_guard_admin_read)],
+)
 async def get_auto_merge_decisions(
     client_profile: str | None = None,
     repo_full_name: str | None = None,
     limit: int = 50,
 ) -> dict[str, Any]:
     """List recent auto-merge decisions for the dashboard."""
-    conn = _open_conn()
-    try:
+    with autonomy_conn() as conn:
         rows = list_recent_auto_merge_decisions(
             conn,
             limit=min(max(limit, 1), 500),
             repo_full_name=repo_full_name,
             client_profile=client_profile,
         )
-    finally:
-        conn.close()
     decisions: list[dict[str, Any]] = []
     for r in rows:
         try:
@@ -1347,7 +1352,9 @@ async def get_profile_by_repo(
         raise HTTPException(status_code=503, detail="Internal API not configured")
     if (
         not x_internal_api_token
-        or x_internal_api_token != settings.l1_internal_api_token
+        or not hmac.compare_digest(
+            x_internal_api_token, settings.l1_internal_api_token
+        )
     ):
         raise HTTPException(status_code=401, detail="Invalid or missing token")
 
@@ -1365,7 +1372,10 @@ async def get_profile_by_repo(
     }
 
 
-@router.get("/api/autonomy")
+@router.get(
+    "/api/autonomy",
+    dependencies=[Depends(_guard_admin_read)],
+)
 async def get_autonomy(
     client_profile: str = "",
     window_days: int = 30,
@@ -1374,8 +1384,7 @@ async def get_autonomy(
     if window_days <= 0:
         raise HTTPException(status_code=400, detail="window_days must be positive")
 
-    conn = _open_conn()
-    try:
+    with autonomy_conn() as conn:
         if client_profile:
             return _aggregate_profile(conn, client_profile, window_days)
 
@@ -1390,5 +1399,3 @@ async def get_autonomy(
                 "window_days": window_days,
             },
         }
-    finally:
-        conn.close()

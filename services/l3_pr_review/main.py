@@ -11,6 +11,7 @@ import re
 import sys
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,9 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "l1_preprocessing"))
 from tracer import append_trace, generate_trace_id, read_trace
 
-from auto_merge import evaluate_and_maybe_merge
+from ado_api import post_ado_pr_comment
+from ado_event_classifier import classify_ado_event
+from auto_merge import evaluate_and_maybe_merge, evaluate_and_maybe_merge_ado
 from backlog import append_backlog, backlog_status, drain_backlog
 from event_classifier import EventType, classify_event
 from github_api import get_pr_state
@@ -69,38 +72,177 @@ def _get_spawner() -> SessionSpawner:
 
 # --- Helpers ---
 
+
+def _require_internal_api_token(x_internal_api_token: str | None) -> None:
+    """Validate the admin API token in constant time.
+
+    Plain ``!=`` leaks timing on the first differing byte, so an
+    attacker can byte-by-byte recover the secret. Use
+    ``hmac.compare_digest`` and raise the generic 401 only after the
+    compare, so missing tokens and wrong tokens take the same path.
+
+    Fails with 503 when the admin API isn't configured (empty env
+    var) so we don't accidentally accept an empty-string token.
+    """
+    expected = os.getenv("L1_INTERNAL_API_TOKEN", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="Admin API not configured")
+    provided = x_internal_api_token or ""
+    if not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+
+
 _AI_BRANCH_PATTERN = re.compile(r"^ai/([A-Za-z0-9]+-\d+)")
+
+
+_TICKET_TYPE_LABELS: tuple[str, ...] = (
+    "bug",
+    "chore",
+    "config",
+    "dependency",
+    "docs",
+    "story",
+)
+
+
+def _ticket_type_from_labels(
+    labels: list[str], *, default: str = "story"
+) -> str:
+    """Return the first label that matches a known ticket type, or ``default``.
+
+    Consolidates the copy-pasted label scan that appeared in both
+    ``_handle_review_approved`` and ``_handle_ci_passed``. The two
+    call sites previously used *different* label sets (one omitted
+    "story"), so a new ticket type would have required touching both.
+    """
+    for label in labels:
+        if label in _TICKET_TYPE_LABELS:
+            return label
+    return default
+
+
+def _pr_head_branch(pr: dict[str, Any]) -> str:
+    """Extract the PR head branch (ref) safely from a GitHub PR dict."""
+    return (pr.get("head") or {}).get("ref", "") or ""
+
+
+def _pr_head_sha(pr: dict[str, Any]) -> str:
+    """Extract the PR head sha safely from a GitHub PR dict."""
+    return (pr.get("head") or {}).get("sha", "") or ""
 
 
 def _ticket_id_from_payload(payload: dict[str, Any]) -> str:
     """Extract ticket ID from the PR branch name (e.g., ai/SCRUM-16 → SCRUM-16)."""
     pr = payload.get("pull_request", {})
-    branch = pr.get("head", {}).get("ref", "")
+    branch = _pr_head_branch(pr)
     match = _AI_BRANCH_PATTERN.match(branch)
     return match.group(1) if match else ""
 
 
-def _is_bot_comment(payload: dict[str, Any], user_path: list[str]) -> bool:
-    """Check whether a comment was posted by the bot.
+@dataclass(frozen=True)
+class _PRHandlerCtx:
+    """Fields every PR-scoped handler needs to do its work.
 
-    Two detection methods (either triggers skip):
-    1. Author's GitHub login matches BOT_USERNAME
-    2. Comment body contains the hidden BOT_COMMENT_MARKER
+    Collapses the 5-line block of ``pr.get(...)``/``_pr_head_branch``/
+    ``_ticket_id_from_payload``/``repo_full_name`` that each handler
+    used to open-code. Previously this block drifted between
+    handlers — ``_handle_review_approved`` read ``repo`` from
+    ``pr.base.repo.full_name`` while others used
+    ``payload.repository.full_name``. Centralising here collapses
+    the fallback chain into one place and makes any new handler
+    start from a typed object rather than six ``payload.get`` calls.
     """
-    # Check author login
+    pr: dict[str, Any]
+    pr_number: int
+    branch: str
+    head_sha: str
+    repo: str
+    ticket_id: str
+    labels: list[str]
+
+
+def _pr_handler_ctx(payload: dict[str, Any]) -> _PRHandlerCtx:
+    """Build a ``_PRHandlerCtx`` from a GitHub PR webhook payload."""
+    pr = payload.get("pull_request", {}) or {}
+    # repo resolution: prefer top-level repository.full_name (always
+    # present on PR webhooks), fall back to pr.base.repo.full_name
+    # (used by review webhooks where the top-level repo may be
+    # missing or stale). This fallback chain was previously
+    # duplicated across handlers with subtle drift.
+    repo = (payload.get("repository") or {}).get("full_name", "") or (
+        ((pr.get("base") or {}).get("repo") or {}).get("full_name", "")
+    )
+    return _PRHandlerCtx(
+        pr=pr,
+        pr_number=int(pr.get("number") or 0),
+        branch=_pr_head_branch(pr),
+        head_sha=_pr_head_sha(pr),
+        repo=repo,
+        ticket_id=_ticket_id_from_payload(payload) or "",
+        labels=[
+            (label or {}).get("name", "") for label in (pr.get("labels") or [])
+        ],
+    )
+
+
+def _is_bot_actor(
+    user: dict[str, Any] | None, body: str = ""
+) -> bool:
+    """Canonical bot-detection helper used by every webhook handler.
+
+    Returns True when ANY of the following signals are present:
+
+    1. ``user.type == "Bot"`` — GitHub App installations.
+    2. ``user.login`` ends in ``[bot]`` — GitHub convention for Apps.
+    3. ``user.login`` (case-insensitive) equals the harness's own
+       ``BOT_GITHUB_USERNAME`` env var — critical for catching
+       self-reviews posted by the harness under a normal-looking
+       user account (e.g. ``xcagentrockwell``), which has
+       ``type=User`` and no ``[bot]`` suffix.
+    4. The message ``body`` contains the hidden
+       ``BOT_COMMENT_MARKER`` — second-layer detection for cases
+       where the actor is spoofed or misconfigured.
+
+    Previously there were two separate helpers — ``_is_bot_user``
+    only covered signals (1) and (2), and ``_is_bot_comment`` added
+    (3) and (4). ``_forward_review_body_human_issue`` used the
+    weaker ``_is_bot_user``, which meant harness-posted review
+    bodies (posted under ``xcagentrockwell``) slipped past the
+    filter and were forwarded to L1 as if they were human
+    feedback, triggering a self-reinforcing bot loop where the
+    harness re-queued work based on its own critiques. Unifying
+    both helpers into one canonical path closes that gap and
+    makes it impossible to add a new handler that forgets a check.
+    """
+    if not isinstance(user, dict):
+        user = {}
+    login = (user.get("login") or "").lower()
+    if user.get("type") == "Bot":
+        return True
+    if login.endswith("[bot]"):
+        return True
+    if login and BOT_USERNAME and login == BOT_USERNAME.lower():
+        return True
+    return bool(body and BOT_COMMENT_MARKER and BOT_COMMENT_MARKER in body)
+
+
+def _is_bot_comment(payload: dict[str, Any], user_path: list[str]) -> bool:
+    """Back-compat shim that walks ``user_path`` out of ``payload`` and
+    delegates to :func:`_is_bot_actor`.
+
+    Kept so existing call sites don't need to learn the new
+    signature in this commit. New code should call ``_is_bot_actor``
+    directly.
+    """
     obj: Any = payload
     for key in user_path:
         obj = obj.get(key, {})
-    login: str = obj.get("login", "") if isinstance(obj, dict) else ""
-    if login == BOT_USERNAME:
-        return True
-
-    # Check comment body for hidden marker
+    user = obj if isinstance(obj, dict) else {}
     body = (
         payload.get("review", {}).get("body", "")
         or payload.get("comment", {}).get("body", "")
     )
-    return BOT_COMMENT_MARKER in body
+    return _is_bot_actor(user, body)
 
 
 def _lookup_trace_id(ticket_id: str) -> str:
@@ -130,88 +272,28 @@ _AUTONOMY_EVENTS_PATH = "/api/internal/autonomy/events"
 _HUMAN_ISSUES_PATH = "/api/internal/autonomy/human-issues"
 
 
-async def _forward_autonomy_event_once(event: dict[str, Any]) -> bool:
-    """POST event to L1 with retry-once on transient failure.
+async def _post_to_l1_with_retry(
+    path: str,
+    payload: dict[str, Any],
+    *,
+    log_event: str,
+    log_context: dict[str, Any],
+    headers: dict[str, str] | None = None,
+) -> bool:
+    """POST ``payload`` to L1 with retry-once on transient failure.
 
-    Returns True on success (2xx), False on double-fail or non-retryable 4xx.
-    Assumes L1_INTERNAL_API_TOKEN is set (caller must short-circuit otherwise).
+    Returns True on 2xx, False on non-retryable 4xx or double-fail 5xx.
+    Shared path for every L1 forwarder — both the internal autonomy
+    pipelines (which use ``X-Internal-Api-Token``, the default) and
+    the ``/api/agent-complete`` caller (which passes an explicit
+    ``X-API-Key`` header sourced from the shared
+    ``L1_INTERNAL_API_TOKEN`` env var — see ``_handle_review_approved``).
+
+    ``log_context`` is merged into every failure log.
     """
-    url = f"{L1_SERVICE_URL.rstrip('/')}{_AUTONOMY_EVENTS_PATH}"
-    headers = {"X-Internal-Api-Token": L1_INTERNAL_API_TOKEN}
-
-    last_error: str = ""
-    for attempt in range(2):
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(url, json=event, headers=headers)
-            if resp.status_code >= 500:
-                last_error = f"HTTP {resp.status_code}"
-                if attempt == 0:
-                    await asyncio.sleep(1)
-                    continue
-                return False
-            elif resp.status_code >= 400:
-                # Non-retryable client error
-                logger.error(
-                    "l1_autonomy_event_forward_failed",
-                    status_code=resp.status_code,
-                    body=resp.text[:500],
-                    event_type=event.get("event_type"),
-                    ticket_id=event.get("ticket_id"),
-                )
-                return False
-            else:
-                return True
-        except httpx.RequestError as exc:
-            last_error = f"RequestError: {exc}"
-            if attempt == 0:
-                await asyncio.sleep(1)
-                continue
-            return False
-
-    # Unreachable, but defensive
-    logger.error(
-        "l1_autonomy_event_forward_failed",
-        error=last_error,
-        event_type=event.get("event_type"),
-        ticket_id=event.get("ticket_id"),
-        url=url,
-    )
-    return False
-
-
-async def _forward_autonomy_event(event: dict[str, Any]) -> None:
-    """Forward autonomy event to L1; persist to backlog on final failure.
-
-    Short-circuits (without backlog) if L1_INTERNAL_API_TOKEN is unset.
-    """
-    if not L1_INTERNAL_API_TOKEN:
-        logger.warning(
-            "l1_autonomy_event_forward_skipped",
-            reason="L1_INTERNAL_API_TOKEN unset — autonomy events are being dropped. "
-            "Set L1_INTERNAL_API_TOKEN to enable forwarding.",
-            event_type=event.get("event_type"),
-        )
-        return
-    ok = await _forward_autonomy_event_once(event)
-    if not ok:
-        logger.error(
-            "l1_autonomy_event_forward_failed",
-            event_type=event.get("event_type"),
-            ticket_id=event.get("ticket_id"),
-            backlogged=True,
-        )
-        await append_backlog("autonomy_event", event)
-
-
-async def _forward_human_issue_once(payload: dict[str, Any]) -> bool:
-    """POST human issue to L1 with retry-once on transient failure.
-
-    Returns True on success (2xx), False on double-fail or non-retryable 4xx.
-    Assumes L1_INTERNAL_API_TOKEN is set (caller must short-circuit otherwise).
-    """
-    url = f"{L1_SERVICE_URL.rstrip('/')}{_HUMAN_ISSUES_PATH}"
-    headers = {"X-Internal-Api-Token": L1_INTERNAL_API_TOKEN}
+    url = f"{L1_SERVICE_URL.rstrip('/')}{path}"
+    if headers is None:
+        headers = {"X-Internal-Api-Token": L1_INTERNAL_API_TOKEN}
 
     last_error: str = ""
     for attempt in range(2):
@@ -224,17 +306,15 @@ async def _forward_human_issue_once(payload: dict[str, Any]) -> bool:
                     await asyncio.sleep(1)
                     continue
                 return False
-            elif resp.status_code >= 400:
+            if resp.status_code >= 400:
                 logger.error(
-                    "l1_human_issue_forward_failed",
+                    log_event,
                     status_code=resp.status_code,
                     body=resp.text[:500],
-                    event_type=payload.get("event_type"),
-                    ticket_id=payload.get("ticket_id"),
+                    **log_context,
                 )
                 return False
-            else:
-                return True
+            return True
         except httpx.RequestError as exc:
             last_error = f"RequestError: {exc}"
             if attempt == 0:
@@ -242,41 +322,132 @@ async def _forward_human_issue_once(payload: dict[str, Any]) -> bool:
                 continue
             return False
 
-    logger.error(
-        "l1_human_issue_forward_failed",
-        error=last_error,
-        event_type=payload.get("event_type"),
-        ticket_id=payload.get("ticket_id"),
-        url=url,
-    )
+    logger.error(log_event, error=last_error, url=url, **log_context)
     return False
 
 
-async def _forward_human_issue(payload: dict[str, Any]) -> None:
-    """Forward human issue to L1; persist to backlog on final failure.
+_GITHUB_DEFECT_LINK_PATH = "/api/internal/autonomy/github-defect-link"
 
-    Short-circuits (without backlog) if L1_INTERNAL_API_TOKEN is unset.
+
+@dataclass(frozen=True)
+class _ForwarderSpec:
+    """Static config for one L1 forwarder kind.
+
+    Consolidates the path, log-event base name, and the payload keys
+    to harvest for structured logs. Previously every forwarder
+    duplicated ~25 lines of "skip if no token / retry / log / backlog"
+    scaffolding plus its own `_once` wrapper. With this registry the
+    two wrappers collapse to tiny functions that look up the spec.
     """
+    path: str
+    log_event_base: str  # "l1_autonomy_event_forward" -> "_skipped" / "_failed"
+    skipped_reason: str
+    context_keys: tuple[str, ...]
+
+
+_FORWARDERS: dict[str, _ForwarderSpec] = {
+    "autonomy_event": _ForwarderSpec(
+        path=_AUTONOMY_EVENTS_PATH,
+        log_event_base="l1_autonomy_event_forward",
+        skipped_reason=(
+            "L1_INTERNAL_API_TOKEN unset — autonomy events are being dropped. "
+            "Set L1_INTERNAL_API_TOKEN to enable forwarding."
+        ),
+        context_keys=("event_type", "ticket_id"),
+    ),
+    "human_issue": _ForwarderSpec(
+        path=_HUMAN_ISSUES_PATH,
+        log_event_base="l1_human_issue_forward",
+        skipped_reason=(
+            "L1_INTERNAL_API_TOKEN unset — human review issues are being dropped. "
+            "Set L1_INTERNAL_API_TOKEN to enable forwarding."
+        ),
+        context_keys=("event_type", "ticket_id"),
+    ),
+    "github_defect": _ForwarderSpec(
+        path=_GITHUB_DEFECT_LINK_PATH,
+        log_event_base="l1_github_defect_forward",
+        skipped_reason=(
+            "L1_INTERNAL_API_TOKEN unset — GitHub defect links are being dropped. "
+            "Set L1_INTERNAL_API_TOKEN to enable forwarding."
+        ),
+        context_keys=("issue_number", "pr_number"),
+    ),
+}
+
+
+def _forwarder_context(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+    spec = _FORWARDERS[kind]
+    return {key: payload.get(key) for key in spec.context_keys}
+
+
+async def _forward_to_l1_once(kind: str, payload: dict[str, Any]) -> bool:
+    """POST ``payload`` to the L1 endpoint for ``kind`` with retry-once.
+
+    Assumes ``L1_INTERNAL_API_TOKEN`` is set — callers must short-circuit
+    otherwise. Registry-driven replacement for the three
+    ``_forward_*_once`` helpers.
+    """
+    spec = _FORWARDERS[kind]
+    return await _post_to_l1_with_retry(
+        spec.path,
+        payload,
+        log_event=f"{spec.log_event_base}_failed",
+        log_context=_forwarder_context(kind, payload),
+    )
+
+
+async def _forward_to_l1(kind: str, payload: dict[str, Any]) -> None:
+    """Forward ``payload`` to L1 and persist to backlog on final failure.
+
+    Short-circuits (without backlog) when ``L1_INTERNAL_API_TOKEN``
+    is unset. Single entry-point for every L1 forwarder — the three
+    old outer wrappers collapse to one function.
+    """
+    spec = _FORWARDERS[kind]
+    context = _forwarder_context(kind, payload)
     if not L1_INTERNAL_API_TOKEN:
         logger.warning(
-            "l1_human_issue_forward_skipped",
-            reason="L1_INTERNAL_API_TOKEN unset — human review issues are being dropped. "
-            "Set L1_INTERNAL_API_TOKEN to enable forwarding.",
-            event_type=payload.get("event_type"),
+            f"{spec.log_event_base}_skipped",
+            reason=spec.skipped_reason,
+            **context,
         )
         return
-    ok = await _forward_human_issue_once(payload)
-    if not ok:
+    if not await _forward_to_l1_once(kind, payload):
         logger.error(
-            "l1_human_issue_forward_failed",
-            event_type=payload.get("event_type"),
-            ticket_id=payload.get("ticket_id"),
+            f"{spec.log_event_base}_failed",
             backlogged=True,
+            **context,
         )
-        await append_backlog("human_issue", payload)
+        await append_backlog(kind, payload)
 
 
-_GITHUB_DEFECT_LINK_PATH = "/api/internal/autonomy/github-defect-link"
+# Back-compat aliases for existing call sites and tests. Eventually
+# every caller should say ``_forward_to_l1("autonomy_event", event)``
+# but keeping these as thin shims avoids a sweeping rename in this
+# commit.
+async def _forward_autonomy_event_once(event: dict[str, Any]) -> bool:
+    return await _forward_to_l1_once("autonomy_event", event)
+
+
+async def _forward_autonomy_event(event: dict[str, Any]) -> None:
+    await _forward_to_l1("autonomy_event", event)
+
+
+async def _forward_human_issue_once(payload: dict[str, Any]) -> bool:
+    return await _forward_to_l1_once("human_issue", payload)
+
+
+async def _forward_human_issue(payload: dict[str, Any]) -> None:
+    await _forward_to_l1("human_issue", payload)
+
+
+async def _forward_github_defect_once(payload: dict[str, Any]) -> bool:
+    return await _forward_to_l1_once("github_defect", payload)
+
+
+async def _forward_github_defect(payload: dict[str, Any]) -> None:
+    await _forward_to_l1("github_defect", payload)
 
 # Match (in order): full PR URL, owner/repo#N, bare #N (same-repo).
 _PR_REF_URL_PATTERN = re.compile(
@@ -291,16 +462,52 @@ _PR_REF_BARE_PATTERN = re.compile(r"(?<![A-Za-z0-9/#])#(\d+)(?![A-Za-z0-9/])")
 def _extract_pr_ref(body: str, same_repo: str) -> tuple[str, int] | None:
     """Return (repo_full_name, pr_number) from first PR reference in body, else None.
 
-    same_repo is used when the body contains a bare same-repo '#N' reference.
+    Cross-repo references are REJECTED: if the body points at an
+    ``owner/repo`` that doesn't equal ``same_repo``, this returns None.
+
+    The issue body that feeds this function is attacker-controllable
+    (anyone who can create a labelled issue — broad permission on
+    public repos, any contributor on private). Previously a PR URL
+    pointing at an unrelated victim repo in a different org would
+    be accepted verbatim, and ``_handle_issue_labeled`` would forward
+    a defect-link to L1 with ``pr_repo_full_name`` set to the victim's
+    repo — polluting L1's defect audit trail across orgs and
+    potentially starving autonomy on the victim repo if L1 gates
+    auto-merge on defect counts. Same-repo references via the bare
+    ``#N`` pattern are unchanged: they already required ``same_repo``
+    to resolve, so there's no attack surface there.
+
+    ``same_repo`` is the repository the webhook originated from —
+    the caller must pass it (and it should never be empty in
+    practice; if it is, we fall through and return None rather than
+    trusting the body alone).
     """
     if not body:
         return None
     m = _PR_REF_URL_PATTERN.search(body)
     if m:
-        return m.group(1), int(m.group(2))
+        ref_repo = m.group(1)
+        if not same_repo or ref_repo != same_repo:
+            logger.warning(
+                "pr_ref_cross_repo_rejected",
+                ref_repo=ref_repo,
+                source_repo=same_repo,
+                pattern="url",
+            )
+            return None
+        return ref_repo, int(m.group(2))
     m = _PR_REF_OWNER_REPO_PATTERN.search(body)
     if m:
-        return m.group(1), int(m.group(2))
+        ref_repo = m.group(1)
+        if not same_repo or ref_repo != same_repo:
+            logger.warning(
+                "pr_ref_cross_repo_rejected",
+                ref_repo=ref_repo,
+                source_repo=same_repo,
+                pattern="owner_repo",
+            )
+            return None
+        return ref_repo, int(m.group(2))
     m = _PR_REF_BARE_PATTERN.search(body)
     if m and same_repo:
         return same_repo, int(m.group(1))
@@ -319,82 +526,18 @@ def _category_from_labels(labels: list[str]) -> str:
     return "escaped"
 
 
-async def _forward_github_defect_once(payload: dict[str, Any]) -> bool:
-    """POST GitHub defect-link payload to L1 with retry-once on transient failure.
+def _is_bot_user(user: dict[str, Any], body: str = "") -> bool:
+    """Back-compat shim delegating to :func:`_is_bot_actor`.
 
-    Returns True on success (2xx), False on double-fail or non-retryable 4xx.
-    Assumes L1_INTERNAL_API_TOKEN is set (caller must short-circuit otherwise).
+    The old implementation checked only ``type=="Bot"`` and the
+    ``[bot]`` login suffix — it missed the harness's own
+    ``xcagentrockwell`` account (normal User type, no ``[bot]``
+    suffix), so review bodies the harness itself posted slipped
+    through every guard that called this helper. New callers should
+    pass ``body`` so the ``BOT_COMMENT_MARKER`` fallback can catch
+    spoofed cases.
     """
-    url = f"{L1_SERVICE_URL.rstrip('/')}{_GITHUB_DEFECT_LINK_PATH}"
-    headers = {"X-Internal-Api-Token": L1_INTERNAL_API_TOKEN}
-
-    last_error: str = ""
-    for attempt in range(2):
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(url, json=payload, headers=headers)
-            if resp.status_code >= 500:
-                last_error = f"HTTP {resp.status_code}"
-                if attempt == 0:
-                    await asyncio.sleep(1)
-                    continue
-                return False
-            elif resp.status_code >= 400:
-                logger.error(
-                    "l1_github_defect_forward_failed",
-                    status_code=resp.status_code,
-                    body=resp.text[:500],
-                    issue_number=payload.get("issue_number"),
-                    pr_number=payload.get("pr_number"),
-                )
-                return False
-            else:
-                return True
-        except httpx.RequestError as exc:
-            last_error = f"RequestError: {exc}"
-            if attempt == 0:
-                await asyncio.sleep(1)
-                continue
-            return False
-
-    logger.error(
-        "l1_github_defect_forward_failed",
-        error=last_error,
-        issue_number=payload.get("issue_number"),
-        url=url,
-    )
-    return False
-
-
-async def _forward_github_defect(payload: dict[str, Any]) -> None:
-    """Forward GitHub defect-link to L1; persist to backlog on final failure.
-
-    Short-circuits (without backlog) if L1_INTERNAL_API_TOKEN is unset.
-    """
-    if not L1_INTERNAL_API_TOKEN:
-        logger.warning(
-            "l1_github_defect_forward_skipped",
-            reason="L1_INTERNAL_API_TOKEN unset — GitHub defect links are being dropped. "
-            "Set L1_INTERNAL_API_TOKEN to enable forwarding.",
-            issue_number=payload.get("issue_number"),
-        )
-        return
-    ok = await _forward_github_defect_once(payload)
-    if not ok:
-        logger.error(
-            "l1_github_defect_forward_failed",
-            issue_number=payload.get("issue_number"),
-            backlogged=True,
-        )
-        await append_backlog("github_defect", payload)
-
-
-def _is_bot_user(user: dict[str, Any]) -> bool:
-    """Return True if the GitHub user looks like a bot."""
-    if not isinstance(user, dict):
-        return False
-    login = (user.get("login") or "").lower()
-    return user.get("type") == "Bot" or login.endswith("[bot]")
+    return _is_bot_actor(user, body)
 
 
 def _truncate(value: str | None, limit: int = 2000) -> str | None:
@@ -484,13 +627,22 @@ def _build_autonomy_event(
 async def _forward_review_body_human_issue(
     event_type: str, payload: dict[str, Any]
 ) -> None:
-    """Forward the top-level review body as a human issue, if present and non-bot."""
+    """Forward the top-level review body as a human issue, if present and non-bot.
+
+    Passing ``body`` to :func:`_is_bot_user` is critical: the
+    harness posts reviews under a normal user account
+    (``xcagentrockwell``), so ``type`` is ``"User"`` and the
+    ``[bot]`` suffix check misses. The body-marker fallback
+    catches those self-reviews; without it, the harness's own
+    critiques were forwarded to L1 as human issues and triggered
+    a self-reinforcing bot loop.
+    """
     review = payload.get("review") or {}
     body = review.get("body") or ""
     if not body.strip():
         return
     user = review.get("user") or {}
-    if _is_bot_user(user):
+    if _is_bot_user(user, body):
         return
 
     ticket_id = _ticket_id_from_payload(payload)
@@ -506,7 +658,7 @@ async def _forward_review_body_human_issue(
     human_issue = {
         "repo_full_name": repo_full_name,
         "pr_number": pr.get("number", 0),
-        "head_sha": pr.get("head", {}).get("sha", ""),
+        "head_sha": _pr_head_sha(pr),
         "ticket_id": ticket_id,
         "external_id": str(review.get("id", "")),
         "event_type": event_type,
@@ -522,6 +674,27 @@ async def _forward_review_body_human_issue(
     await _forward_human_issue(human_issue)
 
 
+async def _forward_review_events(
+    event_type: str,
+    payload: dict[str, Any],
+    *,
+    include_body: bool = True,
+) -> None:
+    """Forward both autonomy event and (optionally) review body as a human issue.
+
+    Consolidates the "build autonomy event + forward + forward review
+    body" prelude that was copy-pasted into ``_handle_review_comment``,
+    ``_handle_review_changes_requested``, and ``_handle_review_approved``.
+    ``include_body=False`` is used by issue_comment paths where no
+    ``review`` object is present in the payload.
+    """
+    autonomy_event = _build_autonomy_event(event_type, payload)
+    if autonomy_event:
+        await _forward_autonomy_event(autonomy_event)
+    if include_body:
+        await _forward_review_body_human_issue(event_type, payload)
+
+
 # --- Event handlers ---
 
 
@@ -529,6 +702,9 @@ async def _handle_pr_opened(payload: dict[str, Any]) -> None:
     """Handle a new or ready-for-review PR — spawn AI review."""
     pr = payload.get("pull_request", {})
     pr_number = pr.get("number", 0)
+    if not pr_number or not isinstance(pr_number, int) or pr_number <= 0:
+        logger.debug("pr_opened_invalid_pr_number", raw=pr.get("number"))
+        return
     pr_diff_url = pr.get("diff_url", "")
     pr_body = pr.get("body", "")
 
@@ -547,7 +723,7 @@ async def _handle_pr_opened(payload: dict[str, Any]) -> None:
     if autonomy_event:
         await _forward_autonomy_event(autonomy_event)
 
-    branch = pr.get("head", {}).get("ref", "")
+    branch = _pr_head_branch(pr)
     repo = payload.get("repository", {}).get("full_name", "")
     _get_spawner().spawn_pr_review(
         pr_number=pr_number,
@@ -606,7 +782,8 @@ async def _handle_ci_failed(payload: dict[str, Any]) -> None:
     """Handle CI failure — fetch logs and spawn fix agent."""
     check = payload.get("check_suite", payload.get("check_run", {}))
     pr_numbers = [
-        pr.get("number", 0) for pr in check.get("pull_requests", [])
+        n for pr in check.get("pull_requests", [])
+        if (n := pr.get("number")) and isinstance(n, int) and n > 0
     ]
     branch = check.get("head_branch", "")
     conclusion = check.get("conclusion", "")
@@ -670,19 +847,18 @@ async def _handle_review_comment(payload: dict[str, Any]) -> None:
 
     if not comment_body.strip():
         return
+    if not pr_number or not isinstance(pr_number, int) or pr_number <= 0:
+        logger.debug("review_comment_invalid_pr_number", raw=pr_number)
+        return
 
     log = logger.bind(pr_number=pr_number, author=comment_author)
     log.info("handling_review_comment")
 
-    # Forward autonomy event to L1
-    autonomy_event = _build_autonomy_event("review_comment", payload)
-    if autonomy_event:
-        await _forward_autonomy_event(autonomy_event)
-
-    # Forward the top-level review body as a human issue, if present.
-    # (issue_comment events have no 'review' key, so this no-ops there.)
-    if review:
-        await _forward_review_body_human_issue("review_comment", payload)
+    # Forward autonomy event + review body (body only when a review
+    # object is present; issue_comment events skip it).
+    await _forward_review_events(
+        "review_comment", payload, include_body=bool(review)
+    )
 
     ticket_id = _ticket_id_from_payload(payload)
     if ticket_id:
@@ -691,7 +867,7 @@ async def _handle_review_comment(payload: dict[str, Any]) -> None:
                      author=comment_author)
 
     pr = payload.get("pull_request", {})
-    branch = pr.get("head", {}).get("ref", "")
+    branch = _pr_head_branch(pr)
     repo = payload.get("repository", {}).get("full_name", "")
     _get_spawner().spawn_comment_response(
         pr_number=pr_number,
@@ -708,114 +884,100 @@ async def _handle_review_changes_requested(payload: dict[str, Any]) -> None:
         logger.debug("ignoring_bot_changes_requested")
         return
     review = payload.get("review", {})
-    pr = payload.get("pull_request", {})
-    pr_number = pr.get("number", 0)
+    ctx = _pr_handler_ctx(payload)
     review_body = review.get("body", "")
     reviewer = review.get("user", {}).get("login", "unknown")
 
-    log = logger.bind(pr_number=pr_number, reviewer=reviewer)
+    if not ctx.pr_number or ctx.pr_number <= 0:
+        logger.debug("changes_requested_invalid_pr_number", raw=ctx.pr_number)
+        return
+
+    log = logger.bind(pr_number=ctx.pr_number, reviewer=reviewer)
     log.info("handling_changes_requested")
 
-    # Forward autonomy event to L1
-    autonomy_event = _build_autonomy_event("review_changes_requested", payload)
-    if autonomy_event:
-        await _forward_autonomy_event(autonomy_event)
+    await _forward_review_events("review_changes_requested", payload)
 
-    # Forward top-level review body as a human issue
-    await _forward_review_body_human_issue("review_changes_requested", payload)
+    if ctx.ticket_id:
+        append_trace(
+            ctx.ticket_id, _lookup_trace_id(ctx.ticket_id),
+            "l3_changes_requested", "changes_requested_spawned",
+            pr_number=ctx.pr_number, reviewer=reviewer,
+        )
 
-    ticket_id = _ticket_id_from_payload(payload)
-    if ticket_id:
-        append_trace(ticket_id, _lookup_trace_id(ticket_id), "l3_changes_requested",
-                     "changes_requested_spawned", pr_number=pr_number,
-                     reviewer=reviewer)
-
-    branch = pr.get("head", {}).get("ref", "")
-    repo = payload.get("repository", {}).get("full_name", "")
     _get_spawner().spawn_comment_response(
-        pr_number=pr_number,
-        comment_body=f"Changes requested by @{reviewer}:\n\n{review_body}",
+        pr_number=ctx.pr_number,
+        comment_body=f"Changes requested by @{reviewer}:\n\n{review_body[:3000]}",
         comment_author=reviewer,
-        branch=branch,
-        repo=repo,
+        branch=ctx.branch,
+        repo=ctx.repo,
     )
 
 
 async def _handle_review_approved(payload: dict[str, Any]) -> None:
     """Handle PR approval — check if auto-merge is appropriate."""
-    pr = payload.get("pull_request", {})
-    pr_number = pr.get("number", 0)
-    branch = pr.get("head", {}).get("ref", "")
+    if _is_bot_comment(payload, ["review", "user"]):
+        logger.debug("ignoring_bot_approval")
+        return
+    ctx = _pr_handler_ctx(payload)
     reviewer = payload.get("review", {}).get("user", {}).get("login", "unknown")
-    repo = pr.get("base", {}).get("repo", {}).get("full_name", "")
 
-    log = logger.bind(pr_number=pr_number, reviewer=reviewer)
+    log = logger.bind(pr_number=ctx.pr_number, reviewer=reviewer)
     log.info("handling_review_approved")
 
-    # Forward autonomy event to L1
-    autonomy_event = _build_autonomy_event("review_approved", payload)
-    if autonomy_event:
-        await _forward_autonomy_event(autonomy_event)
+    await _forward_review_events("review_approved", payload)
 
-    # Forward top-level review body as a human issue (only if body non-empty)
-    await _forward_review_body_human_issue("review_approved", payload)
+    # Approvals on non-AI branches (main, develop, a human PR that
+    # happens to be on this repo) must not trigger L1's
+    # /api/agent-complete — silently marking an unrelated branch as
+    # a "completed ticket".
+    if not ctx.ticket_id:
+        log.info(
+            "pr_approved_skipped_non_ai_branch",
+            branch=ctx.branch,
+            reason="branch does not match ai/<TICKET>-<N> pattern",
+        )
+        return
 
-    # Extract ticket type from branch name or PR labels
-    labels = [label.get("name", "") for label in pr.get("labels", [])]
-    ticket_type = "story"  # Default
-    for label in labels:
-        if label in ("bug", "chore", "config", "dependency", "docs"):
-            ticket_type = label
-            break
+    append_trace(
+        ctx.ticket_id, _lookup_trace_id(ctx.ticket_id),
+        "l3_approval", "review_approved",
+        pr_number=ctx.pr_number, reviewer=reviewer,
+    )
 
-    # Notify L1 of the approval for autonomy tracking (retry once on failure)
-    l1_url = os.getenv("L1_SERVICE_URL", "http://localhost:8000")
-    completion_json = {
-        "ticket_id": branch.replace("ai/", ""),
-        "status": "complete",
-        "pr_url": pr.get("html_url", ""),
-        "branch": branch,
-    }
-    for attempt in range(2):
-        try:
-            import httpx
+    ticket_type = _ticket_type_from_labels(ctx.labels)
 
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{l1_url}/api/agent-complete",
-                    json=completion_json,
-                    timeout=10.0,
-                )
-                resp.raise_for_status()
-            break
-        except Exception:
-            if attempt == 0:
-                log.warning("l1_notification_failed_retrying")
-                import asyncio
-                await asyncio.sleep(2)
-            else:
-                log.error("l1_notification_failed", url=l1_url,
-                          ticket_id=completion_json["ticket_id"])
+    # Notify L1 of the approval for autonomy tracking via the shared
+    # retry helper. Phase 1 auth: L1's /api/agent-complete is gated
+    # behind ``_require_api_key`` (X-API-Key header). Reuse the
+    # L1_INTERNAL_API_TOKEN env var as the shared secret — L1 and L3
+    # already share its value for the autonomy event path, and adding
+    # a second env var for the same shared secret invites drift.
+    await _post_to_l1_with_retry(
+        "/api/agent-complete",
+        {
+            "ticket_id": ctx.ticket_id,
+            "status": "complete",
+            "pr_url": ctx.pr.get("html_url", ""),
+            "branch": ctx.branch,
+        },
+        log_event="l1_agent_complete_failed",
+        log_context={"ticket_id": ctx.ticket_id, "branch": ctx.branch},
+        headers={"X-API-Key": os.getenv("L1_INTERNAL_API_TOKEN") or ""},
+    )
 
     log.info(
         "pr_approved",
         ticket_type=ticket_type,
-        branch=branch,
-        repo=repo,
+        branch=ctx.branch,
+        repo=ctx.repo,
     )
 
-    # Phase 4: evaluate auto-merge policy
     try:
-        ticket_id = (
-            branch.replace("ai/", "")
-            if branch.startswith("ai/")
-            else _ticket_id_from_payload(payload)
-        )
         await evaluate_and_maybe_merge(
-            repo_full_name=repo,
-            pr_number=pr_number,
-            head_sha=pr.get("head", {}).get("sha", ""),
-            ticket_id=ticket_id,
+            repo_full_name=ctx.repo,
+            pr_number=ctx.pr_number,
+            head_sha=ctx.head_sha,
+            ticket_id=ctx.ticket_id,
             ticket_type=ticket_type,
             trigger_event="review_approved",
         )
@@ -835,12 +997,12 @@ async def _handle_review_comment_created(payload: dict[str, Any]) -> None:
     if not body.strip():
         return
     user = comment.get("user") or {}
-    if _is_bot_user(user):
+    # _is_bot_user now also checks BOT_USERNAME and the
+    # BOT_COMMENT_MARKER in body, so the explicit marker guard
+    # below is redundant — kept as-is to preserve the specific
+    # "ignoring_marker_*" log event during the transition.
+    if _is_bot_user(user, body):
         logger.debug("ignoring_bot_review_comment_created")
-        return
-    # Also honor the hidden marker guard used elsewhere
-    if BOT_COMMENT_MARKER and BOT_COMMENT_MARKER in body:
-        logger.debug("ignoring_marker_review_comment_created")
         return
 
     ticket_id = _ticket_id_from_payload(payload)
@@ -859,7 +1021,7 @@ async def _handle_review_comment_created(payload: dict[str, Any]) -> None:
     human_issue = {
         "repo_full_name": repo_full_name,
         "pr_number": pr.get("number", 0),
-        "head_sha": pr.get("head", {}).get("sha", ""),
+        "head_sha": _pr_head_sha(pr),
         "ticket_id": ticket_id,
         "external_id": str(comment.get("id", "")),
         "event_type": "review_comment",
@@ -879,6 +1041,9 @@ async def _handle_pr_merged(payload: dict[str, Any]) -> None:
     """Handle PR merged — forward autonomy event to L1."""
     pr = payload.get("pull_request", {})
     pr_number = pr.get("number", 0)
+    if not pr_number or not isinstance(pr_number, int) or pr_number <= 0:
+        logger.debug("pr_merged_invalid_pr_number", raw=pr.get("number"))
+        return
     merged_at = pr.get("merged_at")
 
     log = logger.bind(pr_number=pr_number, merged_at=merged_at)
@@ -895,7 +1060,10 @@ async def _handle_ci_passed(payload: dict[str, Any]) -> None:
     """Handle CI passing — check if PR is approved and ready for auto-merge."""
     check = payload.get("check_suite", payload.get("check_run", {}))
     pr_entries = check.get("pull_requests", []) or []
-    pr_numbers = [pr.get("number", 0) for pr in pr_entries]
+    pr_numbers = [
+        n for pr in pr_entries
+        if (n := pr.get("number")) and isinstance(n, int) and n > 0
+    ]
     branch = check.get("head_branch", "")
     head_sha = check.get("head_sha", "") or check.get("head_commit", {}).get("id", "")
     repo_full_name = (
@@ -917,13 +1085,11 @@ async def _handle_ci_passed(payload: dict[str, Any]) -> None:
     for pr_number in pr_numbers:
         try:
             # We need ticket_type; fetch labels via PR state
-            ticket_type = ""
             pr_state = await get_pr_state(repo_full_name, pr_number)
-            if pr_state:
-                for label in pr_state.get("labels", []):
-                    if label in ("bug", "chore", "config", "dependency", "docs", "story"):
-                        ticket_type = label
-                        break
+            ticket_type = _ticket_type_from_labels(
+                pr_state.get("labels", []) if pr_state else [],
+                default="",
+            )
             await evaluate_and_maybe_merge(
                 repo_full_name=repo_full_name,
                 pr_number=pr_number,
@@ -1047,11 +1213,7 @@ async def _drain_backlog_on_startup() -> None:
 async def post_drain_backlog(
     x_internal_api_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    expected = os.getenv("L1_INTERNAL_API_TOKEN", "")
-    if not expected:
-        raise HTTPException(status_code=503, detail="Admin API not configured")
-    if not x_internal_api_token or x_internal_api_token != expected:
-        raise HTTPException(status_code=401, detail="Invalid admin token")
+    _require_internal_api_token(x_internal_api_token)
     forwarders: dict[str, Callable[[dict[str, Any]], Awaitable[bool]]] = {
         "autonomy_event": _forward_autonomy_event_once,
         "human_issue": _forward_human_issue_once,
@@ -1065,17 +1227,22 @@ async def post_drain_backlog(
 async def get_backlog_status(
     x_internal_api_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    expected = os.getenv("L1_INTERNAL_API_TOKEN", "")
-    if not expected:
-        raise HTTPException(status_code=503, detail="Admin API not configured")
-    if not x_internal_api_token or x_internal_api_token != expected:
-        raise HTTPException(status_code=401, detail="Invalid admin token")
+    _require_internal_api_token(x_internal_api_token)
     return backlog_status()
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> dict[str, Any]:
+    warnings: list[str] = []
+    if not L1_INTERNAL_API_TOKEN:
+        warnings.append("L1_INTERNAL_API_TOKEN not set — event forwarding disabled")
+    if not os.getenv("GITHUB_TOKEN") and not os.getenv("AGENT_GH_TOKEN"):
+        warnings.append("No GitHub token configured — PR state fetching will fail")
+    status = "degraded" if warnings else "ok"
+    result: dict[str, Any] = {"status": status}
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 @app.post("/webhooks/github", status_code=202)
@@ -1086,10 +1253,22 @@ async def github_webhook(
     x_github_event: str | None = Header(default=None, alias="x-github-event"),
     x_github_delivery: str | None = Header(default=None, alias="x-github-delivery"),
 ) -> dict[str, str]:
-    """Receive GitHub webhooks for PR events."""
+    """Receive GitHub webhooks for PR events.
+
+    Phase 1 fail-closed: when ``GITHUB_WEBHOOK_SECRET`` is unset and
+    ``ALLOW_UNSIGNED_WEBHOOKS=true`` is not set either, raise 503.
+    Previously we accepted unsigned requests whenever no secret was
+    configured ("dev mode"), which meant any misconfigured production
+    deploy silently accepted anonymous webhooks.
+    """
     body = await request.body()
 
-    # Validate signature — skip validation in dev mode (no secret configured)
+    # Validate signature — fail-closed by default.
+    allow_unsigned = os.getenv("ALLOW_UNSIGNED_WEBHOOKS", "").lower() == "true"
+    if not WEBHOOK_SECRET and not allow_unsigned:
+        raise HTTPException(
+            status_code=503, detail="GITHUB_WEBHOOK_SECRET not configured"
+        )
     if WEBHOOK_SECRET:
         if not x_hub_signature_256:
             raise HTTPException(status_code=401, detail="Missing webhook signature")
@@ -1134,4 +1313,396 @@ async def github_webhook(
         background_tasks.add_task(handler, payload)
         return {"status": "accepted", "event_type": event_type}
 
+    return {"status": "unhandled", "event_type": event_type}
+
+
+# --- ADO Service Hook webhook ---
+
+ADO_WEBHOOK_TOKEN = os.getenv("ADO_WEBHOOK_TOKEN", "")
+
+_ADO_BRANCH_PATTERN = re.compile(r"^refs/heads/ai/([A-Za-z0-9]+-\d+)")
+
+
+def _ticket_id_from_ado_payload(payload: dict[str, Any]) -> str:
+    """Extract ticket ID from ADO PR source branch (e.g., refs/heads/ai/SCRUM-16 -> SCRUM-16)."""
+    resource = payload.get("resource", {})
+    source_ref = resource.get("sourceRefName", "")
+    match = _ADO_BRANCH_PATTERN.match(source_ref)
+    return match.group(1) if match else ""
+
+
+async def _handle_ado_pr_opened(payload: dict[str, Any]) -> None:
+    """Handle a new ADO pull request -- log and prepare for spawner integration."""
+    resource = payload.get("resource", {})
+    pr_id = resource.get("pullRequestId", 0)
+    repo_name = resource.get("repository", {}).get("name", "")
+    project = resource.get("repository", {}).get("project", {}).get("name", "")
+    source_ref = resource.get("sourceRefName", "")
+    title = resource.get("title", "")
+    ticket_id = _ticket_id_from_ado_payload(payload)
+
+    log = logger.bind(
+        pr_id=pr_id,
+        repo=repo_name,
+        project=project,
+        ticket_id=ticket_id,
+        source_control_type="azure-repos",
+    )
+    log.info(
+        "handling_ado_pr_opened",
+        title=title,
+        source_ref=source_ref,
+    )
+
+    if ticket_id:
+        append_trace(
+            ticket_id,
+            _lookup_trace_id(ticket_id),
+            "l3_pr_review",
+            "ado_pr_review_spawned",
+            pr_id=pr_id,
+            source_control_type="azure-repos",
+        )
+
+    # TODO: Wire into spawner with source_control_type="azure-repos"
+    # once SessionSpawner supports ADO PR review sessions.
+    log.info("ado_pr_opened_logged", note="spawner integration pending")
+
+
+def _ado_pr_context(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract common ADO PR context fields from a webhook payload."""
+    resource = payload.get("resource", {})
+    repo = resource.get("repository", {})
+    return {
+        "pr_id": resource.get("pullRequestId", 0),
+        "repo_id": repo.get("id", ""),
+        "repo_name": repo.get("name", ""),
+        "project": repo.get("project", {}).get("name", ""),
+        "org_url": _ado_org_url_from_payload(payload),
+        "title": resource.get("title", ""),
+        "head_sha": (resource.get("lastMergeSourceCommit") or {}).get("commitId", ""),
+        "ticket_id": _ticket_id_from_ado_payload(payload),
+        "labels": [label.get("name", "") for label in resource.get("labels", [])],
+    }
+
+
+def _ado_org_url_from_payload(payload: dict[str, Any]) -> str:
+    """Extract the ADO org URL from the webhook payload's resourceContainers."""
+    containers = payload.get("resourceContainers", {})
+    collection = containers.get("collection", {})
+    base_url = collection.get("baseUrl", "")
+    if base_url:
+        return base_url.rstrip("/")
+    # Fallback: use ADO_ORG_URL env var
+    return os.getenv("ADO_ORG_URL", "").rstrip("/")
+
+
+async def _handle_ado_review_approved(payload: dict[str, Any]) -> None:
+    """Handle ADO PR approval — evaluate auto-merge."""
+    ctx = _ado_pr_context(payload)
+    ticket_id = ctx["ticket_id"]
+
+    log = logger.bind(
+        pr_id=ctx["pr_id"],
+        project=ctx["project"],
+        ticket_id=ticket_id,
+        source_control_type="azure-repos",
+    )
+    log.info("handling_ado_review_approved")
+
+    if not ticket_id:
+        log.info(
+            "ado_pr_approved_skipped_non_ai_branch",
+            reason="branch does not match ai/<TICKET>-<N> pattern",
+        )
+        return
+
+    append_trace(
+        ticket_id, _lookup_trace_id(ticket_id),
+        "l3_approval", "ado_review_approved",
+        pr_id=ctx["pr_id"],
+        source_control_type="azure-repos",
+    )
+
+    ticket_type = _ticket_type_from_labels(ctx["labels"])
+
+    try:
+        await evaluate_and_maybe_merge_ado(
+            org_url=ctx["org_url"],
+            project=ctx["project"],
+            repo_id=ctx["repo_id"],
+            pr_id=ctx["pr_id"],
+            head_sha=ctx["head_sha"],
+            ticket_id=ticket_id,
+            ticket_type=ticket_type,
+            trigger_event="review_approved",
+        )
+    except Exception:
+        log.exception("ado_auto_merge_evaluation_failed")
+
+
+async def _handle_ado_review_changes_requested(payload: dict[str, Any]) -> None:
+    """Handle ADO PR rejection — log and post comment."""
+    ctx = _ado_pr_context(payload)
+    ticket_id = ctx["ticket_id"]
+
+    log = logger.bind(
+        pr_id=ctx["pr_id"],
+        project=ctx["project"],
+        ticket_id=ticket_id,
+        source_control_type="azure-repos",
+    )
+    log.info("handling_ado_review_changes_requested")
+
+    if ticket_id:
+        append_trace(
+            ticket_id, _lookup_trace_id(ticket_id),
+            "l3_changes_requested", "ado_changes_requested",
+            pr_id=ctx["pr_id"],
+            source_control_type="azure-repos",
+        )
+
+    if ctx["org_url"] and ctx["repo_id"] and ctx["pr_id"]:
+        ok, msg = await post_ado_pr_comment(
+            ctx["org_url"],
+            ctx["project"],
+            ctx["repo_id"],
+            ctx["pr_id"],
+            "Changes were requested by a reviewer. The agent will address "
+            "feedback once comment response spawning supports Azure Repos.",
+        )
+        if not ok:
+            log.warning("ado_pr_comment_failed", reason=msg)
+
+
+async def _handle_ado_review_comment(payload: dict[str, Any]) -> None:
+    """Handle ADO PR review comment — log trace entry."""
+    ctx = _ado_pr_context(payload)
+    ticket_id = ctx["ticket_id"]
+
+    log = logger.bind(
+        pr_id=ctx["pr_id"],
+        project=ctx["project"],
+        ticket_id=ticket_id,
+        source_control_type="azure-repos",
+    )
+    log.info("handling_ado_review_comment")
+
+    if ticket_id:
+        append_trace(
+            ticket_id, _lookup_trace_id(ticket_id),
+            "l3_comment", "ado_review_comment",
+            pr_id=ctx["pr_id"],
+            source_control_type="azure-repos",
+        )
+
+    # Spawner does not yet support ADO comment response sessions
+    log.info("ado_review_comment_logged", note="spawner integration pending")
+
+
+async def _handle_ado_build_complete(payload: dict[str, Any]) -> None:
+    """Handle ADO build.complete — evaluate auto-merge if CI passed on a PR."""
+    resource = payload.get("resource", {})
+    result = str(resource.get("result", "")).lower()
+
+    # Try to extract PR association
+    trigger_info = resource.get("triggerInfo") or {}
+    pr_number_str = trigger_info.get("pr.number") or (
+        trigger_info.get("pr", {}).get("number", "")
+        if isinstance(trigger_info.get("pr"), dict)
+        else ""
+    )
+    pr_id = int(pr_number_str) if pr_number_str and str(pr_number_str).isdigit() else 0
+    reason = resource.get("reason", "")
+
+    # Extract repo and project info from the build resource
+    repo_info = resource.get("repository", {})
+    repo_id = repo_info.get("id", "")
+    project = resource.get("project", {}).get("name", "")
+    source_branch = resource.get("sourceBranch", "")
+
+    org_url = _ado_org_url_from_payload(payload)
+
+    log = logger.bind(
+        build_result=result,
+        pr_id=pr_id,
+        reason=reason,
+        project=project,
+        source_control_type="azure-repos",
+    )
+    log.info("handling_ado_build_complete")
+
+    if result != "succeeded":
+        log.info("ado_build_not_succeeded", result=result)
+        return
+
+    if not pr_id and reason == "pullRequest":
+        # Build was triggered by a PR but pr.number not in triggerInfo;
+        # we can't reliably associate it. Log and skip.
+        log.info("ado_build_pr_association_missing")
+        return
+
+    if not pr_id:
+        log.info("ado_build_not_pr_triggered")
+        return
+
+    # Extract ticket_id from source branch
+    match = _ADO_BRANCH_PATTERN.match(source_branch or "")
+    ticket_id = match.group(1) if match else ""
+
+    # Extract the commit sha the build ran against. ADO surfaces it as
+    # ``sourceVersion`` on the build resource, with ``sourceBranchCommit``
+    # as a legacy fallback. If a force-push landed AFTER the build
+    # started, this sha will no longer match the PR's current head —
+    # ``_evaluate_core`` does the comparison and skips with reason
+    # ``build_sha_stale``. The prior behavior passed ``head_sha=""``
+    # unconditionally, which meant the build was trusted even after
+    # a force-push invalidated the CI result.
+    build_sha = str(
+        resource.get("sourceVersion")
+        or resource.get("sourceBranchCommit")
+        or ""
+    )
+
+    try:
+        await evaluate_and_maybe_merge_ado(
+            org_url=org_url,
+            project=project,
+            repo_id=repo_id,
+            pr_id=pr_id,
+            head_sha=build_sha,  # non-empty: build_sha_stale check runs
+            ticket_id=ticket_id,
+            ticket_type="",
+            trigger_event="ci_passed",
+            checks_passed=True,
+        )
+    except Exception:
+        log.exception("ado_auto_merge_from_build_failed")
+
+
+@app.post("/webhooks/ado-build", status_code=202)
+async def ado_build_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_ado_webhook_token: str | None = Header(
+        default=None, alias="x-ado-webhook-token"
+    ),
+) -> dict[str, str]:
+    """Receive Azure DevOps Service Hook webhooks for build.complete events.
+
+    Phase 1 fail-closed: when ``ADO_WEBHOOK_TOKEN`` is unset and
+    ``ALLOW_UNSIGNED_WEBHOOKS=true`` is not set either, raise 503.
+    """
+    allow_unsigned = os.getenv("ALLOW_UNSIGNED_WEBHOOKS", "").lower() == "true"
+    if not ADO_WEBHOOK_TOKEN and not allow_unsigned:
+        raise HTTPException(
+            status_code=503, detail="ADO_WEBHOOK_TOKEN not configured"
+        )
+    if ADO_WEBHOOK_TOKEN and (
+        not x_ado_webhook_token
+        or not hmac.compare_digest(x_ado_webhook_token, ADO_WEBHOOK_TOKEN)
+    ):
+        raise HTTPException(status_code=401, detail="Invalid ADO webhook token")
+
+    body = await request.body()
+    try:
+        payload: dict[str, Any] = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {exc}") from exc
+
+    event_type = payload.get("eventType", "")
+    if event_type != "build.complete":
+        logger.debug("ado_build_webhook_wrong_event", event_type=event_type)
+        return {"status": "ignored", "event_type": event_type}
+
+    resource = payload.get("resource", {})
+    result = str(resource.get("result", "")).lower()
+
+    logger.info(
+        "ado_build_webhook_received",
+        event_type=event_type,
+        build_result=result,
+        build_id=resource.get("id", ""),
+    )
+
+    if result == "succeeded":
+        background_tasks.add_task(_handle_ado_build_complete, payload)
+        return {"status": "accepted", "event_type": "ci_passed"}
+
+    if result in ("failed", "partiallysucceeded"):
+        # Log CI failure; no auto-fix for ADO yet
+        logger.info("ado_ci_failed", result=result)
+        return {"status": "accepted", "event_type": "ci_failed"}
+
+    return {"status": "ignored", "event_type": event_type}
+
+
+@app.post("/webhooks/ado-pr", status_code=202)
+async def ado_pr_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_ado_webhook_token: str | None = Header(
+        default=None, alias="x-ado-webhook-token"
+    ),
+) -> dict[str, str]:
+    """Receive Azure DevOps Service Hook webhooks for PR events.
+
+    Phase 1 fail-closed: when ``ADO_WEBHOOK_TOKEN`` is unset and
+    ``ALLOW_UNSIGNED_WEBHOOKS=true`` is not set either, raise 503.
+    """
+    # Validate token if configured (constant-time comparison).
+    allow_unsigned = os.getenv("ALLOW_UNSIGNED_WEBHOOKS", "").lower() == "true"
+    if not ADO_WEBHOOK_TOKEN and not allow_unsigned:
+        raise HTTPException(
+            status_code=503, detail="ADO_WEBHOOK_TOKEN not configured"
+        )
+    if ADO_WEBHOOK_TOKEN and (
+        not x_ado_webhook_token
+        or not hmac.compare_digest(x_ado_webhook_token, ADO_WEBHOOK_TOKEN)
+    ):
+        raise HTTPException(status_code=401, detail="Invalid ADO webhook token")
+
+    body = await request.body()
+    try:
+        payload: dict[str, Any] = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {exc}") from exc
+
+    event_type = classify_ado_event(payload)
+
+    resource = payload.get("resource", {})
+    pr_id = resource.get("pullRequestId", 0)
+    repo_id = resource.get("repository", {}).get("id", "")
+    project = resource.get("repository", {}).get("project", {}).get("name", "")
+
+    logger.info(
+        "ado_webhook_received",
+        event_type=event_type,
+        ado_event_type=payload.get("eventType", ""),
+        pr_id=pr_id,
+        project=project,
+        repo_id=repo_id,
+    )
+
+    if event_type == EventType.IGNORED:
+        return {"status": "ignored", "event_type": event_type}
+
+    if event_type == EventType.PR_OPENED:
+        background_tasks.add_task(_handle_ado_pr_opened, payload)
+        return {"status": "accepted", "event_type": event_type}
+
+    if event_type == EventType.REVIEW_APPROVED:
+        background_tasks.add_task(_handle_ado_review_approved, payload)
+        return {"status": "accepted", "event_type": event_type}
+
+    if event_type == EventType.REVIEW_CHANGES_REQUESTED:
+        background_tasks.add_task(_handle_ado_review_changes_requested, payload)
+        return {"status": "accepted", "event_type": event_type}
+
+    if event_type == EventType.REVIEW_COMMENT:
+        background_tasks.add_task(_handle_ado_review_comment, payload)
+        return {"status": "accepted", "event_type": event_type}
+
+    # Other ADO event types — log but don't act yet
+    logger.info("ado_event_not_yet_handled", event_type=event_type, pr_id=pr_id)
     return {"status": "unhandled", "event_type": event_type}

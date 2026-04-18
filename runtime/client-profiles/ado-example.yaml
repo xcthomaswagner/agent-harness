@@ -1,0 +1,47 @@
+# Client Profile: ADO-Only Example
+# Azure DevOps work items + Azure Repos source control (no GitHub dependency).
+# Copy this file and fill in your values.
+
+client: "ADO Example Project"
+platform_profile: ""  # sitecore | salesforce | (empty for generic)
+
+ticket_source:
+  type: "ado"
+  instance: "https://dev.azure.com/your-org"
+  project_key: "PROJ"                       # Prefix for composite ticket IDs (e.g., PROJ-123)
+  ado_project_name: "Your ADO Project"      # Actual ADO project name for webhook routing
+  ai_label: "ai-implement"
+  quick_label: "ai-quick"
+  clarification_status: "Needs Info"
+  done_status: "Done"
+  custom_fields: {}
+
+source_control:
+  type: "azure-repos"
+  org: "https://dev.azure.com/your-org"     # Full ADO org URL (not just org name)
+  repo: "your-repo"                         # Azure Repos repository name
+  default_branch: "main"
+  branch_prefix: "ai/"
+  pr_reviewers: []
+  ado_project: "Your ADO Project"           # ADO project name for MCP/API calls
+  ado_repository_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"  # Repo GUID (find via ADO API or UI)
+
+ci_pipeline:
+  test_command: "dotnet test"
+  lint_command: ""
+  build_command: "dotnet build"
+  e2e_command: ""
+
+test_framework:
+  unit: "xunit"
+  integration: ""
+  e2e: ""
+
+client_repo:
+  local_path: "/path/to/local/clone"        # Local Azure Repos clone
+  github_repo: ""                           # Leave empty for Azure Repos
+  url: ""
+
+autonomy:
+  auto_merge_enabled: false
+  low_risk_ticket_types: [bug, chore, config, dependency, docs]

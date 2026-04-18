@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import base64
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import structlog
 
+from adapters._url_guard import UnsafeAttachmentUrl, validate_attachment_url
+from adapters.attachment_utils import sanitize_attachment_filename
 from config import Settings
 from models import (
     IMAGE_CONTENT_TYPES,
@@ -21,6 +25,16 @@ from models import (
 )
 
 logger = structlog.get_logger()
+
+# Hosts from which Jira attachments may legitimately be fetched. The
+# caller's site host derived from ``settings.jira_base_url`` is always
+# added at request time; these are the fixed vendor hosts for Atlassian
+# CDNs / shared asset infrastructure.
+_JIRA_CDN_HOSTS: list[str] = [
+    "atlassian.net",
+    "atlassian.com",
+]
+
 
 # Jira issue type name -> our TicketType
 _JIRA_TYPE_MAP: dict[str, TicketType] = {
@@ -36,13 +50,49 @@ _JIRA_TYPE_MAP: dict[str, TicketType] = {
 class JiraAdapter:
     """Normalizes Jira webhook payloads and writes back to Jira REST API."""
 
-    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: httpx.AsyncClient | None = None,
+        attachment_client: httpx.AsyncClient | None = None,
+    ) -> None:
         self._settings = settings
         self._client = client or httpx.AsyncClient(
             base_url=settings.jira_base_url.rstrip("/"),
             headers=self._auth_headers(settings),
             timeout=30.0,
         )
+        # Separate client for fetching attacker-controlled attachment
+        # URLs. MUST NOT carry the Jira Basic auth header — the URL
+        # comes from the webhook payload and could point at an IMDS
+        # endpoint, attacker server, or other off-site host. Keeping
+        # the auth header off this client means even a guard bypass
+        # can't leak the PAT. Redirects are disabled so a 30x to a
+        # different host can't sidestep the allowlist either.
+        self._attachment_client = attachment_client or httpx.AsyncClient(
+            headers={"User-Agent": "agent-harness/jira-attachment-fetcher"},
+            timeout=30.0,
+            follow_redirects=False,
+        )
+
+    def _attachment_allowed_hosts(self) -> list[str]:
+        """Build the allowlist used by the SSRF guard for fetches.
+
+        Always includes the host parsed out of ``jira_base_url`` (so
+        operators who put their Jira at ``https://acme.atlassian.net``
+        get ``acme.atlassian.net`` in the allowlist) plus the fixed
+        Atlassian CDN hosts.
+        """
+        hosts = list(_JIRA_CDN_HOSTS)
+        base = (self._settings.jira_base_url or "").strip()
+        if base:
+            try:
+                host = urlparse(base).hostname or ""
+            except ValueError:
+                host = ""
+            if host:
+                hosts.append(host)
+        return hosts
 
     @staticmethod
     def _auth_headers(settings: Settings) -> dict[str, str]:
@@ -83,20 +133,42 @@ class JiraAdapter:
                 content_type=att.get("mimeType", ""),
             )
             for att in fields.get("attachment", [])
+            if isinstance(att, dict)
         ]
 
-        # Linked issues
-        linked_items = [
-            LinkedItem(
-                id=link.get("outwardIssue", link.get("inwardIssue", {})).get("key", ""),
+        # Linked issues.
+        #
+        # Jira can emit issuelinks with an explicit ``"outwardIssue":
+        # null`` on the opposite side of the link (rather than omitting
+        # the key), which means ``link.get("outwardIssue",
+        # link.get("inwardIssue", {}))`` returns ``None`` instead of
+        # falling back — and the subsequent ``.get("key")`` raises
+        # AttributeError, aborting the entire ticket normalization
+        # inside the list comprehension. Same hazard applies to the
+        # ``type`` field. Resolve the side with an explicit ``or``
+        # chain so a None value falls through to the next option,
+        # ending at an empty dict.
+        def _resolve_link(link: dict[str, Any]) -> LinkedItem | None:
+            side = link.get("outwardIssue") or link.get("inwardIssue")
+            if not isinstance(side, dict):
+                return None
+            link_type = link.get("type") or {}
+            fields_on_side = side.get("fields") or {}
+            return LinkedItem(
+                id=side.get("key", ""),
                 source=TicketSource.JIRA,
-                relationship=link.get("type", {}).get("name", ""),
-                title=link.get("outwardIssue", link.get("inwardIssue", {}))
-                .get("fields", {})
-                .get("summary", ""),
+                relationship=link_type.get("name", ""),
+                title=fields_on_side.get("summary", ""),
             )
-            for link in fields.get("issuelinks", [])
-            if link.get("outwardIssue") or link.get("inwardIssue")
+
+        linked_items = [
+            li
+            for li in (
+                _resolve_link(link)
+                for link in fields.get("issuelinks", []) or []
+                if isinstance(link, dict)
+            )
+            if li is not None
         ]
 
         # Labels
@@ -150,8 +222,10 @@ class JiraAdapter:
         return JiraAdapter._adf_to_text(value)
 
     @staticmethod
-    def _adf_to_text(node: dict[str, Any]) -> str:
+    def _adf_to_text(node: dict[str, Any], _depth: int = 0) -> str:
         """Recursively convert an ADF document node to plain text."""
+        if _depth > 100:
+            return ""  # Guard against maliciously nested ADF
         node_type = node.get("type", "")
         text_parts: list[str] = []
 
@@ -165,7 +239,7 @@ class JiraAdapter:
 
         # Process children
         for child in node.get("content", []):
-            text_parts.append(JiraAdapter._adf_to_text(child))
+            text_parts.append(JiraAdapter._adf_to_text(child, _depth + 1))
 
         joined = "".join(text_parts)
 
@@ -378,20 +452,63 @@ class JiraAdapter:
         Skips if the file is too large (>5 MB) or the download fails.
         Returns the original attachment unchanged on failure.
         """
-        from pathlib import Path
-
         log = logger.bind(filename=attachment.filename, url=attachment.url)
 
         if not attachment.url:
             log.warning("attachment_download_skipped", reason="empty url")
             return attachment
 
+        # Sanitize the attacker-controlled filename. The value comes
+        # straight from the webhook payload and we build ``dest /
+        # filename`` below — without sanitization, a filename like
+        # ``../../tmp/pwn.sh`` or ``/etc/cron.d/x`` would write arbitrary
+        # bytes outside the temp dir. Take only the basename, drop path
+        # separators and NUL bytes, reject empty/dot results, and after
+        # constructing the path assert it resolves inside ``dest``.
+        safe_name = sanitize_attachment_filename(attachment.filename)
+        if safe_name is None:
+            log.warning(
+                "attachment_download_skipped",
+                reason="invalid_filename",
+                raw_filename=attachment.filename,
+            )
+            return attachment
+
         dest = Path(dest_dir)
         dest.mkdir(parents=True, exist_ok=True)
-        file_path = dest / attachment.filename
+        file_path = dest / safe_name
+        # Defense in depth: even after basename sanitization, refuse any
+        # path that resolves outside the destination directory.
+        try:
+            file_path.resolve().relative_to(dest.resolve())
+        except ValueError:
+            log.warning(
+                "attachment_download_skipped",
+                reason="resolved_outside_dest",
+                raw_filename=attachment.filename,
+            )
+            return attachment
+
+        # SSRF guard — validate the URL before ANY network call. The
+        # URL came from the webhook payload and is attacker-controlled.
+        # Blocking the fetch at this layer prevents leaking the
+        # adapter's PAT to IMDS (169.254.169.254) or an attacker host
+        # even if the unauthenticated attachment client were misused.
+        try:
+            await validate_attachment_url(
+                attachment.url, self._attachment_allowed_hosts()
+            )
+        except UnsafeAttachmentUrl as exc:
+            log.warning(
+                "adapter_attachment_url_blocked",
+                reason=str(exc),
+            )
+            return attachment
 
         try:
-            async with self._client.stream("GET", attachment.url) as response:
+            async with self._attachment_client.stream(
+                "GET", attachment.url
+            ) as response:
                 response.raise_for_status()
 
                 # Check Content-Length before downloading full body

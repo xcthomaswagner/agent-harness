@@ -836,6 +836,66 @@ class TestInsertDefectLink:
         finally:
             conn.close()
 
+    def test_list_defect_links_for_profile_filters_before_limit(
+        self, db_path: Path
+    ) -> None:
+        """Bug regression: before the fix, list_defect_links_for_profile
+        applied LIMIT in SQL before any confirmed/category filter, so
+        the Python-side ``[r for r in rows if confirmed=1 and
+        category='escaped']`` in the dashboard could see an empty set
+        if more-recent non-escaped rows filled the SQL LIMIT window.
+        Fix pushes the filter into SQL via optional confirmed/category
+        kwargs. This test plants 3 non-escaped rows that would have
+        filled a LIMIT=2 plus 1 escaped row; the old code would have
+        returned 0 escaped rows — the new code must return 1."""
+        from autonomy_store import list_defect_links_for_profile
+
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr_id = _merged_pr(conn, client_profile="rockwell")
+            # Three most-recent non-escaped rows.
+            for i, ts in enumerate(
+                [
+                    "2026-04-05T00:00:00+00:00",
+                    "2026-04-04T00:00:00+00:00",
+                    "2026-04-03T00:00:00+00:00",
+                ]
+            ):
+                insert_defect_link(
+                    conn,
+                    pr_run_id=pr_id,
+                    defect_key=f"PRE-{i}",
+                    source="jira",
+                    reported_at=ts,
+                    category="pre_existing",
+                )
+            # One older escaped row.
+            insert_defect_link(
+                conn,
+                pr_run_id=pr_id,
+                defect_key="ESC-1",
+                source="jira",
+                reported_at="2026-04-01T00:00:00+00:00",
+                category="escaped",
+            )
+
+            # With the pre-fix behavior (no filter), the top-2 rows
+            # would both be pre_existing and the escaped row would be
+            # dropped. With the fix, SQL filters first and LIMIT=2
+            # still sees the escaped row.
+            rows = list_defect_links_for_profile(
+                conn,
+                "rockwell",
+                limit=2,
+                confirmed=1,
+                category="escaped",
+            )
+            assert len(rows) == 1
+            assert rows[0]["defect_key"] == "ESC-1"
+        finally:
+            conn.close()
+
 
 class TestListConfirmedEscapedDefects:
     def test_in_window_counts(self, db_path: Path) -> None:
@@ -1507,6 +1567,122 @@ class TestAutoMergeDecisions:
             )
             assert len(rows) == 1
             assert rows[0]["target_id"] == "a/b#1"
+        finally:
+            conn.close()
+
+    def test_list_recent_client_profile_filter_escapes_like_wildcards(
+        self, db_path: Path
+    ) -> None:
+        """Bug regression: ``client_profile`` was spliced into a LIKE
+        pattern with no escaping. SQLite LIKE treats ``_`` as "any
+        single character" and ``%`` as "any sequence", so a caller
+        passing ``_`` or ``foo_bar`` would match across profiles —
+        turning a per-profile filter into a data leak. Fixed by
+        escaping ``%`` / ``_`` / ``\\`` and using
+        ``LIKE ? ESCAPE '\\'``."""
+        from autonomy_store import (
+            list_recent_auto_merge_decisions,
+            record_auto_merge_decision,
+        )
+
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            # Two profiles with names that differ only by the character
+            # a single ``_`` would match.
+            record_auto_merge_decision(
+                conn,
+                repo_full_name="a/b",
+                pr_number=1,
+                decision="merged",
+                reason="ok",
+                payload={"client_profile": "acme"},
+            )
+            record_auto_merge_decision(
+                conn,
+                repo_full_name="c/d",
+                pr_number=2,
+                decision="merged",
+                reason="ok",
+                payload={"client_profile": "xcme"},
+            )
+
+            # Before the fix, ``_cme`` would match both profiles via
+            # the LIKE wildcard. After the fix, it matches neither
+            # (the underscore is escaped to a literal underscore).
+            rows = list_recent_auto_merge_decisions(
+                conn, client_profile="_cme"
+            )
+            assert rows == []
+
+            # A single ``%`` used to match every row. After the fix,
+            # it matches none.
+            rows = list_recent_auto_merge_decisions(
+                conn, client_profile="%"
+            )
+            assert rows == []
+
+            # Legitimate literal names with underscores still match
+            # correctly — seed one and fetch by its exact name.
+            record_auto_merge_decision(
+                conn,
+                repo_full_name="e/f",
+                pr_number=3,
+                decision="merged",
+                reason="ok",
+                payload={"client_profile": "first_pass_acceptance"},
+            )
+            rows = list_recent_auto_merge_decisions(
+                conn, client_profile="first_pass_acceptance"
+            )
+            assert len(rows) == 1
+            assert rows[0]["target_id"] == "e/f#3"
+        finally:
+            conn.close()
+
+    def test_list_recent_repo_full_name_filter_escapes_like_wildcards(
+        self, db_path: Path
+    ) -> None:
+        """Bug regression: ``repo_full_name`` had the same LIKE-wildcard
+        leak as ``client_profile`` — a caller passing ``o/r_po`` would
+        match any repo whose 5th char was anything."""
+        from autonomy_store import (
+            list_recent_auto_merge_decisions,
+            record_auto_merge_decision,
+        )
+
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            record_auto_merge_decision(
+                conn,
+                repo_full_name="o/repo",
+                pr_number=1,
+                decision="merged",
+                reason="ok",
+                payload={"client_profile": "a"},
+            )
+            record_auto_merge_decision(
+                conn,
+                repo_full_name="o/rxpo",
+                pr_number=2,
+                decision="merged",
+                reason="ok",
+                payload={"client_profile": "a"},
+            )
+
+            # Before the fix, ``o/r_po`` would match both. After, it
+            # matches neither.
+            rows = list_recent_auto_merge_decisions(
+                conn, repo_full_name="o/r_po"
+            )
+            assert rows == []
+
+            # Exact literal still works.
+            rows = list_recent_auto_merge_decisions(
+                conn, repo_full_name="o/repo"
+            )
+            assert len(rows) == 1
         finally:
             conn.close()
 

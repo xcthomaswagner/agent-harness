@@ -90,6 +90,71 @@ class TestNormalize:
         assert ticket.linked_items[0].relationship == "Blocks"
         assert ticket.linked_items[0].title == "Release 2.1"
 
+    def test_linked_items_tolerate_explicit_null_outward_side(
+        self, adapter: JiraAdapter
+    ) -> None:
+        """Bug regression: Jira can emit ``"outwardIssue": null`` for
+        some link shapes, which made ``link.get("outwardIssue",
+        link.get("inwardIssue", {}))`` return None — then ``.get(
+        "key")`` crashed with AttributeError. The filter at the end
+        of the comprehension used truthiness (``or``) and passed the
+        link through to the extractor, which exploded on the
+        explicit null side. Fix uses ``or`` to resolve the side
+        correctly and coerces type/fields through ``or {}``."""
+        payload = load_fixture("jira_webhook_story.json")
+        # Overwrite the issuelinks with a shape where outwardIssue is
+        # explicitly null and only inwardIssue is populated.
+        payload["issue"]["fields"]["issuelinks"] = [
+            {
+                "type": {"name": "Blocks"},
+                "outwardIssue": None,
+                "inwardIssue": {
+                    "key": "ACME-50",
+                    "fields": {"summary": "Release 2.1"},
+                },
+            }
+        ]
+        ticket = adapter.normalize(payload)
+        assert len(ticket.linked_items) == 1
+        assert ticket.linked_items[0].id == "ACME-50"
+        assert ticket.linked_items[0].title == "Release 2.1"
+
+    def test_linked_items_tolerate_null_type(
+        self, adapter: JiraAdapter
+    ) -> None:
+        """Belt-and-braces: an explicit null ``type`` must not crash."""
+        payload = load_fixture("jira_webhook_story.json")
+        payload["issue"]["fields"]["issuelinks"] = [
+            {
+                "type": None,
+                "outwardIssue": {
+                    "key": "ACME-99",
+                    "fields": {"summary": "linked"},
+                },
+            }
+        ]
+        ticket = adapter.normalize(payload)
+        assert len(ticket.linked_items) == 1
+        assert ticket.linked_items[0].id == "ACME-99"
+        assert ticket.linked_items[0].relationship == ""
+
+    def test_linked_items_skip_entry_with_both_sides_null(
+        self, adapter: JiraAdapter
+    ) -> None:
+        """A link with both sides null is skipped entirely instead of
+        raising — the previous truthiness filter would also skip but
+        the new code does it explicitly via the helper."""
+        payload = load_fixture("jira_webhook_story.json")
+        payload["issue"]["fields"]["issuelinks"] = [
+            {
+                "type": {"name": "Blocks"},
+                "outwardIssue": None,
+                "inwardIssue": None,
+            }
+        ]
+        ticket = adapter.normalize(payload)
+        assert ticket.linked_items == []
+
     def test_bug_webhook(self, adapter: JiraAdapter) -> None:
         payload = load_fixture("jira_webhook_bug.json")
         ticket = adapter.normalize(payload)
@@ -455,7 +520,16 @@ class TestDownloadAttachment:
 
     @pytest.fixture
     def stream_adapter(self, settings: Settings, stream_client: AsyncMock) -> JiraAdapter:
-        return JiraAdapter(settings=settings, client=stream_client)
+        # The adapter now uses a separate unauthenticated client for
+        # attachment downloads (so the auth PAT never rides along on
+        # an attacker-controlled URL). Wire ``stream_client`` into
+        # both slots so existing tests that mock ``client.stream(...)``
+        # still see their setups applied.
+        return JiraAdapter(
+            settings=settings,
+            client=stream_client,
+            attachment_client=stream_client,
+        )
 
     def _setup_stream(
         self, client: AsyncMock, data: bytes, content_length: str | None = None
@@ -545,6 +619,98 @@ class TestDownloadAttachment:
         result = await stream_adapter.download_attachment(att, str(tmp_path))
         assert result.local_path == ""
 
+    @pytest.mark.parametrize(
+        "evil_filename",
+        [
+            "..",
+            ".",
+            "",
+            "has\x00nulbyte.png",
+        ],
+    )
+    async def test_rejects_unnormalizable_filename(
+        self,
+        stream_adapter: JiraAdapter,
+        stream_client: AsyncMock,
+        tmp_path: Path,
+        evil_filename: str,
+    ) -> None:
+        """Bug regression: filenames that can't be sanitized to a
+        legitimate basename (empty, ``.``, ``..``, NUL-bearing) must
+        be rejected outright — no file is written, the returned
+        Attachment has no local_path, and nothing escapes tmp_path."""
+        image_bytes = b"\x89PNG" + b"\x00" * 50
+        self._setup_stream(stream_client, image_bytes, str(len(image_bytes)))
+
+        # Plant a file in the parent directory that a successful traversal
+        # would overwrite. It must stay intact after the call.
+        parent_canary = tmp_path.parent / "canary.txt"
+        parent_canary.write_bytes(b"original")
+
+        att = Attachment(
+            filename=evil_filename,
+            url="https://acme.atlassian.net/secure/attachment/1/x.png",
+            content_type="image/png",
+        )
+        result = await stream_adapter.download_attachment(att, str(tmp_path))
+
+        assert result.local_path == "", (
+            f"evil filename {evil_filename!r} must be rejected"
+        )
+        # Nothing written outside tmp_path.
+        assert parent_canary.read_bytes() == b"original"
+        # No files created inside tmp_path either.
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        "traversal_input,expected_basename",
+        [
+            ("../../tmp/pwn.sh", "pwn.sh"),
+            ("../../../etc/cron.d/payload", "payload"),
+            ("/etc/passwd", "passwd"),
+            ("/tmp/absolute-path", "absolute-path"),
+            ("subdir/legit.png", "legit.png"),
+        ],
+    )
+    async def test_strips_path_components_to_basename(
+        self,
+        stream_adapter: JiraAdapter,
+        stream_client: AsyncMock,
+        tmp_path: Path,
+        traversal_input: str,
+        expected_basename: str,
+    ) -> None:
+        """Bug regression: untrusted ``filename`` values with path
+        components (``../foo``, absolute paths, subdirs) used to land
+        directly in ``dest / filename`` so the write escaped tmp_path.
+        Fixed by taking the basename — the write lands SAFELY inside
+        dest with just the last path component, and nothing is ever
+        written outside tmp_path. This is the correct safe behavior:
+        the legitimate case of ``subdir/legit.png`` still succeeds,
+        the traversal case of ``../../tmp/pwn.sh`` becomes
+        ``tmp_path/pwn.sh`` instead of ``/tmp/pwn.sh``."""
+        image_bytes = b"\x89PNG" + b"\x00" * 50
+        self._setup_stream(stream_client, image_bytes, str(len(image_bytes)))
+
+        # Plant a canary outside tmp_path — must stay intact.
+        parent_canary = tmp_path.parent / expected_basename
+        parent_canary.write_bytes(b"original-canary")
+
+        att = Attachment(
+            filename=traversal_input,
+            url="https://acme.atlassian.net/secure/attachment/1/x.png",
+            content_type="image/png",
+        )
+        result = await stream_adapter.download_attachment(att, str(tmp_path))
+
+        # The write succeeded — but INSIDE tmp_path with the basename.
+        assert result.local_path != ""
+        written = Path(result.local_path)
+        assert written.name == expected_basename
+        assert written.parent == tmp_path
+        # Canary outside tmp_path was NOT touched.
+        assert parent_canary.read_bytes() == b"original-canary"
+
 
 class TestDownloadImageAttachments:
     async def test_downloads_only_images(self, settings: Settings, tmp_path: Path) -> None:
@@ -565,15 +731,31 @@ class TestDownloadImageAttachments:
         stream_ctx.__aexit__.return_value = None
         client.stream.return_value = stream_ctx
 
-        adapter = JiraAdapter(settings=settings, client=client)
+        # Wire the mocked client into BOTH the generic write-back slot
+        # and the attachment-fetch slot: the adapter uses the latter
+        # for streaming downloads. URLs must pass the new SSRF guard —
+        # ``acme.atlassian.net`` matches the ``atlassian.net`` allowlist
+        # entry that ``_attachment_allowed_hosts`` returns.
+        adapter = JiraAdapter(
+            settings=settings, client=client, attachment_client=client,
+        )
 
         attachments = [
-            Attachment(filename="design.png", url="https://jira/att/1", content_type="image/png"),
             Attachment(
-                filename="spec.pdf", url="https://jira/att/2",
+                filename="design.png",
+                url="https://acme.atlassian.net/att/1",
+                content_type="image/png",
+            ),
+            Attachment(
+                filename="spec.pdf",
+                url="https://acme.atlassian.net/att/2",
                 content_type="application/pdf",
             ),
-            Attachment(filename="photo.jpg", url="https://jira/att/3", content_type="image/jpeg"),
+            Attachment(
+                filename="photo.jpg",
+                url="https://acme.atlassian.net/att/3",
+                content_type="image/jpeg",
+            ),
         ]
 
         result = await adapter.download_image_attachments(attachments, str(tmp_path))
@@ -582,3 +764,21 @@ class TestDownloadImageAttachments:
         assert result[0].local_path != ""  # PNG downloaded
         assert result[1].local_path == ""  # PDF skipped
         assert result[2].local_path != ""  # JPEG downloaded
+
+
+def test_jira_adapter_satisfies_ticket_writeback_protocol(
+    settings: Settings,
+) -> None:
+    """Protocol regression: JiraAdapter must conform to
+    TicketWriteBackAdapter so pipeline._get_adapter's return type
+    stays honest. The @runtime_checkable protocol lets us verify this
+    with isinstance without touching the adapter class definition."""
+    from adapters.base import TicketWriteBackAdapter
+
+    adapter = JiraAdapter(settings=settings)
+    assert isinstance(adapter, TicketWriteBackAdapter)
+    # And the three required methods are async coroutines.
+    import inspect
+    assert inspect.iscoroutinefunction(adapter.write_comment)
+    assert inspect.iscoroutinefunction(adapter.transition_status)
+    assert inspect.iscoroutinefunction(adapter.add_label)

@@ -78,3 +78,17 @@ Send results to the team lead using the message format:
 - Do not modify files outside your unit unless absolutely necessary (and explain why)
 - Do not install new dependencies without explicit instruction
 - Follow the project's coding conventions from CLAUDE.md
+
+## Don't Bake Unverified Root Causes Into Error Messages or Reports
+
+When something fails in an unexpected way, there is a strong pull to attach a confident root-cause explanation ("this is because X") to the failure output, error message, or `failure_details` payload. Resist it.
+
+**Rule.** Describe *what happened* and *what to try*, not *why* it happened, unless you have actually verified the cause against an authoritative source (docs, a reproducer, a second independent check).
+
+**Why.** Unverified diagnostics become canonical — other agents, reviewers, and future you will follow a wrong remediation hint that originated as a plausible guess. A confidently-wrong "root cause" costs more cycles than honest uncertainty.
+
+**How to apply:**
+- In `failure_details`, write: "Deploy retrieve returned empty; tried X and Y; confirmed Z did not reproduce the issue." Not: "Deploy failed because the site is Aura-based and doesn't emit ExperienceBundle metadata" (unless you verified it).
+- When a single data point (one SOQL row, one error string) could support multiple hypotheses, list them as hypotheses, not conclusions.
+- Use "possibly" / "unverified hypothesis" / "one explanation is" for guesses. Reserve "because" / "this is caused by" for confirmed facts.
+- If the cause would be useful to know but you can't verify it right now, say so explicitly and stop — don't invent.

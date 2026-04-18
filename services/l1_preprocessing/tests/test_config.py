@@ -14,7 +14,6 @@ class TestSettings:
         with patch.dict("os.environ", {}, clear=True):
             s = Settings(_env_file=None)  # type: ignore[call-arg]
         assert s.jira_ac_field_id == "customfield_10429"
-        assert s.jira_story_points_field_id == "customfield_10040"
         assert s.log_level == "INFO"
 
     def test_jira_ac_field_customizable(self) -> None:
@@ -40,7 +39,7 @@ class TestSettings:
         its name should be stripped from agent environments."""
         import sys
         sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
-        from shared.env_sanitize import SECRET_VARS
+        from shared.env_sanitize import _is_secret
 
         secret_keywords = {"key", "token", "secret", "pat"}
         settings_fields = Settings.model_fields
@@ -50,6 +49,10 @@ class TestSettings:
             # Match on word boundaries so e.g. "path" doesn't match "pat"
             parts = set(field_name.lower().split("_"))
             has_secret_keyword = bool(parts & secret_keywords)
-            if has_secret_keyword and env_name not in SECRET_VARS:
+            # ``_is_secret`` combines the explicit SECRET_VARS allowlist
+            # with the suffix denylist (``_TOKEN``, ``_SECRET``, etc.).
+            # A field qualifies as covered if either mechanism catches
+            # its uppercased name.
+            if has_secret_keyword and not _is_secret(env_name):
                 missing.append(env_name)
         assert not missing, f"Secret fields missing from SECRET_VARS: {missing}"

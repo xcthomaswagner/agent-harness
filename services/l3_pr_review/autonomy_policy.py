@@ -1,7 +1,9 @@
 """Auto-merge policy evaluation. Pure decision logic; no I/O except L1 reads."""
 from __future__ import annotations
 
+import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -52,6 +54,7 @@ def _cache_get(key: str) -> Any | None:
         return None
     expiry, value = entry
     if time.monotonic() >= expiry:
+        del _cache[key]
         return None
     return value
 
@@ -65,6 +68,78 @@ def _cache_clear() -> None:
     _cache.clear()
 
 
+async def _cached_l1_get(
+    cache_key: str,
+    url: str,
+    *,
+    fail_closed: Any,
+    parse: Callable[[dict[str, Any]], Any],
+    params: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    log_event: str | None = None,
+    log_context: dict[str, Any] | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> Any:
+    """Shared GET-with-cache for the three ``fetch_*`` helpers.
+
+    Each caller used to duplicate ~25 lines of cache check → owns_client
+    httpx dance → non-200 fail-closed → JSON parse → RequestError /
+    ValueError fail-closed → aclose. Centralising it here makes the
+    fail-closed default explicit and harder to accidentally forget
+    when new L1 endpoints are added (the default-open hazard that bit
+    us in ado_api.py).
+
+    ``parse`` maps the JSON body to the cached value. ``fail_closed``
+    is returned (and NOT cached) on any failure. ``log_event`` / ``log_context``
+    are logged as warnings on failure so callers don't each duplicate
+    a structured log line.
+    """
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    owns_client = client is None
+    c = client or httpx.AsyncClient(timeout=5.0)
+    try:
+        resp = await c.get(url, params=params, headers=headers)
+        if resp.status_code != 200:
+            if log_event:
+                logger.warning(
+                    log_event, status=resp.status_code, **(log_context or {})
+                )
+            return fail_closed
+        value = parse(resp.json())
+        _cache_set(cache_key, value)
+        return value
+    except (httpx.RequestError, ValueError):
+        if log_event:
+            logger.warning(log_event, **(log_context or {}))
+        return fail_closed
+    finally:
+        if owns_client:
+            await c.aclose()
+
+
+def _parse_recommended_mode(data: dict[str, Any]) -> tuple[str, str]:
+    mode = str(data.get("recommended_mode") or "conservative")
+    dq = str((data.get("data_quality") or {}).get("status") or "unknown")
+    return (mode, dq)
+
+
+def _autonomy_admin_headers() -> dict[str, str]:
+    """Build the X-Autonomy-Admin-Token header when the env var is set.
+
+    Phase 2 protected the L1 ``/api/autonomy*`` GET routes behind this
+    token. Without the header, reads return 401 and every lookup
+    fail-closes — correct in the absence of configured credentials,
+    but breaks production when the operator has configured the token
+    on L1 but L3 doesn't forward it. Centralised here so future
+    autonomy reads use the same path.
+    """
+    token = os.getenv("AUTONOMY_ADMIN_TOKEN", "")
+    return {"X-Autonomy-Admin-Token": token} if token else {}
+
+
 async def fetch_recommended_mode(
     client_profile: str,
     *,
@@ -75,30 +150,17 @@ async def fetch_recommended_mode(
 
     Fail-closed to ('conservative', 'unknown') on error.
     """
-    key = f"mode:{client_profile}"
-    cached = _cache_get(key)
-    if cached is not None:
-        return cached  # type: ignore[no-any-return]
-    url = f"{l1_url.rstrip('/')}/api/autonomy"
-    owns_client = client is None
-    c = client or httpx.AsyncClient(timeout=5.0)
-    try:
-        resp = await c.get(url, params={"client_profile": client_profile})
-        if resp.status_code != 200:
-            logger.warning("l1_autonomy_fetch_non_200", status=resp.status_code)
-            return ("conservative", "unknown")
-        data = resp.json()
-        mode = str(data.get("recommended_mode") or "conservative")
-        dq = str((data.get("data_quality") or {}).get("status") or "unknown")
-        result = (mode, dq)
-        _cache_set(key, result)
-        return result
-    except (httpx.RequestError, ValueError):
-        logger.warning("l1_autonomy_fetch_failed", client_profile=client_profile)
-        return ("conservative", "unknown")
-    finally:
-        if owns_client:
-            await c.aclose()
+    return await _cached_l1_get(
+        f"mode:{client_profile}@{l1_url}",
+        f"{l1_url.rstrip('/')}/api/autonomy",
+        fail_closed=("conservative", "unknown"),
+        parse=_parse_recommended_mode,
+        params={"client_profile": client_profile},
+        headers=_autonomy_admin_headers(),
+        log_event="l1_autonomy_fetch_failed",
+        log_context={"client_profile": client_profile},
+        client=client,
+    )
 
 
 async def fetch_auto_merge_enabled(
@@ -108,25 +170,22 @@ async def fetch_auto_merge_enabled(
     client: httpx.AsyncClient | None = None,
 ) -> bool:
     """GET /api/autonomy/auto-merge-toggle?client_profile=. Fail-closed to False."""
-    key = f"toggle:{client_profile}"
-    cached = _cache_get(key)
-    if cached is not None:
-        return bool(cached)
-    url = f"{l1_url.rstrip('/')}/api/autonomy/auto-merge-toggle"
-    owns_client = client is None
-    c = client or httpx.AsyncClient(timeout=5.0)
-    try:
-        resp = await c.get(url, params={"client_profile": client_profile})
-        if resp.status_code != 200:
-            return False
-        enabled = bool(resp.json().get("enabled", False))
-        _cache_set(key, enabled)
-        return enabled
-    except (httpx.RequestError, ValueError):
-        return False
-    finally:
-        if owns_client:
-            await c.aclose()
+    return await _cached_l1_get(
+        f"toggle:{client_profile}@{l1_url}",
+        f"{l1_url.rstrip('/')}/api/autonomy/auto-merge-toggle",
+        fail_closed=False,
+        parse=lambda data: bool(data.get("enabled", False)),
+        params={"client_profile": client_profile},
+        headers=_autonomy_admin_headers(),
+        client=client,
+    )
+
+
+_EMPTY_PROFILE: dict[str, Any] = {
+    "client_profile": "",
+    "low_risk_ticket_types": [],
+    "auto_merge_enabled_yaml": False,
+}
 
 
 async def fetch_profile_by_repo(
@@ -137,44 +196,115 @@ async def fetch_profile_by_repo(
     client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """Resolve repo -> client_profile via L1. Returns dict (may have empty profile)."""
-    key = f"profile:{repo_full_name}"
-    cached = _cache_get(key)
-    if cached is not None:
-        return cached  # type: ignore[no-any-return]
     if not internal_token:
         logger.warning("l1_profile_by_repo_no_token")
-        return {
-            "client_profile": "",
-            "low_risk_ticket_types": [],
-            "auto_merge_enabled_yaml": False,
-        }
-    url = f"{l1_url.rstrip('/')}/api/internal/autonomy/profile-by-repo"
-    owns_client = client is None
-    c = client or httpx.AsyncClient(timeout=5.0)
-    try:
-        resp = await c.get(
-            url,
-            params={"repo_full_name": repo_full_name},
-            headers={"X-Internal-Api-Token": internal_token},
-        )
-        if resp.status_code != 200:
-            return {
-                "client_profile": "",
-                "low_risk_ticket_types": [],
-                "auto_merge_enabled_yaml": False,
-            }
-        data: dict[str, Any] = resp.json()
-        _cache_set(key, data)
-        return data
-    except (httpx.RequestError, ValueError):
-        return {
-            "client_profile": "",
-            "low_risk_ticket_types": [],
-            "auto_merge_enabled_yaml": False,
-        }
-    finally:
-        if owns_client:
-            await c.aclose()
+        return _EMPTY_PROFILE
+    return await _cached_l1_get(
+        f"profile:{repo_full_name}@{l1_url}",
+        f"{l1_url.rstrip('/')}/api/internal/autonomy/profile-by-repo",
+        fail_closed=_EMPTY_PROFILE,
+        parse=lambda data: data,
+        params={"repo_full_name": repo_full_name},
+        headers={"X-Internal-Api-Token": internal_token},
+        client=client,
+    )
+
+
+@dataclass(frozen=True)
+class _Gate:
+    """One policy gate — name, reason code on failure, predicate.
+
+    ``predicate`` returns True when the gate PASSES. ``applies_when``
+    is an optional precondition: when it returns False the gate is
+    skipped and recorded as True (pass-through, e.g. ``low_risk`` only
+    applies in semi_autonomous mode).
+
+    Keeping the table ordered and explicit means the gate sequence is
+    auditable in one place and new gates are a single line addition —
+    the previous 11-branch if/return ladder forced every new rule to
+    find the right insertion point and copy 3-line scaffolding.
+    """
+    name: str
+    reason: str
+    predicate: Any  # Callable[[AutoMergeContext, dict], bool]
+    applies_when: Any = None  # Optional[Callable[[AutoMergeContext, dict], bool]]
+
+
+def _low_risk_predicate(
+    ctx: AutoMergeContext, _pr: dict[str, Any]
+) -> bool:
+    return (ctx.ticket_type or "").lower() in {
+        t.lower() for t in ctx.low_risk_types
+    }
+
+
+_GATES: list[_Gate] = [
+    _Gate(
+        "profile_enabled",
+        REASON_KILL_SWITCH_OFF,
+        lambda ctx, pr: ctx.profile_enabled,
+    ),
+    _Gate(
+        "data_quality_good",
+        REASON_DATA_QUALITY_DEGRADED,
+        lambda ctx, pr: ctx.data_quality_status == "good",
+    ),
+    _Gate(
+        "mode_allows_merge",
+        REASON_MODE_CONSERVATIVE,
+        lambda ctx, pr: ctx.recommended_mode in ("semi_autonomous", "full_autonomous"),
+    ),
+    # Only applies in semi_autonomous mode — full_autonomous skips the
+    # low-risk check entirely (pass-through).
+    _Gate(
+        "low_risk_ticket_type",
+        REASON_NOT_LOW_RISK_IN_SEMI,
+        _low_risk_predicate,
+        applies_when=lambda ctx, pr: ctx.recommended_mode == "semi_autonomous",
+    ),
+    _Gate(
+        "bot_authored",
+        REASON_HUMAN_AUTHORED,
+        lambda ctx, pr: (pr.get("author") or "").lower()
+        == ctx.bot_github_username.lower(),
+    ),
+    _Gate(
+        "not_already_merged",
+        REASON_ALREADY_MERGED,
+        lambda ctx, pr: not bool(pr.get("merged")),
+    ),
+    # Requires at least one HUMAN approval. ``human_approvals_count``
+    # is emitted by both github_api.get_pr_state (filtering
+    # type=Bot / [bot] logins / env denylist) and ado_api.get_ado_pr_state
+    # (filtering isContainer groups / service-principal markers /
+    # env denylist). Earlier iterations fell back to
+    # ``approvals_count`` when ``human_approvals_count`` was absent
+    # — that fallback WAS the default-OPEN bug that let ADO
+    # service-principal votes satisfy the gate on their own. The
+    # fallback is intentionally removed: any pr_state dict that
+    # doesn't carry ``human_approvals_count`` now fails closed.
+    _Gate(
+        "has_approval",
+        REASON_NO_APPROVAL,
+        lambda ctx, pr: int(pr.get("human_approvals_count") or 0) > 0,
+    ),
+    _Gate(
+        "no_changes_requested",
+        REASON_CHANGES_REQUESTED,
+        lambda ctx, pr: int(pr.get("changes_requested_count") or 0) == 0,
+    ),
+    _Gate(
+        "ci_passed",
+        REASON_CI_NOT_PASSED,
+        lambda ctx, pr: bool(pr.get("checks_passed")),
+    ),
+    _Gate(
+        "mergeable",
+        REASON_NOT_MERGEABLE,
+        lambda ctx, pr: bool(pr.get("mergeable"))
+        and (pr.get("mergeable_state") or "").lower() in ("clean", "succeeded"),
+    ),
+]
 
 
 def evaluate_policy_gates(
@@ -184,75 +314,24 @@ def evaluate_policy_gates(
 
     pr_state keys required: author, merged, mergeable, mergeable_state,
     approvals_count, changes_requested_count, checks_passed.
+
+    Gates are iterated in the order declared in ``_GATES``. The first
+    gate whose predicate returns False short-circuits with its reason
+    code. Gates with an ``applies_when`` precondition (currently only
+    ``low_risk_ticket_type``) record True and skip the predicate when
+    the precondition is False. ``global_enabled`` is recorded but
+    never fails the gates — the orchestrator decides whether to
+    execute the merge vs. record it as a dry run.
     """
-    gates: dict[str, bool] = {}
-    # Record global switch state for audit but do NOT fail gates on it —
-    # the orchestrator decides whether to execute the merge vs. record dry_run.
-    gates["global_enabled"] = ctx.global_enabled
+    gates: dict[str, bool] = {"global_enabled": ctx.global_enabled}
 
-    # 1. Per-profile kill switch
-    gates["profile_enabled"] = ctx.profile_enabled
-    if not ctx.profile_enabled:
-        return False, REASON_KILL_SWITCH_OFF, gates
-
-    # 3. Data quality must be 'good'
-    dq_ok = ctx.data_quality_status == "good"
-    gates["data_quality_good"] = dq_ok
-    if not dq_ok:
-        return False, REASON_DATA_QUALITY_DEGRADED, gates
-
-    # 4. Mode must be semi or full autonomous
-    mode_ok = ctx.recommended_mode in ("semi_autonomous", "full_autonomous")
-    gates["mode_allows_merge"] = mode_ok
-    if not mode_ok:
-        return False, REASON_MODE_CONSERVATIVE, gates
-
-    # 5. If semi_autonomous, ticket_type must be low-risk
-    if ctx.recommended_mode == "semi_autonomous":
-        low_risk = (ctx.ticket_type or "").lower() in {
-            t.lower() for t in ctx.low_risk_types
-        }
-        gates["low_risk_ticket_type"] = low_risk
-        if not low_risk:
-            return False, REASON_NOT_LOW_RISK_IN_SEMI, gates
-    else:
-        gates["low_risk_ticket_type"] = True  # not required
-
-    # 6. Author must be the bot
-    author_ok = (pr_state.get("author") or "").lower() == ctx.bot_github_username.lower()
-    gates["bot_authored"] = author_ok
-    if not author_ok:
-        return False, REASON_HUMAN_AUTHORED, gates
-
-    # 7. Not already merged
-    already_merged = bool(pr_state.get("merged"))
-    gates["not_already_merged"] = not already_merged
-    if already_merged:
-        return False, REASON_ALREADY_MERGED, gates
-
-    # 8. At least one approval
-    approvals = int(pr_state.get("approvals_count") or 0)
-    gates["has_approval"] = approvals > 0
-    if approvals < 1:
-        return False, REASON_NO_APPROVAL, gates
-
-    # 9. No outstanding changes_requested
-    changes_req = int(pr_state.get("changes_requested_count") or 0)
-    gates["no_changes_requested"] = changes_req == 0
-    if changes_req > 0:
-        return False, REASON_CHANGES_REQUESTED, gates
-
-    # 10. CI passed
-    ci_ok = bool(pr_state.get("checks_passed"))
-    gates["ci_passed"] = ci_ok
-    if not ci_ok:
-        return False, REASON_CI_NOT_PASSED, gates
-
-    # 11. Mergeable per GitHub (clean state incorporates required checks/reviews)
-    mergeable = bool(pr_state.get("mergeable"))
-    clean = (pr_state.get("mergeable_state") or "").lower() == "clean"
-    gates["mergeable"] = mergeable and clean
-    if not mergeable or not clean:
-        return False, REASON_NOT_MERGEABLE, gates
+    for gate in _GATES:
+        if gate.applies_when is not None and not gate.applies_when(ctx, pr_state):
+            gates[gate.name] = True
+            continue
+        ok = gate.predicate(ctx, pr_state)
+        gates[gate.name] = ok
+        if not ok:
+            return False, gate.reason, gates
 
     return True, REASON_OK, gates

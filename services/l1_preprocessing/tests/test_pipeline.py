@@ -272,9 +272,260 @@ class TestRouteEnriched:
         assert "--branch-name" in cmd
         assert "ai/PIPE-10" in cmd
 
-        # Verify stderr is captured for error detection
+        # Verify stderr is redirected to a real file handle, not a pipe.
+        # Pipes risked SIGPIPE-killing the spawned team once L1 detached
+        # after the 2-second health check — a temp file has no such
+        # constraint. We can't assert exact equality (the file object is
+        # created per-call), so we assert it's a real file-like with a
+        # fileno, and explicitly that it is NOT subprocess.PIPE.
         assert call_args[1]["stdout"] == subprocess.DEVNULL
-        assert call_args[1]["stderr"] == subprocess.PIPE
+        stderr_arg = call_args[1]["stderr"]
+        assert stderr_arg is not subprocess.PIPE
+        assert hasattr(stderr_arg, "fileno")
+
+    async def test_enriched_spawn_early_failure_reads_stderr_from_tempfile(
+        self,
+        settings: Settings,
+        mock_analyst: AsyncMock,
+        mock_jira: AsyncMock,
+        sample_ticket: TicketPayload,
+        tmp_path: Path,
+    ) -> None:
+        """Bug 2 regression: when spawn exits non-zero within 2s, the
+        error path must read stderr from the backing temp file (not from
+        a PIPE), log the failure, and unlink the temp file afterward."""
+        fake_repo = tmp_path / "client-repo"
+        fake_repo.mkdir()
+        (fake_repo / ".git").mkdir()
+
+        settings.default_client_repo = str(fake_repo)
+        pipe = Pipeline(
+            settings=settings, analyst=mock_analyst, jira_adapter=mock_jira
+        )
+
+        enriched = EnrichedTicket(
+            **sample_ticket.model_dump(),
+            generated_acceptance_criteria=["AC"],
+            size_assessment=SizeAssessment(
+                classification=SizeClassification.SMALL,
+                estimated_units=1,
+                recommended_dev_count=1,
+            ),
+        )
+        mock_analyst.analyze.return_value = enriched
+
+        captured_stderr_path: list[Path] = []
+
+        def fake_popen(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            # Write fake stderr into the provided temp file BEFORE returning
+            # so the early-failure read path sees content.
+            stderr_fh = kwargs["stderr"]
+            stderr_fh.write(b"boom: missing client repo\n")
+            stderr_fh.flush()
+            captured_stderr_path.append(Path(stderr_fh.name))
+            mock_proc = MagicMock()
+            mock_proc.poll.return_value = 2  # Non-zero → early failure path
+            return mock_proc
+
+        with patch("pipeline.subprocess.Popen", side_effect=fake_popen):
+            result = await pipe.process(sample_ticket)
+
+        assert result["spawn_triggered"] is False
+        # Temp file must be cleaned up after the early-failure branch.
+        assert captured_stderr_path, "fake Popen never ran"
+        assert not captured_stderr_path[0].exists(), (
+            "early-failure path must unlink the stderr temp file"
+        )
+
+    async def test_enriched_spawn_reaper_cleans_up_running_process(
+        self,
+        settings: Settings,
+        mock_analyst: AsyncMock,
+        mock_jira: AsyncMock,
+        sample_ticket: TicketPayload,
+        tmp_path: Path,
+    ) -> None:
+        """Bug 2 regression: when the child survives the 2-second health
+        check, the reaper task must await proc.wait and unlink the stderr
+        temp file when the child finally exits — no zombies, no leftover
+        temp files."""
+        import asyncio
+
+        fake_repo = tmp_path / "client-repo"
+        fake_repo.mkdir()
+        (fake_repo / ".git").mkdir()
+
+        settings.default_client_repo = str(fake_repo)
+        pipe = Pipeline(
+            settings=settings, analyst=mock_analyst, jira_adapter=mock_jira
+        )
+
+        enriched = EnrichedTicket(
+            **sample_ticket.model_dump(),
+            generated_acceptance_criteria=["AC"],
+            size_assessment=SizeAssessment(
+                classification=SizeClassification.SMALL,
+                estimated_units=1,
+                recommended_dev_count=1,
+            ),
+        )
+        mock_analyst.analyze.return_value = enriched
+
+        captured_stderr_path: list[Path] = []
+
+        def fake_popen(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            captured_stderr_path.append(Path(kwargs["stderr"].name))
+            mock_proc = MagicMock()
+            mock_proc.poll.return_value = None  # Still running after 2s
+            mock_proc.wait.return_value = 0  # Eventually exits cleanly
+            return mock_proc
+
+        with patch("pipeline.subprocess.Popen", side_effect=fake_popen):
+            result = await pipe.process(sample_ticket)
+
+        assert result["spawn_triggered"] is True
+        assert captured_stderr_path, "fake Popen never ran"
+
+        # The reaper runs asynchronously — give it a moment to complete.
+        # Wait until all pending tasks on the running loop are done so
+        # we can deterministically assert cleanup ran.
+        pending = [
+            t for t in asyncio.all_tasks() if t is not asyncio.current_task()
+        ]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        # Reaper's unlink should have cleaned up the stderr temp file.
+        assert not captured_stderr_path[0].exists(), (
+            "reaper must unlink the stderr temp file after proc.wait returns"
+        )
+
+
+class TestEnrichedTransitionStatus:
+    """Bug regression: _handle_enriched used to compute ``target_status =
+    in_progress_status if done_status == "Done" else done_status``, which
+    silently marked tickets as Done at ingest for any profile whose
+    done_status was customized away from the literal string ``"Done"``.
+    The schema comment says done_status is "Status set on PR creation"
+    so it should never be the ingest-time transition target. Fixed by
+    always using in_progress_status."""
+
+    async def test_enriched_transitions_to_in_progress_status_default(
+        self,
+        pipeline: Pipeline,
+        mock_analyst: AsyncMock,
+        mock_jira: AsyncMock,
+        sample_ticket: TicketPayload,
+    ) -> None:
+        """With the default profile (done_status="Done",
+        in_progress_status="In Progress"), ingest must transition to
+        "In Progress"."""
+        enriched = EnrichedTicket(
+            **sample_ticket.model_dump(),
+            generated_acceptance_criteria=["AC"],
+            size_assessment=SizeAssessment(
+                classification=SizeClassification.SMALL,
+                estimated_units=1,
+                recommended_dev_count=1,
+            ),
+        )
+        mock_analyst.analyze.return_value = enriched
+
+        with patch("pipeline.Pipeline._load_client_profile", return_value=None):
+            await pipeline.process(sample_ticket)
+
+        mock_jira.transition_status.assert_called_once_with(
+            sample_ticket.id, "In Progress"
+        )
+
+    async def test_enriched_transitions_to_custom_in_progress_status(
+        self,
+        pipeline: Pipeline,
+        mock_analyst: AsyncMock,
+        mock_jira: AsyncMock,
+        sample_ticket: TicketPayload,
+    ) -> None:
+        """xcsf30-style profile: ADO Agile uses ``Active`` for in-progress
+        and ``Done`` for pipeline complete. Ingest must transition to
+        ``Active``, not ``Done``."""
+        from types import SimpleNamespace
+
+        fake_profile = SimpleNamespace(
+            name="xcsf30",
+            done_status="Done",
+            in_progress_status="Active",
+            quick_label="ai-quick",
+            client_repo_path="",
+            platform_profile="",
+            source_control={},
+        )
+        enriched = EnrichedTicket(
+            **sample_ticket.model_dump(),
+            generated_acceptance_criteria=["AC"],
+            size_assessment=SizeAssessment(
+                classification=SizeClassification.SMALL,
+                estimated_units=1,
+                recommended_dev_count=1,
+            ),
+        )
+        mock_analyst.analyze.return_value = enriched
+
+        with patch(
+            "pipeline.Pipeline._load_client_profile", return_value=fake_profile
+        ):
+            await pipeline.process(sample_ticket)
+
+        mock_jira.transition_status.assert_called_once_with(
+            sample_ticket.id, "Active"
+        )
+
+    async def test_enriched_never_transitions_to_done_status(
+        self,
+        pipeline: Pipeline,
+        mock_analyst: AsyncMock,
+        mock_jira: AsyncMock,
+        sample_ticket: TicketPayload,
+    ) -> None:
+        """Bug regression: profile with done_status="Resolved" used to
+        trigger ``target_status = "Resolved"`` because the old
+        conditional was ``in_progress_status if done_status == "Done"
+        else done_status`` — closing the ticket before L2 even ran.
+        After the fix, in_progress_status wins unconditionally and the
+        ticket can never be transitioned to done_status at ingest."""
+        from types import SimpleNamespace
+
+        fake_profile = SimpleNamespace(
+            name="custom-workflow",
+            done_status="Resolved",  # not "Done"
+            in_progress_status="In Progress",
+            quick_label="ai-quick",
+            client_repo_path="",
+            platform_profile="",
+            source_control={},
+        )
+        enriched = EnrichedTicket(
+            **sample_ticket.model_dump(),
+            generated_acceptance_criteria=["AC"],
+            size_assessment=SizeAssessment(
+                classification=SizeClassification.SMALL,
+                estimated_units=1,
+                recommended_dev_count=1,
+            ),
+        )
+        mock_analyst.analyze.return_value = enriched
+
+        with patch(
+            "pipeline.Pipeline._load_client_profile", return_value=fake_profile
+        ):
+            await pipeline.process(sample_ticket)
+
+        # Critical assertion: the ticket must NOT be transitioned to
+        # the done_status at ingest.
+        target = mock_jira.transition_status.call_args[0][1]
+        assert target != "Resolved", (
+            f"Ingest must not transition to done_status ({target!r})"
+        )
+        assert target == "In Progress"
 
 
 # --- Route: Info Request ---
@@ -588,3 +839,103 @@ class TestImageAttachmentDownload:
 
         # download_image_attachments should not be called
         mock_jira.download_image_attachments.assert_not_called()
+
+
+class TestConcurrentProcessTempDirs:
+    """Bug regression: Pipeline is a module-level singleton (see
+    main._get_pipeline), and temp-dir tracking used to live on
+    ``self._temp_dirs``. Two concurrent webhook tasks shared that list,
+    so ticket A's cleanup would rmtree ticket B's in-flight attachment
+    and figma directories before B's spawn process could read them.
+    Fixed by making temp_dirs a per-call local variable passed through
+    the download / figma / cleanup helpers. These tests prove the fix
+    by running two ``process()`` calls concurrently and verifying both
+    tickets' directories survive long enough for each ticket to see
+    them before its own cleanup runs."""
+
+    async def test_temp_dirs_are_not_shared_across_concurrent_processes(
+        self,
+        settings: Settings,
+        mock_jira: AsyncMock,
+        sample_ticket: TicketPayload,
+        tmp_path: Path,
+    ) -> None:
+        import asyncio
+
+        # A Pipeline instance shared by both "webhook" calls — exactly
+        # the singleton pattern main.py uses in production.
+        shared_analyst = AsyncMock()
+
+        def _make_enriched(ticket_id: str) -> EnrichedTicket:
+            return EnrichedTicket(
+                source=TicketSource.JIRA,
+                id=ticket_id,
+                ticket_type=TicketType.STORY,
+                title=f"Concurrent ticket {ticket_id}",
+                description="Test",
+                generated_acceptance_criteria=["AC"],
+                size_assessment=SizeAssessment(
+                    classification=SizeClassification.SMALL,
+                    estimated_units=1,
+                    recommended_dev_count=1,
+                ),
+            )
+
+        # Analyst returns a different enriched ticket per call so the
+        # two process() invocations have distinct payloads.
+        call_sequence = iter([_make_enriched("CONC-1"), _make_enriched("CONC-2")])
+        shared_analyst.analyze.side_effect = lambda *_args, **_kw: next(call_sequence)
+
+        pipe = Pipeline(
+            settings=settings,
+            analyst=shared_analyst,
+            jira_adapter=mock_jira,
+        )
+
+        # Instrument _cleanup_temp_dirs so we can see what each call
+        # believes belongs to it. The recorded list must NEVER include
+        # the other call's directories.
+        cleanup_calls: list[list[str]] = []
+        original_cleanup = Pipeline._cleanup_temp_dirs
+
+        def _spy_cleanup(log: object, temp_dirs: list[str]) -> None:
+            cleanup_calls.append(list(temp_dirs))
+            original_cleanup(log, temp_dirs)
+
+        with patch("pipeline.subprocess.Popen") as mock_popen, \
+             patch.object(
+                 Pipeline, "_cleanup_temp_dirs", staticmethod(_spy_cleanup)
+             ):
+            mock_proc = MagicMock()
+            mock_proc.poll.return_value = None
+            mock_popen.return_value = mock_proc
+
+            # Fire two process() calls concurrently.
+            t1 = TicketPayload(
+                source=TicketSource.JIRA,
+                id="CONC-1",
+                ticket_type=TicketType.STORY,
+                title="t1",
+                description="",
+            )
+            t2 = TicketPayload(
+                source=TicketSource.JIRA,
+                id="CONC-2",
+                ticket_type=TicketType.STORY,
+                title="t2",
+                description="",
+            )
+            await asyncio.gather(pipe.process(t1), pipe.process(t2))
+
+        # Each cleanup call must operate on its own list — no directories
+        # from the other concurrent call can appear. In this mock setup
+        # no temp dirs are created (no figma, no attachments), so both
+        # lists must simply be empty. Critically, there is NO shared
+        # _temp_dirs attribute on the Pipeline anymore — previously the
+        # first cleanup would have reported both calls' dirs and the
+        # second would have reported zero.
+        assert len(cleanup_calls) == 2
+        assert all(isinstance(c, list) for c in cleanup_calls)
+
+        # Pipeline no longer carries instance-level temp_dirs state.
+        assert not hasattr(pipe, "_temp_dirs")

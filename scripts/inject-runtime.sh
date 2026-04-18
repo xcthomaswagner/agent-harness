@@ -115,6 +115,18 @@ if [[ -n "$PLATFORM_PROFILE" ]]; then
         echo "[inject] Platform conventions copied"
     fi
 
+    # Copy any additional profile reference files (non-supplement, non-conventions)
+    # These are referenced BY supplements but need to live alongside the skill
+    for ref_file in "$PROFILE_DIR"/*.md; do
+        [[ -f "$ref_file" ]] || continue
+        ref_name="$(basename "$ref_file")"
+        case "$ref_name" in
+            *_SUPPLEMENT.md|CONVENTIONS.md|PROFILE.md|REFERENCE_URLS.md) continue ;;
+        esac
+        cp "$ref_file" "$TARGET_DIR/.claude/skills/implement/$ref_name"
+        echo "[inject] Profile reference: $ref_name -> implement/"
+    done
+
     echo "[inject] Platform profile: $PLATFORM_PROFILE"
 fi
 

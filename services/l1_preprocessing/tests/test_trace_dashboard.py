@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from main import app
 from trace_dashboard import _classify_traces
 from trace_dashboard import _e as _escape
+from tracer import ARTIFACT_TOOL_INDEX
 
 
 class TestEscape:
@@ -58,6 +59,39 @@ class TestTracesListEndpoint:
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
         assert "T-1" in resp.text
+
+    async def test_xss_in_pr_url_link_text(self) -> None:
+        """Bug regression: the traces table and detail summary bar both
+        render ``#{pr_url.split("/")[-1]}`` as link text. Before the fix,
+        neither wrapped the derived PR number in _e(), so a crafted
+        ``pr_url`` ending in ``</a><script>`` broke out of the anchor and
+        injected arbitrary script tags into the dashboard page. Only the
+        ``href`` side was escaped (via _safe_url + _e)."""
+        evil_url = "https://x/</a><script>alert('pr-xss')</script>"
+        evil_traces = [{
+            "ticket_id": "T-XSS-1",
+            "trace_id": "x",
+            "started_at": "2026-01-01",
+            "run_started_at": "2026-01-01",
+            "completed_at": "2026-01-01",
+            "duration": "", "status": "Complete",
+            "pr_url": evil_url,
+            "review_verdict": "", "qa_result": "",
+            "pipeline_mode": "", "phases": 1, "entries": 1,
+        }]
+        with (
+            patch("trace_dashboard.list_traces", return_value=evil_traces),
+            patch("trace_dashboard.count_traces", return_value=1),
+            patch("trace_dashboard.read_trace", return_value=[]),
+        ):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.get("/traces")
+        # The attack fragment must NOT appear unescaped in the response.
+        assert "<script>alert('pr-xss')</script>" not in resp.text
+        assert "alert(&#x27;pr-xss&#x27;)" in resp.text or "&lt;script&gt;" in resp.text
 
     async def test_xss_in_ticket_id(self) -> None:
         evil_traces = [{
@@ -232,6 +266,41 @@ class TestTraceDetailEndpoint:
         # Raw events section
         assert "Raw Events" in resp.text
 
+    async def test_render_detail_includes_discuss_box(self) -> None:
+        """The detail page renders the audited Discuss-with-Claude disclosure
+        next to the cheap local-investigate disclosure. The box hands the
+        developer the three-step recipe:
+
+        1. POST to /traces/<id>/discuss (commit 7) to mint a session token
+        2. Run the returned investigate command
+        3. Pipe the saved transcript through capture_discuss_output.py
+           (commit 9) to extract the post-mortem-analyst's three sections.
+        """
+        entries = [
+            {"trace_id": "x", "timestamp": "2026-01-01T10:00:00Z",
+             "phase": "webhook", "event": "jira_webhook_received",
+             "source": "jira"},
+            {"trace_id": "x", "timestamp": "2026-01-01T10:05:00Z",
+             "phase": "complete", "event": "Pipeline complete",
+             "source": "agent", "pr_url": "https://github.com/test/pr/1"},
+        ]
+        with patch("trace_dashboard.read_trace", return_value=entries):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.get("/traces/DISCUSS-1")
+        assert resp.status_code == 200
+        # Summary label — emoji is intentional; the task contract calls for
+        # the literal 🔍 character so the dashboard button is visually
+        # distinct from the no-auth investigate_box above it.
+        assert "\U0001f50d Open in Claude for investigation" in resp.text
+        # Command body mentions the capture script by name so the dev can
+        # see the full workflow without leaving the dashboard.
+        assert "capture_discuss_output.py" in resp.text
+        # And the discuss endpoint URL the first step hits.
+        assert "/traces/DISCUSS-1/discuss" in resp.text
+
     async def test_missing_ticket(self) -> None:
         with patch("trace_dashboard.read_trace", return_value=[]):
             transport = ASGITransport(app=app)
@@ -241,6 +310,54 @@ class TestTraceDetailEndpoint:
                 resp = await client.get("/traces/MISSING-99")
         assert resp.status_code == 200
         assert "No trace found" in resp.text
+
+    async def test_auto_refresh_in_progress_trace(self) -> None:
+        """In-progress traces must emit a meta-refresh so the tab picks up new
+        events without manual reload. Regression test for the XCSF30-88424
+        post-mortem: the detail page rendered a stale snapshot while the
+        pipeline was still running."""
+        entries = [
+            {"trace_id": "x", "timestamp": "2026-01-01T10:00:00Z",
+             "phase": "webhook", "event": "ado_webhook_received",
+             "source": "ado"},
+            {"trace_id": "x", "timestamp": "2026-01-01T10:00:05Z",
+             "phase": "pipeline", "event": "processing_started"},
+            {"trace_id": "x", "timestamp": "2026-01-01T10:01:00Z",
+             "phase": "qa_validation", "event": "QA complete",
+             "source": "agent"},
+        ]
+        with patch("trace_dashboard.read_trace", return_value=entries):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.get("/traces/INPROGRESS-1")
+        assert resp.status_code == 200
+        # Status derives to "QA Done" (not terminal) so refresh meta should be present
+        assert '<meta http-equiv="refresh" content="5">' in resp.text
+
+    async def test_no_auto_refresh_on_completed_trace(self) -> None:
+        """Terminal traces must NOT emit meta-refresh so we don't hammer L1
+        with reloads of long-finished runs."""
+        entries = [
+            {"trace_id": "x", "timestamp": "2026-01-01T10:00:00Z",
+             "phase": "webhook", "event": "jira_webhook_received",
+             "source": "jira"},
+            {"trace_id": "x", "timestamp": "2026-01-01T10:05:00Z",
+             "phase": "complete", "event": "Pipeline complete",
+             "source": "agent", "pr_url": "https://github.com/test/pr/1",
+             "review_verdict": "APPROVED", "qa_result": "PASS",
+             "pipeline_mode": "simple", "units": 1},
+        ]
+        with patch("trace_dashboard.read_trace", return_value=entries):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.get("/traces/DONE-1")
+        assert resp.status_code == 200
+        # Status is "Complete" (terminal) so NO refresh meta should be emitted
+        assert 'http-equiv="refresh"' not in resp.text
 
     async def test_xss_in_event(self) -> None:
         entries = [
@@ -255,6 +372,29 @@ class TestTraceDetailEndpoint:
             ) as client:
                 resp = await client.get("/traces/XSS-1")
         assert 'onerror="alert' not in resp.text
+
+    async def test_xss_in_pr_url_summary_bar(self) -> None:
+        """Bug regression: the detail-view summary bar emits
+        ``#{pr_url.split("/")[-1]}`` as link text. Before the fix, that
+        derived PR number was not passed through _e(), so a crafted
+        ``pr_url`` ending in ``</a><script>`` escaped the anchor tag."""
+        evil_url = "https://x/</a><script>alert('detail-pr-xss')</script>"
+        entries = [
+            {"trace_id": "x", "timestamp": "2026-01-01",
+             "phase": "ticket_read", "event": "Pipeline started",
+             "source": "agent"},
+            {"trace_id": "x", "timestamp": "2026-01-01T00:10:00Z",
+             "phase": "complete", "event": "Pipeline complete",
+             "source": "agent", "pr_url": evil_url},
+        ]
+        with patch("trace_dashboard.read_trace", return_value=entries):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.get("/traces/XSS-PR-1")
+        assert resp.status_code == 200
+        assert "<script>alert('detail-pr-xss')</script>" not in resp.text
 
     async def test_phase_duration_bar(self) -> None:
         entries = [
@@ -313,6 +453,31 @@ class TestTraceDetailEndpoint:
             ) as client:
                 resp = await client.get("/traces/TOK-1")
         assert "1,500 in" in resp.text
+
+    async def test_tool_usage_panel_renders_when_tool_index_present(self) -> None:
+        """Integration: /traces/<id> shows Tool Usage panel when tool_index artifact is present."""
+        entries = [
+            {"trace_id": "x", "ticket_id": "TOOLS-1",
+             "timestamp": "2026-01-01T10:00:00Z",
+             "phase": "webhook", "event": "received", "source": "l1"},
+            {"trace_id": "x", "ticket_id": "TOOLS-1",
+             "timestamp": "2026-01-01T10:05:00Z",
+             "phase": "artifact", "event": ARTIFACT_TOOL_INDEX,
+             "index": {
+                 "tool_call_count": 7,
+                 "assistant_turns": 4,
+                 "tool_counts": {"Read": 4, "Bash": 3},
+             }},
+        ]
+        with patch("trace_dashboard.read_trace", return_value=entries):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.get("/traces/TOOLS-1")
+        assert resp.status_code == 200
+        assert "Tool Usage" in resp.text
+        assert "7 tool calls across 4 assistant turns" in resp.text
 
     async def test_error_box_displayed(self) -> None:
         entries = [

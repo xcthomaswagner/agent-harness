@@ -1,0 +1,520 @@
+"""Self-learning dashboard — /autonomy/learning.
+
+Server-rendered HTML triage view for lesson candidates produced by
+the miner. Reuses the Langfuse-style base CSS + badge palette from
+``dashboard_common`` so the view blends with ``/autonomy`` and
+``/dashboard``.
+
+Phase B scope: list candidates, expand evidence, drive approve /
+reject / snooze via the POST endpoints in ``learning_api``. Phase
+D will add a "PR opened" column once the PR opener lands.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from typing import Any
+from urllib.parse import quote as _url_quote
+from urllib.parse import urlencode as _urlencode
+
+from fastapi import APIRouter, Query
+from fastapi.responses import HTMLResponse
+
+from autonomy_store import (
+    autonomy_conn,
+    list_evidence_for_lessons,
+    list_latest_outcomes,
+    list_lesson_candidates,
+)
+from dashboard_common import (
+    LANGFUSE_BASE_CSS,
+    STANDARD_CARD_CSS,
+    STANDARD_TABLE_CSS,
+)
+from dashboard_common import badge as _badge
+from dashboard_common import escape_html as _e
+from dashboard_common import fmt_ts as _fmt_ts
+from dashboard_common import safe_url as _safe_url
+from learning_miner.outcomes import Verdict
+
+router = APIRouter()
+
+
+# Status → badge class. proposed/snoozed/draft_ready are intermediate;
+# approved/applied are terminal-positive; rejected/reverted/stale terminal-negative.
+_STATUS_BADGE: dict[str, str] = {
+    "proposed": "badge-secondary",
+    "draft_ready": "badge-blue",
+    "snoozed": "badge-warning",
+    "approved": "badge-success",
+    "applied": "badge-success",
+    "rejected": "badge-error",
+    "reverted": "badge-error",
+    "stale": "badge-secondary",
+}
+
+_SEVERITY_BADGE: dict[str, str] = {
+    "info": "badge-secondary",
+    "warn": "badge-warning",
+    "critical": "badge-error",
+}
+
+# Outcome verdict → badge class. ``pending`` is the default before
+# window elapses; ``human_reedit`` trumps any metric-based verdict
+# because a human edit is a stronger signal than metric drift.
+# Keys sourced from the Verdict StrEnum so an enum rename/addition
+# in outcomes.py surfaces here as a missing-key instead of silently
+# falling through to ``badge-secondary`` via ``_mapped_badge``.
+_VERDICT_BADGE: dict[str, str] = {
+    Verdict.PENDING.value: "badge-secondary",
+    Verdict.CONFIRMED.value: "badge-success",
+    Verdict.NO_CHANGE.value: "badge-blue",
+    Verdict.REGRESSED.value: "badge-error",
+    Verdict.HUMAN_REEDIT.value: "badge-error",
+}
+
+
+# Base + shared card/table CSS come from dashboard_common. The
+# learning-dashboard-local additions here are: h3 heading, separator-
+# style table border, per-row top-aligned cells (the dashboard wraps
+# long rows), the <details> evidence disclosure, approval/reject/
+# snooze action buttons, and the unified-diff preformatted block.
+# Note that learning uses ``vertical-align: top`` and ``padding: 10px 12px``
+# in tbody td, which differs from the shared default — the override
+# lands after concatenation so it wins.
+_LOCAL_CSS = """
+h3 { font-size: 13px; font-weight: 600; color: #334155; margin: 8px 0; }
+h2 { margin: 8px 0; }
+.meta { font-size: 11.2px; color: #64748B; }
+.selector { margin: 16px 0; font-size: 12.5px; }
+.selector a, .selector span.current {
+  margin: 0 4px; padding: 3px 10px; border-radius: 6px;
+}
+.selector a { color: #4D45E5; }
+.selector span.current { background: #0F172A; color: #F7F9FB; font-weight: 600; }
+table { width: 100%; border-collapse: separate; border-spacing: 0;
+  border: 1px solid #E2E8F0; border-radius: 8px; overflow: hidden;
+  margin-top: 12px; font-size: 12px; }
+thead th {
+  background: #F7F9FB; color: #64748B; font-weight: 500; font-size: 11.2px;
+  text-align: left; padding: 10px 12px; border-bottom: 1px solid #E2E8F0;
+  white-space: nowrap;
+}
+tbody td {
+  padding: 10px 12px; border-bottom: 1px solid #E2E8F0; vertical-align: top;
+}
+details.evidence summary {
+  cursor: pointer; color: #4D45E5; font-size: 11.2px; padding: 4px 0;
+}
+details.evidence ul { margin: 6px 0 6px 18px; font-size: 11.5px; color: #334155; }
+details.evidence li { margin: 3px 0; }
+.actions { display: inline-flex; gap: 6px; }
+.btn {
+  border: 1px solid #CBD5E1; background: #FFFFFF; color: #0F172A;
+  padding: 3px 10px; border-radius: 6px; font-size: 11.5px; font-weight: 600;
+  cursor: pointer;
+}
+.btn-draft   { border-color: #4D45E5; color: #4D45E5; }
+.btn-approve { border-color: #12A87B; color: #12A87B; }
+.btn-reject  { border-color: #DB2626; color: #DB2626; }
+.btn-snooze  { border-color: #C79004; color: #C79004; }
+.btn[disabled] { opacity: 0.45; cursor: default; }
+pre.delta {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px; background: #F8FAFC; padding: 6px 8px;
+  border: 1px solid #E2E8F0; border-radius: 4px;
+  white-space: pre-wrap; word-break: break-word;
+  max-width: 540px; margin-top: 4px;
+}
+"""
+
+_STYLES = LANGFUSE_BASE_CSS + STANDARD_CARD_CSS + STANDARD_TABLE_CSS + _LOCAL_CSS
+
+
+_PROFILE_ANY = "(all)"
+
+
+def _mapped_badge(text: str, mapping: dict[str, str]) -> str:
+    return _badge(text, mapping.get(text, "badge-secondary"))
+
+
+def _learning_href(*, client_profile: str | None, status: str | None) -> str:
+    """Build a /autonomy/learning URL with filter params, skipping empties."""
+    params = {
+        k: v
+        for k, v in (("client_profile", client_profile), ("status", status))
+        if v
+    }
+    query = _urlencode(params) if params else ""
+    return "/autonomy/learning" + (f"?{query}" if query else "")
+
+
+def _render_selector(
+    profiles: list[str],
+    current_profile: str | None,
+    current_status: str | None,
+) -> str:
+    """Render profile + status filter selectors above the table.
+
+    Keeps the ``/autonomy/learning`` URL the one source of filter
+    state so the view is bookmarkable and bots can triage by URL.
+    """
+    parts: list[str] = []
+    parts.append('<div class="selector"><strong>Profile:</strong> ')
+    if not current_profile:
+        parts.append(f'<span class="current">{_e(_PROFILE_ANY)}</span>')
+    else:
+        href = _learning_href(client_profile=None, status=current_status)
+        parts.append(f'<a href="{_e(href)}">{_e(_PROFILE_ANY)}</a>')
+    for profile in profiles:
+        if profile == current_profile:
+            parts.append(f'<span class="current">{_e(profile)}</span>')
+        else:
+            href = _learning_href(
+                client_profile=profile, status=current_status
+            )
+            parts.append(f'<a href="{_e(href)}">{_e(profile)}</a>')
+    parts.append("</div>")
+    parts.append('<div class="selector"><strong>Status:</strong> ')
+    # All statuses from _LESSON_STATUS_TRANSITIONS, including the
+    # terminal ones. Previously ``reverted`` and ``stale`` were
+    # missing — operators couldn't filter to those via the UI and
+    # had to hand-craft the URL. The dashboard already renders them
+    # via _STATUS_BADGE so the filter selector should cover them too.
+    status_filters: list[str | None] = [
+        None, "proposed", "draft_ready", "approved", "applied",
+        "rejected", "reverted", "snoozed", "stale",
+    ]
+    for s in status_filters:
+        label = s or "all"
+        if s == current_status:
+            parts.append(f'<span class="current">{_e(label)}</span>')
+        else:
+            href = _learning_href(client_profile=current_profile, status=s)
+            parts.append(f'<a href="{_e(href)}">{_e(label)}</a>')
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _render_evidence_list(evidence_rows: list[sqlite3.Row]) -> str:
+    if not evidence_rows:
+        return '<span class="meta">No evidence rows.</span>'
+    items: list[str] = []
+    for r in evidence_rows:
+        trace_id = r["trace_id"] or ""
+        # quote() to handle ticket IDs with slashes or other URL-unsafe
+        # chars; _e() on the displayed text so HTML-unsafe chars don't
+        # escape the anchor.
+        trace_link = (
+            f'<a href="/traces/{_url_quote(trace_id, safe="")}">'
+            f'{_e(trace_id)}</a>'
+            if trace_id
+            else '<span class="meta">(no trace)</span>'
+        )
+        source_ref = _e(r["source_ref"] or "")
+        snippet = _e(r["snippet"] or "")
+        observed = _e(_fmt_ts(r["observed_at"]))
+        items.append(
+            f"<li>{trace_link} · "
+            f'<span class="meta">{observed} · {source_ref}</span><br>'
+            f"{snippet}</li>"
+        )
+    return (
+        "<details class='evidence'>"
+        f"<summary>Evidence ({len(evidence_rows)})</summary>"
+        f"<ul>{''.join(items)}</ul>"
+        "</details>"
+    )
+
+
+def _render_action_buttons(lesson_id: str, status: str) -> str:
+    """Render action buttons as disabled HTML ``<button>`` elements.
+
+    The dashboard is server-rendered without JS, so a form-submit
+    flow would require a round-trip that reads the admin token from
+    somewhere — deferred. For now the operator reads the POST
+    endpoint off the ``title``/``data-endpoint`` attributes and hits
+    it via curl (or a tool that injects the admin header). Plain
+    ``<a>`` tags would invite clicks that issue a GET (405).
+
+    Per-button enablement mirrors the store's transition table
+    (``_LESSON_STATUS_TRANSITIONS`` in autonomy_store). The previous
+    blanket ``terminal`` check disabled Reject on ``approved`` even
+    though the store allows ``approved -> rejected``, and disabled
+    Approve on ``approved`` even though /approve is re-entrable for
+    PR-opener retry (see learning_api.post_approve).
+    """
+    # Explicit per-action enablement mirrors _LESSON_STATUS_TRANSITIONS
+    # + the re-entrable approve contract. Mis-disabling is worse than
+    # wrongly-enabling: the API still validates and returns 409, but
+    # a disabled button hides a legal action.
+    approve_ok_from = {"draft_ready", "approved"}
+    reject_ok_from = {"proposed", "draft_ready", "snoozed", "approved"}
+    snooze_ok_from = {"proposed"}
+    buttons: list[tuple[str, str, str, bool]] = [
+        ("Draft diff", "draft", "btn btn-draft", status != "proposed"),
+        ("Approve", "approve", "btn btn-approve", status not in approve_ok_from),
+        ("Reject", "reject", "btn btn-reject", status not in reject_ok_from),
+        ("Snooze", "snooze", "btn btn-snooze", status not in snooze_ok_from),
+    ]
+    out: list[str] = ['<div class="actions">']
+    for label, action, cls, disabled in buttons:
+        # Build endpoint as a raw URL, THEN ``_e()`` for each HTML
+        # context. The previous code baked ``_e()`` into the endpoint
+        # string and then ``_e()``-ed the title (which embedded the
+        # endpoint) a second time — double-escaping ``&lt;`` to
+        # ``&amp;lt;`` in the tooltip while leaving data-endpoint
+        # single-escaped. Inconsistent rendering for any lesson_id
+        # with HTML-special chars. In practice lesson_ids are
+        # LSN-<hex> so this never manifested, but the fix is
+        # defense-in-depth against a future id scheme.
+        endpoint = f"/api/learning/candidates/{lesson_id}/{action}"
+        if disabled:
+            tooltip = f"Disabled — current status is {status}"
+        else:
+            tooltip = f"POST {endpoint} (requires X-Autonomy-Admin-Token)"
+        out.append(
+            f'<button class="{_e(cls)}" disabled '
+            f'data-endpoint="{_e(endpoint)}" '
+            f'title="{_e(tooltip)}">{_e(label)}</button>'
+        )
+    out.append("</div>")
+    return "".join(out)
+
+
+def _format_proposed_delta(raw_json: str) -> str:
+    """Pretty-print a proposed_delta_json blob into a <pre> block.
+
+    Only the keys humans care about when triaging — target_path,
+    edit_type, anchor, rationale_md, after — are shown. Unknown
+    shapes render as-is so future detector variants stay visible.
+
+    ``unified_diff`` (added by /draft) is separated out so its
+    multi-line content doesn't break the visual ``key: value``
+    structure of the other fields. Without the split, a follow-on
+    key like ``drafter_origin`` would appear to dangle below the diff
+    as if it were part of the diff's body.
+    """
+    if not raw_json:
+        return ""
+    try:
+        obj = json.loads(raw_json)
+    except (ValueError, TypeError):
+        return f'<pre class="delta">{_e(raw_json)}</pre>'
+    if not isinstance(obj, dict):
+        return f'<pre class="delta">{_e(raw_json)}</pre>'
+    ordered_keys = (
+        "target_path",
+        "edit_type",
+        "anchor",
+        "rationale_md",
+        "after",
+        "before",
+    )
+    lines: list[str] = []
+    for k in ordered_keys:
+        if k in obj:
+            val = obj[k]
+            lines.append(f"{k}: {val}")
+    # Suppress multi-line diff from the flat key/value block so it
+    # doesn't visually merge with subsequent single-line keys.
+    unified_diff = obj.get("unified_diff")
+    for k, v in obj.items():
+        if k in ordered_keys or k == "unified_diff":
+            continue
+        lines.append(f"{k}: {v}")
+    body = "\n".join(lines)
+    out = f'<pre class="delta">{_e(body)}</pre>'
+    if isinstance(unified_diff, str) and unified_diff.strip():
+        out += f'<pre class="delta">{_e(unified_diff)}</pre>'
+    return out
+
+
+def _render_outcome_fragment(
+    outcome: sqlite3.Row, *, candidate_status: str = ""
+) -> str:
+    """Render a compact verdict badge + pre/post metric tooltip.
+
+    Rendered inline in the scope cell under the PR link so operators
+    can see at a glance whether a merged lesson helped. Full metric
+    detail lives in the ``title`` attribute so only a hover pulls
+    the numbers — keeps the row compact on a long dashboard.
+
+    The Revert button is suppressed when ``candidate_status`` is
+    already ``reverted`` — a second /revert would return 409 since
+    ``reverted`` is terminal, so the button was confusing UX.
+    """
+    verdict = outcome["verdict"] or "pending"
+
+    def _fmt(value: float | None) -> str:
+        return "—" if value is None else f"{value * 100:.1f}%"
+
+    tooltip = (
+        f"FPA: {_fmt(outcome['pre_fpa'])} → {_fmt(outcome['post_fpa'])}"
+        f" · Escape: {_fmt(outcome['pre_escape_rate'])} → "
+        f"{_fmt(outcome['post_escape_rate'])}"
+        f" · Catch: {_fmt(outcome['pre_catch_rate'])} → "
+        f"{_fmt(outcome['post_catch_rate'])}"
+        f" · reedits: {int(outcome['human_reedit_count'])}"
+    )
+    badge_cls = _VERDICT_BADGE.get(verdict, "badge-secondary")
+    # Regressed / human_reedit rows expose a Revert button with the
+    # POST endpoint in the tooltip — same curl-only UX as the other
+    # action buttons (no JS to read the admin token client-side).
+    # Suppressed when the lesson is already reverted: a second /revert
+    # would hit 409 since the store's transition table marks
+    # ``reverted`` terminal.
+    revert_html = ""
+    _revertable = {Verdict.REGRESSED.value, Verdict.HUMAN_REEDIT.value}
+    if verdict in _revertable and candidate_status != "reverted":
+        lesson_id = str(outcome["lesson_id"] or "")
+        # Raw endpoint; let the HTML attribute contexts escape once.
+        endpoint = f"/api/learning/candidates/{lesson_id}/revert"
+        revert_html = (
+            f'<button class="btn btn-reject" disabled '
+            f'data-endpoint="{_e(endpoint)}" '
+            f'title="{_e(f"POST {endpoint} (requires X-Autonomy-Admin-Token)")}">'
+            "Revert</button>"
+        )
+    return (
+        f'<br><span class="badge {_e(badge_cls)}" title="{_e(tooltip)}">'
+        f"{_e(verdict)}</span> {revert_html}"
+    )
+
+
+def _render_candidate_row(
+    candidate: sqlite3.Row,
+    evidence: list[sqlite3.Row],
+    outcome: sqlite3.Row | None = None,
+) -> str:
+    status = candidate["status"] or ""
+    severity = candidate["severity"] or "info"
+    pr_url = candidate["pr_url"] or ""
+    scope_cell = (
+        f"<code>{_e(candidate['scope_key'])}</code><br>"
+        f'<span class="meta">detector: {_e(candidate["detector_name"])} '
+        f'· pattern: {_e(candidate["pattern_key"])}</span>'
+    )
+    if pr_url:
+        # Only render real https URLs as links; anything else (empty,
+        # file://) gets safe_url'd to '#' so a poisoned row can't
+        # inject a javascript: scheme.
+        scope_cell += (
+            f"<br><a href=\"{_safe_url(pr_url)}\" target=\"_blank\" "
+            f"rel=\"noreferrer noopener\">PR →</a>"
+        )
+    if outcome is not None:
+        scope_cell += _render_outcome_fragment(
+            outcome, candidate_status=status
+        )
+    first_seen = _fmt_ts(candidate["detected_at"])
+    last_seen = _fmt_ts(candidate["last_seen_at"])
+    time_cell = f"{_e(last_seen)}<br><span class='meta'>first {_e(first_seen)}</span>"
+    profile_cell = (
+        f"{_e(candidate['client_profile'] or '—')}"
+        f"<br><span class='meta'>{_e(candidate['platform_profile'] or '')}</span>"
+    )
+    delta_html = _format_proposed_delta(candidate["proposed_delta_json"] or "")
+    evidence_html = _render_evidence_list(evidence)
+    actions_html = _render_action_buttons(candidate["lesson_id"], status)
+    return (
+        "<tr>"
+        f"<td>{_mapped_badge(status, _STATUS_BADGE)}<br>"
+        f"<span class='meta'>{_e(candidate['lesson_id'])}</span></td>"
+        f"<td>{profile_cell}</td>"
+        f"<td>{scope_cell}<br>{delta_html}</td>"
+        f"<td>{int(candidate['frequency'] or 0)}</td>"
+        f"<td>{_mapped_badge(severity, _SEVERITY_BADGE)}</td>"
+        f"<td>{time_cell}</td>"
+        f"<td>{evidence_html}</td>"
+        f"<td>{actions_html}</td>"
+        "</tr>"
+    )
+
+
+def _render_candidate_table(
+    rows: list[tuple[sqlite3.Row, list[sqlite3.Row], sqlite3.Row | None]],
+) -> str:
+    if not rows:
+        return (
+            '<p class="meta" style="margin-top:16px">'
+            "No lesson candidates match these filters. "
+            "Check that <code>LEARNING_MINER_ENABLED</code> is on "
+            "and a backfill has run.</p>"
+        )
+    body = "".join(
+        _render_candidate_row(c, ev, outcome) for c, ev, outcome in rows
+    )
+    return (
+        "<table>"
+        "<thead><tr>"
+        "<th>Status / Lesson</th>"
+        "<th>Profile</th>"
+        "<th>Scope · proposed delta</th>"
+        "<th>Frequency</th>"
+        "<th>Severity</th>"
+        "<th>Last seen</th>"
+        "<th>Evidence</th>"
+        "<th>Actions</th>"
+        "</tr></thead>"
+        f"<tbody>{body}</tbody></table>"
+    )
+
+
+def _list_distinct_profiles(conn: sqlite3.Connection) -> list[str]:
+    """Profiles that actually have candidates — avoids cluttering the
+    selector with empty profiles just because they exist in YAML.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT client_profile FROM lesson_candidates "
+        "WHERE client_profile != '' ORDER BY client_profile"
+    ).fetchall()
+    return [str(r["client_profile"]) for r in rows]
+
+
+@router.get("/autonomy/learning", response_class=HTMLResponse)
+async def get_learning_dashboard(
+    client_profile: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> HTMLResponse:
+    """Triage view for the self-learning miner's lesson candidates."""
+    with autonomy_conn() as conn:
+        profiles = _list_distinct_profiles(conn)
+        candidates = list_lesson_candidates(
+            conn,
+            status=status,
+            client_profile=client_profile,
+            limit=limit,
+        )
+        lesson_ids = [str(c["lesson_id"]) for c in candidates]
+        outcomes_by_id = list_latest_outcomes(conn, lesson_ids)
+        evidence_by_id = list_evidence_for_lessons(conn, lesson_ids)
+        enriched: list[tuple[Any, list[Any], Any]] = []
+        for c in candidates:
+            lid = str(c["lesson_id"])
+            evidence = evidence_by_id.get(lid, [])
+            outcome = outcomes_by_id.get(lid)
+            enriched.append((c, evidence, outcome))
+    selector_html = _render_selector(profiles, client_profile, status)
+    table_html = _render_candidate_table(enriched)
+    summary = (
+        f'<p class="meta">{len(candidates)} candidates shown '
+        f"(limit {limit}).</p>"
+    )
+    html_doc = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Self-learning</title>
+<style>{_STYLES}</style></head>
+<body><div class="page">
+<h1>Self-learning — lesson candidates</h1>
+<div class="meta" style="margin-bottom:8px">
+  <a href="/dashboard">Home</a> ·
+  <a href="/autonomy">Autonomy</a> ·
+  <a href="/traces">Traces</a>
+</div>
+{selector_html}
+{summary}
+{table_html}
+</div></body></html>"""
+    return HTMLResponse(content=html_doc)

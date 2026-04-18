@@ -8,68 +8,63 @@ Provides three views:
 
 from __future__ import annotations
 
-import html
+import re
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 
+from dashboard_common import (
+    LANGFUSE_BASE_CSS,
+)
+from dashboard_common import (
+    badge as _badge,
+)
+from dashboard_common import (
+    escape_html as _e,
+)
+from dashboard_common import (
+    fmt_dur as _fmt_dur,
+)
+from dashboard_common import (
+    fmt_ts as _fmt_ts,
+)
+from dashboard_common import (
+    safe_url as _safe_url,
+)
+from diagnostic import render_diagnostic_checklist, run_diagnostic_checklist
+from investigate_command import build_investigate_command
 from tracer import (
     build_span_tree,
     build_trace_list_row,
     compute_phase_durations,
     count_traces,
     extract_diagnostic_info,
+    find_run_start_idx,
     list_traces,
     read_trace,
 )
 
 router = APIRouter()
 
+
+def _safe_ticket_id(ticket_id: str) -> str:
+    """Validate ticket_id against path traversal. Mirrors main._validate_ticket_id."""
+    if not ticket_id or not re.fullmatch(r"[A-Za-z0-9_-]+", ticket_id):
+        raise HTTPException(status_code=400, detail="Invalid ticket_id")
+    return ticket_id
+
+
 # --- Langfuse Design System ---
+# Base CSS (body/typography/badge) imported from dashboard_common so
+# all dashboards stay in lockstep on palette and typography.
+_LANGFUSE_STYLES = LANGFUSE_BASE_CSS
 
-_LANGFUSE_STYLES = """
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  font-feature-settings: "rlig" 1, "calt" 1;
-  background: #FFFFFF; color: #0F172A; font-size: 13.2px; line-height: 1.5;
-}
-a { color: #4D45E5; text-decoration: none; }
-a:hover { text-decoration: underline; }
-.page { max-width: 1400px; margin: 0 auto; padding: 24px; }
-h1 { font-size: 20.8px; font-weight: 600; color: #0F172A; }
-.meta { font-size: 11.2px; color: #64748B; }
-.badge {
-  display: inline-flex; align-items: center; border-radius: 6px;
-  font-weight: 600; font-size: 11.2px; padding: 1px 8px; white-space: nowrap;
-}
-.badge-success { background: #DBFBE7; color: #124D49; }
-.badge-error { background: #FBE6F1; color: #DB2626; }
-.badge-warning { background: #FEFCE8; color: #C79004; }
-.badge-blue { background: #DAEAFD; color: #3B82F5; }
-.badge-secondary { background: #F1F5F9; color: #0F172A; }
-"""
-
-# Status → badge class mapping
-_STATUS_BADGE: dict[str, str] = {
-    "Complete": "badge-success",
-    "PR Created": "badge-success",
-    "Escalated": "badge-error",
-    "Agent Done (no PR)": "badge-error",
-    "Dispatched": "badge-error",
-    "QA Done": "badge-warning",
-    "Review Done": "badge-blue",
-    "Implementing": "badge-blue",
-    "Planned": "badge-blue",
-    "Merged": "badge-blue",
-    "CI Fix": "badge-warning",
-    "Processing": "badge-blue",
-    "Enriched": "badge-secondary",
-    "Received": "badge-secondary",
-}
+# Status → badge class mapping — imported from the shared module so
+# trace_dashboard and unified_dashboard cannot drift. Aliased to the
+# existing private name so call sites below are unchanged.
+from dashboard_common import STATUS_BADGE as _STATUS_BADGE  # noqa: E402
 
 # Phase colors for duration bar and span icons
 _PHASE_COLORS: dict[str, str] = {
@@ -91,55 +86,36 @@ _STUCK_THRESHOLDS: dict[str, float] = {
     "Planned": 2, "Implementing": 2, "Merged": 2,
     "Review Done": 2, "QA Done": 2, "PR Created": 2, "CI Fix": 2,
 }
-_FAILED_STATUSES = {"Escalated", "Agent Done (no PR)"}
+_FAILED_STATUSES = {"Escalated", "Agent Done (no PR)", "Failed", "Timed Out"}
 _COMPLETED_STATUSES = {"Complete"}
 
-
-def _e(text: str) -> str:
-    """HTML-escape a string."""
-    return html.escape(str(text), quote=True)
-
-
-def _safe_url(url: str) -> str:
-    """Return URL only if safe scheme."""
-    s = url.strip().lower()
-    return url if s.startswith("https://") or s.startswith("http://") else "#"
+# Statuses where the pipeline has finished running (no live updates expected).
+# Derived from the two existing sets plus a few post-pipeline states so any
+# future addition to _FAILED_STATUSES or _COMPLETED_STATUSES propagates
+# automatically to the detail-page auto-refresh gate.
+_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    _FAILED_STATUSES | _COMPLETED_STATUSES | {"PR Created", "Merged", "Cleaned Up"}
+)
 
 
-def _fmt_dur(seconds: float) -> str:
-    """Format seconds as Nm Ss."""
-    if seconds <= 0:
-        return "0s"
-    m, s = int(seconds // 60), int(seconds % 60)
-    return f"{m}m {s}s" if m else f"{s}s"
-
-
-def _badge(text: str, cls: str) -> str:
-    """Render a badge span."""
-    return f'<span class="badge {cls}">{_e(text)}</span>'
-
-
-def _fmt_ts(ts: str) -> str:
-    """Format ISO timestamp for display."""
-    if not ts:
-        return ""
-    try:
-        dt = datetime.fromisoformat(ts)
-        return dt.strftime("%b %d, %H:%M")
-    except (ValueError, TypeError):
-        return ts[:16]
-
+# HTML helpers (_e, _badge, _fmt_dur, _fmt_ts, _safe_url) are imported
+# from dashboard_common at the top of this file. Historically they were
+# duplicated across four dashboard modules with subtle drift risk.
 
 # --- Trace List (Table View) ---
 
 
 def _render_trace_table(traces: list[dict[str, Any]], total: int, page: int, per_page: int) -> str:
     """Render the Langfuse-style trace list table."""
-    # Enrich each trace with phase dots (use cached entries from list_traces)
+    # Enrich each trace with phase dots (use cached entries + run-start
+    # index from list_traces so build_trace_list_row doesn't re-scan).
     enriched: list[dict[str, Any]] = []
     for t in traces:
         entries = t.pop("_raw_entries", None) or read_trace(t["ticket_id"])
-        enriched.append(build_trace_list_row(t, entries))
+        run_start_idx = t.pop("_run_start_idx", None)
+        enriched.append(
+            build_trace_list_row(t, entries, run_start_idx=run_start_idx)
+        )
 
     # Compute stats
     n_complete = sum(1 for t in traces if t.get("status") in _COMPLETED_STATUSES)
@@ -175,6 +151,7 @@ def _render_trace_table(traces: list[dict[str, Any]], total: int, page: int, per
         '<select id="f-status" style="font-size:11.2px;padding:5px 8px;border:1px solid #E2E8F0;'
         'border-radius:6px;font-family:inherit" onchange="filterTable()">'
         '<option value="">All</option><option>Complete</option><option>Dispatched</option>'
+        '<option>Failed</option><option>Timed Out</option><option>Cleaned Up</option>'
         '<option>Escalated</option><option>Processing</option><option>Enriched</option>'
         '</select>'
         '<span class="meta" style="margin-right:-4px">Mode</span>'
@@ -191,6 +168,7 @@ def _render_trace_table(traces: list[dict[str, Any]], total: int, page: int, per
         status = t.get("status", "")
         badge_cls = _STATUS_BADGE.get(status, "badge-secondary")
         mode = t.get("pipeline_mode", "")
+        title = t.get("ticket_title", "")
         review = t.get("review_verdict", "")
         qa = t.get("qa_result", "")
         pr = t.get("pr_url", "")
@@ -207,31 +185,53 @@ def _render_trace_table(traces: list[dict[str, Any]], total: int, page: int, per
             _badge(qa, "badge-error") if qa else '<span class="meta">&mdash;</span>')
         pr_html = (
             f'<a href="{_e(_safe_url(pr))}" target="_blank" style="font-size:11.2px">'
-            f'#{pr.split("/")[-1]}</a>' if pr else '<span class="meta">&mdash;</span>')
+            f'#{_e(pr.split("/")[-1])}</a>' if pr else '<span class="meta">&mdash;</span>')
         mode_html = _badge(mode, "badge-secondary") if mode else '<span class="meta">&mdash;</span>'
 
-        dur_html = f'<span style="color:{dur_color}">{_e(duration)}</span>' if duration else '<span class="meta">&mdash;</span>'
+        # Shorten ">24h (multi-run)" to ">24h" for table display
+        dur_display = duration.replace(" (multi-run)", "") if duration else ""
+        dur_html = f'<span style="color:{dur_color};white-space:nowrap">{_e(dur_display)}</span>' if dur_display else '<span class="meta">&mdash;</span>'
         bar_html = (
-            f'<div style="display:inline-flex;width:60px;height:6px;border-radius:3px;'
-            f'background:#F1F5F9;vertical-align:middle;margin-left:6px">'
-            f'<div style="width:{dur_pct}%;background:{dur_color};border-radius:3px"></div>'
+            f'<div style="width:80px;height:5px;border-radius:3px;'
+            f'background:#F1F5F9;margin-top:3px">'
+            f'<div style="width:{dur_pct}%;background:{dur_color};border-radius:3px;height:100%"></div>'
             f'</div>' if dur_pct else ""
         )
 
-        dots_html = '<div style="display:flex;gap:2px">'
+        phase_labels = {
+            "ticket_read": "Read Ticket",
+            "planning": "Planning",
+            "plan_review": "Plan Review",
+            "implementation": "Implementation",
+            "merge": "Merge",
+            "security_scan": "Security Scan",
+            "code_review": "Code Review",
+            "judge": "Judge",
+            "qa_validation": "QA Validation",
+            "simplify": "Simplify",
+            "pr_created": "PR Created",
+            "complete": "Complete",
+        }
+        tooltip_parts = [phase_labels.get(d["phase"], d["phase"].replace("_", " ").title()) for d in dots]
+        tooltip = " → ".join(tooltip_parts)
+        dots_html = f'<div style="display:flex;gap:2px" title="{_e(tooltip)}">'
         for d in dots:
-            dots_html += f'<div style="width:8px;height:8px;border-radius:2px;background:{d["color"]}" title="{_e(d["phase"])}"></div>'
+            label = phase_labels.get(d["phase"], d["phase"].replace("_", " ").title())
+            dots_html += f'<div style="width:8px;height:8px;border-radius:2px;background:{d["color"]}" title="{_e(label)}"></div>'
         dots_html += '</div>'
 
         rows += (
             f'<tr data-status="{_e(status)}" data-mode="{_e(mode)}" data-ticket="{tid}" '
             f'onclick="location.href=\'/traces/{tid}\'" style="cursor:pointer">'
             f'<td><a href="/traces/{tid}" style="font-weight:500">{tid}</a></td>'
+            f'<td style="overflow:hidden;text-overflow:ellipsis;max-width:300px" '
+            f'title="{_e(title)}">'
+            f'<span class="meta">{_e(title)}</span></td>'
             f'<td>{_badge(status, badge_cls)}</td>'
             f'<td>{mode_html}</td>'
             f'<td>{review_html}</td>'
             f'<td>{qa_html}</td>'
-            f'<td><div style="display:flex;align-items:center;gap:4px">{dur_html}{bar_html}</div></td>'
+            f'<td><div>{dur_html}{bar_html}</div></td>'
             f'<td>{dots_html}</td>'
             f'<td>{pr_html}</td>'
             f'<td class="meta">{_e(started)}</td>'
@@ -282,7 +282,7 @@ table {{ width:100%;border-collapse:separate;border-spacing:0;border:1px solid #
 thead th {{ background:#F7F9FB;color:#64748B;font-weight:500;font-size:11.2px;text-align:left;padding:10px 12px;border-bottom:1px solid #E2E8F0;white-space:nowrap }}
 tbody tr {{ transition:background 0.1s }}
 tbody tr:hover {{ background:rgba(241,245,249,0.5) }}
-tbody td {{ padding:8px 12px;border-bottom:1px solid #E2E8F0;vertical-align:middle }}
+tbody td {{ padding:8px 12px;border-bottom:1px solid #E2E8F0;vertical-align:middle;white-space:nowrap }}
 tbody tr:last-child td {{ border-bottom:none }}
 .view-toggle {{ display:inline-flex;border:1px solid #E2E8F0;border-radius:6px;overflow:hidden }}
 .view-btn {{ padding:4px 12px;font-size:11.2px;cursor:pointer;border:none;background:#FFF;color:#64748B;font-weight:500;border-right:1px solid #E2E8F0;font-family:inherit }}
@@ -301,11 +301,11 @@ tbody tr:last-child td {{ border-bottom:none }}
 {filters}
 <table>
 <thead><tr>
-  <th style="width:110px">Ticket</th><th style="width:130px">Status</th>
-  <th style="width:80px">Mode</th><th style="width:90px">Review</th>
-  <th style="width:80px">QA</th><th style="width:120px">Duration</th>
-  <th style="width:100px">Phases</th><th style="width:50px">PR</th>
-  <th>Started</th>
+  <th style="width:100px">Ticket</th><th>Title</th><th style="width:110px">Status</th>
+  <th style="width:65px">Mode</th><th style="width:80px">Review</th>
+  <th style="width:55px">QA</th><th style="width:140px">Duration</th>
+  <th style="width:100px">Phases</th><th style="width:55px">PR</th>
+  <th style="width:100px">Started</th>
 </tr></thead>
 <tbody>{rows}</tbody>
 </table>
@@ -373,9 +373,9 @@ def _render_span_row(
         cls = "badge-success" if overall == "PASS" else "badge-error"
         inline_badges += f' {_badge(f"{overall} {criteria}", cls)}'
 
-    # Duration
+    # Duration — always show relative duration when available, never raw timestamps
     dur_html = ""
-    if duration and duration > 0:
+    if duration is not None:
         dur_html = f'<div style="flex-shrink:0;text-align:right;font-size:11.2px;color:#64748B;margin-left:12px;white-space:nowrap">{_fmt_dur(duration)}</div>'
     elif ts:
         dur_html = f'<div style="flex-shrink:0;text-align:right;font-size:11.2px;color:#94A3B8;margin-left:12px">{ts[11:]}</div>'
@@ -423,6 +423,138 @@ def _render_span_row(
     return row + art_html
 
 
+def _diag_checklist_html(entries: list[dict[str, Any]]) -> str:
+    return render_diagnostic_checklist(run_diagnostic_checklist(entries))
+
+
+# ---------------------------------------------------------------------------
+# Detail-view section renderers
+# ---------------------------------------------------------------------------
+#
+# ``_render_detail`` used to be a ~250-line function that inlined every
+# visual section (summary bar, investigate / discuss disclosures,
+# phase duration bar, failure box, span trees, raw events). Each
+# section is extracted below so the function body becomes a thin
+# orchestration of fragment assembly and each helper is individually
+# testable with plain dict fixtures instead of having to go through
+# the full ``read_trace`` path.
+
+
+def _render_investigate_box(ticket_id: str) -> str:
+    """Copy-investigation-command disclosure — native ``<details>``.
+
+    Builds the ready-to-paste shell snippet from the canonical
+    template in ``investigate_command.py`` so the dashboard and the
+    ``/traces/{id}/discuss`` endpoint cannot drift.
+    """
+    investigate_cmd = build_investigate_command(ticket_id)
+    return (
+        '<details style="margin-bottom:20px;padding:10px 14px;background:#F7F9FB;'
+        'border:1px solid #E2E8F0;border-radius:8px">'
+        '<summary style="cursor:pointer;font-weight:600;font-size:12px;color:#334155">'
+        'Investigate this trace locally (copy command)</summary>'
+        '<pre style="margin-top:10px;padding:10px 12px;background:#0F172A;color:#E2E8F0;'
+        'border-radius:6px;font-size:11.5px;line-height:1.55;white-space:pre-wrap;'
+        'word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">'
+        f'{_e(investigate_cmd)}</pre></details>'
+    )
+
+
+def _render_discuss_box(ticket_id: str) -> str:
+    """Audited 'Discuss with Claude' disclosure — three-step command.
+
+    Mints a session token via ``POST /traces/{id}/discuss`` (writes
+    to ``discuss-audit.jsonl``), runs the returned investigate
+    command, then feeds the Claude transcript to
+    ``capture_discuss_output.py``. Both this and the cheaper
+    ``_render_investigate_box`` live inside ``<details>`` elements
+    so they expand without JavaScript.
+    """
+    discuss_cmd = (
+        "# Step 1: request a session token (writes to discuss-audit.jsonl)\n"
+        f"curl -sSf -X POST http://localhost:8000/traces/{ticket_id}/discuss \\\n"
+        "  -H 'X-API-Key: ...' | jq -r .investigate_command > /tmp/investigate.sh\n"
+        "\n"
+        "# Step 2: run the investigation\n"
+        "bash /tmp/investigate.sh\n"
+        "\n"
+        "# Step 3: when Claude's output has the three sections\n"
+        "# (## Root cause, ## Proposed fix, ## Memory entry):\n"
+        "python scripts/capture_discuss_output.py --transcript /tmp/transcript.md"
+    )
+    return (
+        '<details style="margin-bottom:20px;padding:10px 14px;background:#F7F9FB;'
+        'border:1px solid #E2E8F0;border-radius:8px">'
+        '<summary style="cursor:pointer;font-weight:600;font-size:12px;color:#334155">'
+        '\U0001f50d Open in Claude for investigation</summary>'
+        '<pre style="margin-top:10px;padding:10px 12px;background:#0F172A;color:#E2E8F0;'
+        'border-radius:6px;font-size:11.5px;line-height:1.55;white-space:pre-wrap;'
+        'word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">'
+        f'{_e(discuss_cmd)}</pre></details>'
+    )
+
+
+def _render_duration_bar(durations: list[dict[str, Any]]) -> str:
+    """Phase-duration bar — proportional segments colored by phase.
+
+    Returns empty string when ``durations`` is empty or the total
+    duration is zero (avoids a divide-by-zero inside the per-segment
+    percentage computation).
+    """
+    if not durations:
+        return ""
+    total_secs = sum(d["duration_seconds"] for d in durations)
+    if total_secs <= 0:
+        return ""
+    segs = ""
+    for d in durations:
+        if d["duration_seconds"] <= 0:
+            continue  # skip zero-duration phases (e.g., pr_created logged same instant)
+        pct = max(1, (d["duration_seconds"] / total_secs) * 100)
+        color = _PHASE_COLORS.get(d["phase"], "#64748B")
+        label = d["phase"].replace("_", " ")
+        segs += (
+            f'<div style="width:{pct:.1f}%;background:{color};display:flex;'
+            f'align-items:center;justify-content:center;font-size:11.2px;'
+            f'color:white;font-weight:500;white-space:nowrap;overflow:hidden;'
+            f'padding:0 8px" title="{_e(label)}: {_fmt_dur(d["duration_seconds"])}">'
+            f'{_e(label)} {_fmt_dur(d["duration_seconds"])}</div>'
+        )
+    return (
+        f'<div style="display:flex;border-radius:4px;overflow:hidden;'
+        f'border:1px solid #E2E8F0;margin-bottom:20px;height:32px">{segs}</div>'
+    )
+
+
+def _render_failure_box(
+    entries: list[dict[str, Any]],
+    tree: dict[str, Any],
+    run_start_idx: int,
+) -> str:
+    """Error/failure box — only rendered when ``tree['errors']`` is non-empty."""
+    if not tree["errors"]:
+        return ""
+    diag = extract_diagnostic_info(entries, run_start_idx=run_start_idx)
+    hint = diag.get("hint", "")
+    err_items = ""
+    for err in tree["errors"]:
+        e = err["entry"]
+        err_items += (
+            f'<div style="margin-top:4px"><strong>{_e(e.get("error_type", "Error"))}</strong>'
+            f' <span class="meta">at {_e(e.get("timestamp", "")[:19])}</span>'
+            f'<div style="margin-left:12px;color:#334155">{_e(e.get("error_message", ""))}</div></div>'
+        )
+    hint_html = (
+        f'<div style="margin-bottom:6px"><strong>Hint:</strong> {_e(hint)}</div>'
+        if hint else ""
+    )
+    return (
+        f'<div style="margin-bottom:20px;padding:12px 16px;background:#FBE6F1;'
+        f'border:1px solid #F5C6CB;border-left:4px solid #DB2626;border-radius:8px">'
+        f'{hint_html}{err_items}</div>'
+    )
+
+
 def _render_detail(ticket_id: str) -> str:
     """Render the Langfuse-style trace detail view."""
     entries = read_trace(ticket_id)
@@ -434,9 +566,13 @@ def _render_detail(ticket_id: str) -> str:
             f'<a href="/traces">&larr; Back</a></div></body></html>'
         )
 
-    tree = build_span_tree(entries)
+    # Compute the run-start index once and thread it into every consumer
+    # below. Previously, each of build_span_tree, compute_phase_durations,
+    # and extract_diagnostic_info was doing its own full reverse scan.
+    run_start_idx = find_run_start_idx(entries)
+    tree = build_span_tree(entries, run_start_idx=run_start_idx)
     s = tree["summary"]
-    durations = compute_phase_durations(entries)
+    durations = compute_phase_durations(entries, run_start_idx=run_start_idx)
 
     # Breadcrumb
     breadcrumb = f'<div class="meta" style="margin-bottom:8px"><a href="/traces">Traces</a> / {_e(ticket_id)}</div>'
@@ -469,9 +605,14 @@ def _render_detail(ticket_id: str) -> str:
     if qa:
         q_cls = "badge-success" if qa == "PASS" else "badge-error"
         summary_items.append(f'<div><span class="meta">QA</span> {_badge(qa + qa_detail, q_cls)}</div>')
-    summary_items.append(f'<div><span class="meta">Analyst</span> <span style="font-weight:500">{_e(token_str)}</span></div>')
+    summary_items.append(f'<div><span class="meta">Analyst (API)</span> <span style="font-weight:500">{_e(token_str)}</span></div>')
+    max_in = s.get("billing_max_tokens_in", 0)
+    max_out = s.get("billing_max_tokens_out", 0)
+    if max_in or max_out:
+        max_str = f'{max_in:,} in / {max_out:,} out'
+        summary_items.append(f'<div><span class="meta">Agent (Max)</span> <span style="font-weight:500">{_e(max_str)}</span></div>')
     if pr_url:
-        summary_items.append(f'<div><span class="meta">PR</span> <a href="{_e(_safe_url(pr_url))}" target="_blank">#{pr_url.split("/")[-1]}</a></div>')
+        summary_items.append(f'<div><span class="meta">PR</span> <a href="{_e(_safe_url(pr_url))}" target="_blank">#{_e(pr_url.split("/")[-1])}</a></div>')
 
     summary_bar = (
         f'<div style="display:flex;gap:24px;flex-wrap:wrap;align-items:center;'
@@ -479,47 +620,12 @@ def _render_detail(ticket_id: str) -> str:
         f'border-radius:8px;margin-bottom:20px">{"".join(summary_items)}</div>'
     )
 
-    # Phase duration bar
-    dur_bar = ""
-    if durations:
-        total_secs = sum(d["duration_seconds"] for d in durations)
-        if total_secs > 0:
-            segs = ""
-            for d in durations:
-                pct = max(1, (d["duration_seconds"] / total_secs) * 100)
-                color = _PHASE_COLORS.get(d["phase"], "#64748B")
-                label = d["phase"].replace("_", " ")
-                segs += (
-                    f'<div style="width:{pct:.1f}%;background:{color};display:flex;'
-                    f'align-items:center;justify-content:center;font-size:11.2px;'
-                    f'color:white;font-weight:500;white-space:nowrap;overflow:hidden;'
-                    f'padding:0 8px" title="{_e(label)}: {_fmt_dur(d["duration_seconds"])}">'
-                    f'{_e(label)} {_fmt_dur(d["duration_seconds"])}</div>'
-                )
-            dur_bar = (
-                f'<div style="display:flex;border-radius:4px;overflow:hidden;'
-                f'border:1px solid #E2E8F0;margin-bottom:20px;height:32px">{segs}</div>'
-            )
-
-    # Error/failure box
-    failure_box = ""
-    if tree["errors"]:
-        diag = extract_diagnostic_info(entries)
-        hint = diag.get("hint", "")
-        err_items = ""
-        for err in tree["errors"]:
-            e = err["entry"]
-            err_items += (
-                f'<div style="margin-top:4px"><strong>{_e(e.get("error_type", "Error"))}</strong>'
-                f' <span class="meta">at {_e(e.get("timestamp", "")[:19])}</span>'
-                f'<div style="margin-left:12px;color:#334155">{_e(e.get("error_message", ""))}</div></div>'
-            )
-        hint_html = f'<div style="margin-bottom:6px"><strong>Hint:</strong> {_e(hint)}</div>' if hint else ""
-        failure_box = (
-            f'<div style="margin-bottom:20px;padding:12px 16px;background:#FBE6F1;'
-            f'border:1px solid #F5C6CB;border-left:4px solid #DB2626;border-radius:8px">'
-            f'{hint_html}{err_items}</div>'
-        )
+    # Section builders live at module scope for testability — see the
+    # header comment block above _render_investigate_box.
+    investigate_box = _render_investigate_box(ticket_id)
+    discuss_box = _render_discuss_box(ticket_id)
+    dur_bar = _render_duration_bar(durations)
+    failure_box = _render_failure_box(entries, tree, run_start_idx)
 
     # --- Span tree sections ---
     def _section(title: str, icon_type: str, color: str, nodes: list[dict[str, Any]], default_open: bool = True) -> str:
@@ -573,15 +679,17 @@ def _render_detail(ticket_id: str) -> str:
             l3_html += _render_span_row(node["entry"], "event")
         l3_html += '</div></div>'
 
-    # Raw events (collapsed)
+    # Raw events (collapsed) — same accordion pattern as L1/L2/panels
     raw_html = (
-        f'<div style="border:1px solid #E2E8F0;border-radius:8px;overflow:hidden;margin-top:8px">'
-        f'<div style="padding:8px 16px;font-size:11.2px;color:#64748B;cursor:pointer;'
-        f'border-bottom:1px solid #E2E8F0" '
+        f'<div style="border:1px solid #E2E8F0;border-radius:8px;overflow:hidden;margin-bottom:16px">'
+        f'<div style="display:flex;align-items:center;gap:8px;padding:10px 16px;'
+        f'background:#F7F9FB;border-bottom:1px solid #E2E8F0;'
+        f'font-weight:600;font-size:13.2px;cursor:pointer" '
         f'onclick="var b=this.nextElementSibling;b.style.display=b.style.display===\'none\'?\'\':\' none\';'
         f'this.querySelector(\'svg\').style.transform=b.style.display===\'none\'?\'\':\' rotate(90deg)\'">'
-        f'<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'
-        f'<path d="M9 18l6-6-6-6"/></svg> Raw Events ({len(entries)})</div>'
+        f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#64748B" stroke-width="2" '
+        f'style="transition:transform 0.2s"><path d="M9 18l6-6-6-6"/></svg>'
+        f'Raw Events ({len(entries)})</div>'
         f'<div style="display:none">'
     )
     for e in entries:
@@ -597,12 +705,35 @@ def _render_detail(ticket_id: str) -> str:
         )
     raw_html += '</div></div>'
 
+    # Auto-refresh while the pipeline is still running so users watching a
+    # live run see new events without manually reloading. Stops refreshing
+    # once the run reaches a terminal state (Complete, PR Created, Failed,
+    # etc.) to avoid hammering L1 indefinitely on long-finished traces.
+    refresh_meta = (
+        '<meta http-equiv="refresh" content="5">'
+        if status not in _TERMINAL_STATUSES
+        else ""
+    )
+
+    # Session observability panels (commit 2 of post-mortem observability plan).
+    # Isolated in trace_dashboard_panels.py to avoid merge conflicts with
+    # commits 3 and 4 also modifying this file.
+    from trace_dashboard_panels import render_session_panels, render_tool_usage_panel
+    session_html = render_session_panels(entries)
+    tool_usage_html = render_tool_usage_panel(entries)
+    diag_html = _diag_checklist_html(entries)
+
     return f"""<!DOCTYPE html><html><head>
+{refresh_meta}
 <title>Trace &mdash; {_e(ticket_id)}</title>
 <style>{_LANGFUSE_STYLES}</style>
 </head><body><div class="page">
-{breadcrumb}{title}{summary_bar}{dur_bar}{failure_box}
-{l1_html}{l2_html}{l3_html}{raw_html}
+{breadcrumb}{title}{summary_bar}{investigate_box}{discuss_box}{dur_bar}{failure_box}
+{l1_html}{l2_html}{l3_html}
+{session_html}
+{raw_html}
+{diag_html}
+{tool_usage_html}
 </div></body></html>"""
 
 
@@ -644,22 +775,44 @@ def _classify_traces(
 
 def _render_board_column(title: str, color: str, traces: list[dict[str, Any]], count: int) -> str:
     """Render a single Kanban column."""
+    # In-flight statuses get the pulsing "running" indicator
+    in_flight_statuses = {
+        "Dispatched", "Processing", "Enriched", "Planned",
+        "Implementing", "Review Done", "QA Done", "Merged", "CI Fix",
+    }
     cards = ""
     for t in traces:
         tid = _e(t["ticket_id"])
         status = t.get("status", "")
         duration = _e(t.get("duration", ""))
+        current_phase = t.get("current_phase", "")
         badge_cls = _STATUS_BADGE.get(status, "badge-secondary")
+        is_running = status in in_flight_statuses
 
         extra = ""
         if status in _FAILED_STATUSES or status in _STUCK_THRESHOLDS:
             entries = t.pop("_raw_entries", None) or read_trace(t["ticket_id"])
-            diag = extract_diagnostic_info(entries)
+            run_start_idx = t.pop("_run_start_idx", None)
+            diag = extract_diagnostic_info(
+                entries, run_start_idx=run_start_idx
+            )
             hint = diag.get("hint", "")
             if hint:
                 extra = (
                     f'<div style="margin-top:6px;font-size:11.2px;color:#64748B">{_e(hint[:120])}</div>'
                 )
+
+        # Live progress row (running tickets only)
+        progress_html = ""
+        if is_running and current_phase:
+            progress_html = (
+                f'<div style="margin-top:6px;display:flex;align-items:center;gap:6px;'
+                f'font-size:11.2px;color:#EA580C">'
+                f'<span class="pulse-dot" style="width:8px;height:8px;border-radius:50%;'
+                f'background:#EA580C;display:inline-block;animation:pulse 1.5s ease-in-out infinite"></span>'
+                f'<span>Running: <strong>{_e(current_phase)}</strong></span>'
+                f'</div>'
+            )
 
         review = t.get("review_verdict", "")
         qa = t.get("qa_result", "")
@@ -680,6 +833,7 @@ def _render_board_column(title: str, color: str, traces: list[dict[str, Any]], c
             f'<a href="/traces/{tid}" style="font-weight:500;font-size:13.2px">{tid}</a>'
             f'{_badge(status, badge_cls)}</div>'
             f'<div style="margin-top:4px;font-size:11.2px;color:#64748B">{duration} {badges}{pr_link}</div>'
+            f'{progress_html}'
             f'{extra}</div>'
         )
 
@@ -711,8 +865,13 @@ def _render_board(traces: list[dict[str, Any]], total: int) -> str:
 
     return f"""<!DOCTYPE html><html><head>
 <title>Status Board</title>
-<meta http-equiv="refresh" content="10">
-<style>{_LANGFUSE_STYLES}</style>
+<meta http-equiv="refresh" content="5">
+<style>{_LANGFUSE_STYLES}
+@keyframes pulse {{
+  0%, 100% {{ opacity: 1; transform: scale(1); }}
+  50% {{ opacity: 0.4; transform: scale(0.85); }}
+}}
+</style>
 </head><body><div class="page">
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
   <h1>Status Board <span class="meta" style="margin-left:8px">{total} tickets</span></h1>
@@ -752,6 +911,7 @@ async def traces_list(
 @router.get("/traces/{ticket_id}", response_class=HTMLResponse)
 async def trace_detail(ticket_id: str) -> str:
     """Show Langfuse-style span tree for a ticket."""
+    _safe_ticket_id(ticket_id)
     return _render_detail(ticket_id)
 
 
@@ -768,12 +928,22 @@ async def traces_api(
         total = count_traces()
         offset = (page - 1) * per_page
         traces = list_traces(offset=offset, limit=per_page)
-    # Strip cached entries from JSON response (internal dashboard field)
-    clean = [{k: v for k, v in t.items() if k != "_raw_entries"} for t in traces]
+    # Strip cached internal fields from JSON response — these are only
+    # for dashboard-side performance (avoiding reread + rescan) and are
+    # not part of the public API surface.
+    internal_fields = {"_raw_entries", "_run_start_idx"}
+    clean = [
+        {k: v for k, v in t.items() if k not in internal_fields}
+        for t in traces
+    ]
     return {"total": total, "page": page, "per_page": per_page, "traces": clean}
 
 
 @router.get("/api/traces/{ticket_id}", response_model=None)
 async def trace_api(ticket_id: str) -> list[dict[str, Any]]:
     """JSON API for a single trace."""
-    return read_trace(ticket_id)
+    _safe_ticket_id(ticket_id)
+    entries = read_trace(ticket_id)
+    if not entries:
+        raise HTTPException(status_code=404, detail=f"No trace found for {ticket_id}")
+    return entries

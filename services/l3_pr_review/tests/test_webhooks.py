@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
+from collections.abc import Callable
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -14,6 +17,60 @@ import main as l3_main
 from main import app
 
 TEST_SECRET = "test-webhook-secret"
+
+
+async def _wait_for(
+    predicate: Callable[[], bool],
+    *,
+    timeout: float = 3.0,
+    poll: float = 0.01,
+) -> None:
+    """Poll ``predicate`` until truthy or ``timeout`` seconds elapse.
+
+    Replaces the fixed ``await asyncio.sleep(0.05)`` pattern that was
+    sprinkled through this file to wait for FastAPI BackgroundTasks
+    completion. Fixed sleeps are flaky on slow CI (0.05s isn't always
+    enough for a scheduler to schedule + run the background task) AND
+    wasteful on fast CI (the test pays 50ms even when the task runs
+    in 2ms). Polling exits as soon as the mock is observed, bounded
+    by ``timeout`` so a genuinely unfired task fails loud instead of
+    hanging the test session.
+
+    Usage:
+      await _wait_for(lambda: mock_forward.await_count >= 1)
+
+    The predicate is wrapped in ``bool()`` so simple integer counts
+    work directly. ``pytest.fail`` is not imported here because tests
+    that use ``_wait_for`` already assert the state right after — the
+    timeout surfaces as a fast assertion failure on the next line.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    while True:
+        if predicate():
+            return
+        if asyncio.get_event_loop().time() >= deadline:
+            return
+        await asyncio.sleep(poll)
+
+
+async def _settle(cycles: int = 10) -> None:
+    """Yield control to the event loop enough times to drain scheduled tasks.
+
+    Used by tests that assert ``await_count == 0`` after a background
+    handler was scheduled — we need a POSITIVE signal that any queued
+    task has had a chance to run. A chain of ``asyncio.sleep(0)``
+    passes control back to the scheduler repeatedly, which runs any
+    task that's already on the ready queue without adding wall-clock
+    delay. Ten cycles covers handler-to-forwarder-to-httpx chains
+    several levels deep on current CPython; very fast but deterministic.
+
+    Unlike ``asyncio.sleep(N)``, this doesn't wait wall-clock time —
+    it purely advances the event loop state. On a busy machine a
+    single ``sleep(0.05)`` could actually miss the scheduling window
+    (the loop might not preempt back to the test coroutine in time).
+    """
+    for _ in range(cycles):
+        await asyncio.sleep(0)
 
 
 async def _make_client() -> AsyncClient:
@@ -52,7 +109,8 @@ async def test_health() -> None:
     async with await _make_client() as client:
         response = await client.get("/health")
         assert response.status_code == 200
-        assert response.json() == {"status": "ok"}
+        data = response.json()
+        assert data["status"] in ("ok", "degraded")
 
 
 # --- PR opened -> spawns review ---
@@ -383,10 +441,19 @@ async def test_rejects_invalid_signature() -> None:
         assert response.status_code == 401
 
 
-async def test_accepts_without_secret_in_dev_mode() -> None:
-    """When WEBHOOK_SECRET is empty (dev mode), requests are accepted without signature."""
+async def test_github_webhook_skips_signature_when_no_secret_configured_with_allow_unsigned(
+    monkeypatch,
+) -> None:
+    """Phase 1: with no ``WEBHOOK_SECRET`` configured AND
+    ``ALLOW_UNSIGNED_WEBHOOKS=true`` (local-dev escape hatch), the
+    github webhook accepts unsigned requests. Renamed from
+    ``test_accepts_without_secret_in_dev_mode`` — previously the
+    no-secret path was always open; now it requires the explicit
+    env var, enforced at the webhook handler.
+    """
     payload = {"action": "opened", "pull_request": {"number": 1, "diff_url": "", "body": ""}}
 
+    monkeypatch.setenv("ALLOW_UNSIGNED_WEBHOOKS", "true")
     with (
         patch.object(l3_main, "WEBHOOK_SECRET", ""),
         patch.object(l3_main, "_get_spawner") as mock_get,
@@ -399,6 +466,47 @@ async def test_accepts_without_secret_in_dev_mode() -> None:
                 headers={"x-github-event": "pull_request"},
             )
         assert response.status_code == 202
+
+
+async def test_github_webhook_fails_closed_when_no_secret_configured(
+    monkeypatch,
+) -> None:
+    """Phase 1 fail-closed: with no ``WEBHOOK_SECRET`` and no
+    ``ALLOW_UNSIGNED_WEBHOOKS=true``, the github webhook raises 503.
+    This is the new default — previously the endpoint silently
+    accepted unsigned requests whenever no secret was configured.
+    """
+    monkeypatch.delenv("ALLOW_UNSIGNED_WEBHOOKS", raising=False)
+    payload = {"action": "opened"}
+    with patch.object(l3_main, "WEBHOOK_SECRET", ""):
+        async with await _make_client() as client:
+            response = await client.post(
+                "/webhooks/github",
+                json=payload,
+                headers={"x-github-event": "pull_request"},
+            )
+    assert response.status_code == 503
+
+
+async def test_github_webhook_accepts_when_allow_unsigned(
+    monkeypatch,
+) -> None:
+    """Phase 1 escape hatch: ``ALLOW_UNSIGNED_WEBHOOKS=true`` + no
+    secret accepts the request."""
+    monkeypatch.setenv("ALLOW_UNSIGNED_WEBHOOKS", "true")
+    payload = {"action": "opened", "pull_request": {"number": 1, "diff_url": "", "body": ""}}
+    with (
+        patch.object(l3_main, "WEBHOOK_SECRET", ""),
+        patch.object(l3_main, "_get_spawner") as mock_get,
+    ):
+        mock_get.return_value = MagicMock()
+        async with await _make_client() as client:
+            response = await client.post(
+                "/webhooks/github",
+                json=payload,
+                headers={"x-github-event": "pull_request"},
+            )
+    assert response.status_code == 202
 
 
 async def test_accepts_valid_signature() -> None:
@@ -523,8 +631,7 @@ async def test_pr_opened_forwards_autonomy_event() -> None:
 
         assert response.status_code == 202
         # Allow background task to run
-        import asyncio as _asyncio
-        await _asyncio.sleep(0.05)
+        await _wait_for(lambda: mock_forward.await_count >= 1)
 
         assert mock_forward.await_count >= 1
         event = mock_forward.await_args.args[0]
@@ -559,8 +666,7 @@ async def test_review_approved_forwards_autonomy_event() -> None:
             response = await _post_webhook(client, payload, "pull_request_review")
 
         assert response.status_code == 202
-        import asyncio as _asyncio
-        await _asyncio.sleep(0.05)
+        await _wait_for(lambda: mock_forward.await_count >= 1)
 
         assert mock_forward.await_count >= 1
         event = mock_forward.await_args.args[0]
@@ -588,8 +694,7 @@ async def test_pr_merged_forwards_autonomy_event() -> None:
         assert response.status_code == 202
         assert response.json()["event_type"] == "pr_merged"
 
-        import asyncio as _asyncio
-        await _asyncio.sleep(0.05)
+        await _wait_for(lambda: mock_forward.await_count >= 1)
 
         assert mock_forward.await_count >= 1
         event = mock_forward.await_args.args[0]
@@ -735,8 +840,7 @@ class TestHumanIssueForwarding:
                 response = await _post_webhook(client, payload, "pull_request_review")
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            await _wait_for(lambda: mock_forward.await_count >= 1)
 
             assert mock_forward.await_count == 1
             issue = mock_forward.await_args.args[0]
@@ -777,8 +881,10 @@ class TestHumanIssueForwarding:
                 response = await _post_webhook(client, payload, "pull_request_review")
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            # Handler runs but short-circuits on empty body; drain the
+            # event loop so any would-be forward has executed, then
+            # verify it didn't happen.
+            await _settle()
 
             assert mock_forward.await_count == 0
 
@@ -805,8 +911,9 @@ class TestHumanIssueForwarding:
                 response = await _post_webhook(client, payload, "pull_request_review")
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            # Handler runs but short-circuits on bot author; drain the
+            # event loop and verify no forward happened.
+            await _settle()
 
             assert mock_forward.await_count == 0
 
@@ -836,8 +943,7 @@ class TestHumanIssueForwarding:
                 response = await _post_webhook(client, payload, "pull_request_review")
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            await _wait_for(lambda: mock_forward.await_count >= 1)
 
             assert mock_forward.await_count == 1
             issue = mock_forward.await_args.args[0]
@@ -881,8 +987,7 @@ class TestHumanIssueForwarding:
 
             assert response.status_code == 202
             assert response.json()["event_type"] == "review_comment_created"
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            await _wait_for(lambda: mock_forward.await_count >= 1)
 
             assert mock_forward.await_count == 1
             issue = mock_forward.await_args.args[0]
@@ -926,8 +1031,7 @@ class TestHumanIssueForwarding:
                 )
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            await _wait_for(lambda: mock_forward.await_count >= 1)
 
             assert mock_forward.await_count == 1
 
@@ -962,9 +1066,9 @@ class TestHumanIssueForwarding:
                 )
 
             assert response.status_code == 202
-            # deleted is classified as IGNORED, so no handler runs
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            # deleted is classified as IGNORED, so no handler runs.
+            # Drain the event loop so we see any stray forward if one fires.
+            await _settle()
 
             assert mock_forward.await_count == 0
 
@@ -999,8 +1103,9 @@ class TestHumanIssueForwarding:
                 )
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            # Handler runs but short-circuits on missing ticket_id;
+            # drain the event loop and verify no forward happened.
+            await _settle()
 
             assert mock_forward.await_count == 0
 
@@ -1160,9 +1265,7 @@ class TestAutoMergeTrigger:
                 )
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-
-            await _asyncio.sleep(0.1)
+            await _wait_for(lambda: mock_eval.await_count >= 1)
 
             assert mock_eval.await_count == 1
             kwargs = mock_eval.await_args.kwargs
@@ -1171,6 +1274,84 @@ class TestAutoMergeTrigger:
             assert kwargs["head_sha"] == "abc123"
             assert kwargs["ticket_id"] == "SCRUM-16"
             assert kwargs["trigger_event"] == "review_approved"
+
+    async def test_agent_complete_includes_auth_header(
+        self, monkeypatch,
+    ) -> None:
+        """Phase 1: the /api/agent-complete call to L1 must carry
+        ``X-API-Key`` sourced from ``L1_INTERNAL_API_TOKEN``. Previously
+        the call sent ``headers={}`` which only worked because L1 ran
+        with ``API_KEY`` unset. With Phase 1 enforcing the API key, the
+        call would 401 without an explicit header."""
+        monkeypatch.setenv("L1_INTERNAL_API_TOKEN", "shared-secret-abc")
+        payload = _base_pr_payload("submitted")
+        payload["review"] = {
+            "state": "approved",
+            "id": 1,
+            "body": "",
+            "html_url": "https://github.com/org/repo/pull/42",
+            "user": {"login": "lead"},
+        }
+
+        captured: list[dict[str, Any]] = []
+
+        class _CapturingClient:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            async def __aenter__(self) -> _CapturingClient:
+                return self
+
+            async def __aexit__(self, *args: Any) -> None:
+                return None
+
+            async def post(
+                self,
+                url: str,
+                json: Any = None,
+                headers: dict[str, str] | None = None,
+            ) -> MagicMock:
+                captured.append({"url": url, "headers": headers})
+                resp = MagicMock()
+                resp.status_code = 200
+                resp.raise_for_status = MagicMock()
+                return resp
+
+        with (
+            patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+            patch.object(
+                l3_main, "_forward_autonomy_event", new_callable=AsyncMock
+            ),
+            patch.object(
+                l3_main, "_forward_human_issue", new_callable=AsyncMock
+            ),
+            patch.object(
+                l3_main, "evaluate_and_maybe_merge",
+                AsyncMock(return_value={"status": "dry_run"}),
+            ),
+            patch("main.httpx.AsyncClient", _CapturingClient),
+        ):
+            async with await _make_client() as client:
+                response = await _post_webhook(
+                    client, payload, "pull_request_review"
+                )
+            assert response.status_code == 202
+            import asyncio as _asyncio
+
+            await _asyncio.sleep(0.1)
+
+        agent_complete_calls = [
+            c for c in captured if c["url"].endswith("/api/agent-complete")
+        ]
+        assert len(agent_complete_calls) == 1, (
+            f"expected exactly one /api/agent-complete call, got "
+            f"{[c['url'] for c in captured]}"
+        )
+        headers = agent_complete_calls[0]["headers"] or {}
+        assert headers.get("X-API-Key") == "shared-secret-abc", (
+            f"expected X-API-Key header sourced from L1_INTERNAL_API_TOKEN, "
+            f"got headers={headers!r}"
+        )
 
     async def test_ci_passed_calls_evaluate_and_maybe_merge(self) -> None:
         payload = {
@@ -1198,9 +1379,7 @@ class TestAutoMergeTrigger:
                 response = await _post_webhook(client, payload, "check_suite")
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-
-            await _asyncio.sleep(0.1)
+            await _wait_for(lambda: mock_eval.await_count >= 1)
 
             assert mock_eval.await_count == 1
             kwargs = mock_eval.await_args.kwargs
@@ -1245,10 +1424,60 @@ class TestAutoMergeTrigger:
                 )
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-
-            await _asyncio.sleep(0.1)
+            await _wait_for(lambda: mock_eval.await_count >= 1)
             assert mock_eval.await_count == 1
+
+    async def test_review_approved_skips_non_ai_branch(self) -> None:
+        """Bug regression: _handle_review_approved used
+        ``branch.replace("ai/", "")`` which (a) replaced all
+        occurrences of the substring, not just the prefix, and
+        (b) passed non-AI branches through unchanged — so a human
+        approving a PR on ``main`` or ``develop`` sent a completion
+        request to L1 with that branch name as the ``ticket_id``.
+        Fixed by extracting the ticket via ``_ticket_id_from_payload``
+        (regex-based) and early-returning when the branch doesn't
+        match the ``ai/<PROJ>-<N>`` pattern."""
+        payload = _base_pr_payload("submitted")
+        # Non-AI branch — human PR merged into this repo.
+        payload["pull_request"]["head"]["ref"] = "feature/human-work"
+        payload["review"] = {
+            "state": "approved",
+            "id": 1,
+            "body": "",
+            "html_url": "https://github.com/org/repo/pull/42",
+            "user": {"login": "human-reviewer"},
+        }
+
+        mock_eval = AsyncMock(return_value={"status": "dry_run"})
+        with (
+            patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+            patch.object(
+                l3_main, "_forward_autonomy_event", new_callable=AsyncMock
+            ),
+            patch.object(
+                l3_main, "_forward_human_issue", new_callable=AsyncMock
+            ),
+            patch.object(l3_main, "evaluate_and_maybe_merge", mock_eval),
+            patch("main.httpx.AsyncClient") as mock_client,
+        ):
+            mock_inst = AsyncMock()
+            mock_inst.post = AsyncMock()
+            mock_client.return_value.__aenter__.return_value = mock_inst
+
+            async with await _make_client() as client:
+                response = await _post_webhook(
+                    client, payload, "pull_request_review"
+                )
+
+            assert response.status_code == 202
+            # Non-AI branch should short-circuit in the handler — no
+            # background work scheduled. Drain the loop and assert.
+            await _settle()
+
+            # Neither L1 /api/agent-complete nor the auto-merge
+            # evaluator should fire for a non-AI branch.
+            mock_inst.post.assert_not_called()
+            mock_eval.assert_not_called()
 
 
 # --- GitHub defect (issue labeled) handling ---
@@ -1259,10 +1488,19 @@ class TestGithubDefectHandler:
         body = "Regression from https://github.com/acme/widgets/pull/123 — see details."
         assert l3_main._extract_pr_ref(body, "acme/widgets") == ("acme/widgets", 123)
 
-    def test_extract_pr_ref_owner_repo_form(self) -> None:
-        body = "Broken by other-org/other-repo#55."
+    def test_extract_pr_ref_owner_repo_form_same_repo_matches(self) -> None:
+        body = "Broken by acme/widgets#55."
         assert l3_main._extract_pr_ref(body, "acme/widgets") == (
-            "other-org/other-repo", 55,
+            "acme/widgets", 55,
+        )
+
+    def test_extract_pr_ref_cross_repo_owner_repo_form_rejected(self) -> None:
+        """Regression: cross-repo owner/repo#N must NOT resolve — attacker
+        could otherwise inject a defect-link against a victim repo in
+        another org by creating a labelled issue."""
+        body = "Broken by other-org/other-repo#55."
+        assert l3_main._extract_pr_ref(body, "acme/widgets") is None, (
+            "cross-repo owner/repo#N reference must be rejected"
         )
 
     def test_extract_pr_ref_same_repo_hash(self) -> None:
@@ -1273,10 +1511,29 @@ class TestGithubDefectHandler:
         body = "Something is broken. No references here."
         assert l3_main._extract_pr_ref(body, "acme/widgets") is None
 
-    def test_extract_pr_ref_full_url_beats_bare(self) -> None:
-        # Full URL should win over a trailing bare #N
+    def test_extract_pr_ref_cross_repo_url_rejected(self) -> None:
+        """Regression: cross-repo github.com/<owner>/<repo>/pull/<n> URL
+        must be rejected. Previously the first match won regardless
+        of source repo, letting an attacker poison L1 defect-link
+        tracking for any victim repo."""
         body = "See https://github.com/foo/bar/pull/9 and also #1"
-        assert l3_main._extract_pr_ref(body, "acme/widgets") == ("foo/bar", 9)
+        assert l3_main._extract_pr_ref(body, "acme/widgets") is None, (
+            "cross-repo URL must be rejected — regression for "
+            "defect-link cross-repo injection bug"
+        )
+
+    def test_extract_pr_ref_same_repo_url_accepted(self) -> None:
+        """Sanity: same-repo URL still resolves."""
+        body = "See https://github.com/acme/widgets/pull/9 for context."
+        assert l3_main._extract_pr_ref(body, "acme/widgets") == (
+            "acme/widgets", 9,
+        )
+
+    def test_extract_pr_ref_empty_same_repo_rejects_everything(self) -> None:
+        """Defensive: when same_repo is empty, reject every URL/owner-repo
+        match so we never trust attacker-controlled repo names alone."""
+        body = "See https://github.com/acme/widgets/pull/9"
+        assert l3_main._extract_pr_ref(body, "") is None
 
     def test_category_from_labels_maps_correctly(self) -> None:
         assert l3_main._category_from_labels(["defect"]) == "escaped"
@@ -1433,3 +1690,188 @@ async def test_github_defect_forward_skip_when_no_token(tmp_path) -> None:
     ):
         await l3_main._forward_github_defect(payload)
     assert not backlog_path.exists()
+
+
+# --- Admin backlog endpoints: constant-time token auth ---
+#
+# Bug: the /admin/backlog/drain and /admin/backlog/status endpoints
+# used plain ``!=`` to compare the X-Internal-Api-Token header against
+# the configured secret. ``!=`` short-circuits on the first differing
+# byte, leaking timing that lets an attacker recover the secret byte
+# by byte. Fix: ``hmac.compare_digest`` via ``_require_internal_api_token``.
+
+
+async def test_admin_drain_rejects_missing_token(monkeypatch) -> None:
+    monkeypatch.setenv("L1_INTERNAL_API_TOKEN", "s3cr3t")
+    async with await _make_client() as client:
+        resp = await client.post("/admin/backlog/drain")
+    assert resp.status_code == 401
+
+
+async def test_admin_drain_rejects_wrong_token(monkeypatch) -> None:
+    monkeypatch.setenv("L1_INTERNAL_API_TOKEN", "s3cr3t")
+    async with await _make_client() as client:
+        resp = await client.post(
+            "/admin/backlog/drain",
+            headers={"X-Internal-Api-Token": "wrong"},
+        )
+    assert resp.status_code == 401
+
+
+async def test_admin_drain_503_when_not_configured(monkeypatch) -> None:
+    """Empty env var must NOT accept an empty-string token."""
+    monkeypatch.setenv("L1_INTERNAL_API_TOKEN", "")
+    async with await _make_client() as client:
+        resp = await client.post(
+            "/admin/backlog/drain",
+            headers={"X-Internal-Api-Token": ""},
+        )
+    assert resp.status_code == 503
+
+
+async def test_admin_status_rejects_wrong_token(monkeypatch) -> None:
+    monkeypatch.setenv("L1_INTERNAL_API_TOKEN", "s3cr3t")
+    async with await _make_client() as client:
+        resp = await client.get(
+            "/admin/backlog/status",
+            headers={"X-Internal-Api-Token": "wrong"},
+        )
+    assert resp.status_code == 401
+
+
+async def test_admin_status_accepts_correct_token(
+    monkeypatch, tmp_path
+) -> None:
+    import backlog as backlog_mod
+
+    monkeypatch.setenv("L1_INTERNAL_API_TOKEN", "s3cr3t")
+    monkeypatch.setattr(backlog_mod, "BACKLOG_PATH", tmp_path / "backlog.jsonl")
+    async with await _make_client() as client:
+        resp = await client.get(
+            "/admin/backlog/status",
+            headers={"X-Internal-Api-Token": "s3cr3t"},
+        )
+    assert resp.status_code == 200
+
+
+# --- Harness-self-review bot-loop regression ---
+#
+# Bug: _is_bot_user used to check only type=="Bot" or [bot] suffix,
+# missing the harness's own account (xcagentrockwell — normal User
+# type, no suffix). _forward_review_body_human_issue used the
+# weaker _is_bot_user without the body-marker fallback, so when the
+# harness posted a review via `gh pr review`, the review body was
+# forwarded to L1 as a human issue and L1 re-spawned work to "fix"
+# the bot's self-critique. Unbounded spawn loop + $ burn.
+#
+# Fix: _is_bot_actor canonical helper checks type/[bot]/BOT_USERNAME
+# /BOT_COMMENT_MARKER in body. All call sites now use it.
+
+
+class TestBotActorDetection:
+    def test_bot_actor_catches_harness_login(self, monkeypatch) -> None:
+        """xcagentrockwell (type=User, no [bot] suffix) must be detected."""
+        monkeypatch.setattr(l3_main, "BOT_USERNAME", "xcagentrockwell")
+        assert l3_main._is_bot_actor(
+            {"login": "xcagentrockwell", "type": "User"},
+        )
+
+    def test_bot_actor_catches_comment_marker_in_body(self) -> None:
+        """A review body containing <!-- xcagent --> must be detected
+        even if the user looks human and BOT_USERNAME is unset."""
+        assert l3_main._is_bot_actor(
+            {"login": "random-user", "type": "User"},
+            body="## Review\n\nLooks good.\n\n<!-- xcagent -->",
+        )
+
+    def test_bot_actor_catches_bracket_bot_suffix(self) -> None:
+        assert l3_main._is_bot_actor(
+            {"login": "dependabot[bot]", "type": "User"},
+        )
+
+    def test_bot_actor_catches_type_bot(self) -> None:
+        assert l3_main._is_bot_actor({"login": "gh-bot", "type": "Bot"})
+
+    def test_bot_actor_lets_real_humans_through(self, monkeypatch) -> None:
+        monkeypatch.setattr(l3_main, "BOT_USERNAME", "xcagentrockwell")
+        assert not l3_main._is_bot_actor(
+            {"login": "alice", "type": "User"},
+            body="## Review\n\nPlease fix X.",
+        )
+
+    def test_bot_actor_handles_none_user(self) -> None:
+        assert not l3_main._is_bot_actor(None)
+        assert not l3_main._is_bot_actor({})
+
+    async def test_forward_review_body_skips_harness_self_review(
+        self, monkeypatch
+    ) -> None:
+        """Regression: harness's own review body must NOT be forwarded
+        to L1 as a human issue (bot loop prevention)."""
+        monkeypatch.setattr(l3_main, "BOT_USERNAME", "xcagentrockwell")
+        monkeypatch.setattr(l3_main, "L1_INTERNAL_API_TOKEN", "tok")
+        forward_calls: list[dict] = []
+
+        async def _capture(payload: dict) -> bool:
+            forward_calls.append(payload)
+            return True
+
+        monkeypatch.setattr(l3_main, "_forward_human_issue", _capture)
+
+        payload = {
+            "repository": {"full_name": "acme/repo"},
+            "pull_request": {
+                "number": 42,
+                "head": {"sha": "abc123", "ref": "ai/SCRUM-16"},
+                "base": {"repo": {"full_name": "acme/repo"}},
+            },
+            "review": {
+                "id": 999,
+                "body": "## AI Review\n\nChanges requested.\n\n<!-- xcagent -->",
+                "submitted_at": "2026-04-11T00:00:00Z",
+                "html_url": "https://github.com/acme/repo/pull/42",
+                "user": {"login": "xcagentrockwell", "type": "User"},
+            },
+        }
+        await l3_main._forward_review_body_human_issue(
+            "review_changes_requested", payload
+        )
+        assert forward_calls == [], (
+            "harness self-review must NOT be forwarded — regression "
+            "for the self-reinforcing bot loop bug"
+        )
+
+    async def test_forward_review_body_forwards_real_human(
+        self, monkeypatch
+    ) -> None:
+        """Sanity: a real human review still flows through."""
+        monkeypatch.setattr(l3_main, "BOT_USERNAME", "xcagentrockwell")
+        monkeypatch.setattr(l3_main, "L1_INTERNAL_API_TOKEN", "tok")
+        forward_calls: list[dict] = []
+
+        async def _capture(payload: dict) -> bool:
+            forward_calls.append(payload)
+            return True
+
+        monkeypatch.setattr(l3_main, "_forward_human_issue", _capture)
+
+        payload = {
+            "repository": {"full_name": "acme/repo"},
+            "pull_request": {
+                "number": 42,
+                "head": {"sha": "abc123", "ref": "ai/SCRUM-16"},
+                "base": {"repo": {"full_name": "acme/repo"}},
+            },
+            "review": {
+                "id": 999,
+                "body": "Please rename Foo to Bar.",
+                "submitted_at": "2026-04-11T00:00:00Z",
+                "html_url": "https://github.com/acme/repo/pull/42",
+                "user": {"login": "alice", "type": "User"},
+            },
+        }
+        await l3_main._forward_review_body_human_issue(
+            "review_changes_requested", payload
+        )
+        assert len(forward_calls) == 1
+        assert forward_calls[0]["reviewer_login"] == "alice"

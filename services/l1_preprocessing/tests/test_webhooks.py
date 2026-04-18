@@ -6,8 +6,10 @@ import hashlib
 import hmac
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
 from httpx import ASGITransport, AsyncClient
 
 import main
@@ -90,12 +92,51 @@ async def test_jira_webhook_rejects_missing_signature_when_secret_set() -> None:
             assert response.status_code == 401
 
 
-async def test_jira_webhook_skips_signature_when_no_secret() -> None:
-    """When webhook_secret is empty, signature validation is skipped."""
+async def test_jira_webhook_allow_unsigned_true_allows_unsigned() -> None:
+    """Phase 1: with no ``webhook_secret`` configured AND
+    ``allow_unsigned_webhooks=True`` (the local-dev escape hatch), an
+    unsigned webhook is accepted. Renamed from
+    ``test_jira_webhook_skips_signature_when_no_secret`` — the
+    autouse conftest fixture sets ``allow_unsigned_webhooks=True`` so
+    this exercises the opt-in path, not the old always-accept path.
+    """
     payload = json.loads((FIXTURES / "jira_webhook_story.json").read_text())
-    async with await _make_client() as client:
-        response = await client.post("/webhooks/jira", json=payload)
-        assert response.status_code == 202
+    with patch.object(main.settings, "allow_unsigned_webhooks", True):
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/jira", json=payload)
+            assert response.status_code == 202
+
+
+# --- Phase 1: Fail-closed webhook auth (Jira) ---
+
+
+async def test_jira_webhook_fails_closed_when_no_secret_configured() -> None:
+    """Phase 1 fail-closed: with no ``webhook_secret`` configured AND
+    ``allow_unsigned_webhooks=False``, the Jira webhook raises 503.
+    Previously this path returned 202 — that's the behavior Phase 1
+    is explicitly closing.
+    """
+    payload = json.loads((FIXTURES / "jira_webhook_story.json").read_text())
+    with (
+        patch.object(main.settings, "webhook_secret", ""),
+        patch.object(main.settings, "allow_unsigned_webhooks", False),
+    ):
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/jira", json=payload)
+            assert response.status_code == 503
+
+
+async def test_jira_webhook_accepts_unsigned_when_allow_unsigned_set() -> None:
+    """Phase 1 escape hatch: with ``allow_unsigned_webhooks=True`` and
+    no ``webhook_secret``, the Jira webhook accepts unsigned requests."""
+    payload = json.loads((FIXTURES / "jira_webhook_story.json").read_text())
+    with (
+        patch.object(main.settings, "webhook_secret", ""),
+        patch.object(main.settings, "allow_unsigned_webhooks", True),
+    ):
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/jira", json=payload)
+            assert response.status_code == 202
 
 
 # --- ADO Webhook ---
@@ -127,23 +168,39 @@ def _ado_payload(
     }
 
 
+def _no_ado_auth():
+    """Context manager that clears ADO webhook auth so tests run without .env secrets."""
+    return patch.object(main.settings, "ado_webhook_token", "")
+
+
 async def test_ado_webhook_accepts_valid_payload() -> None:
-    """When no auth secrets are configured, webhook is accepted (local dev)."""
+    """Phase 1 local-dev path: when no auth secrets are configured but
+    ``allow_unsigned_webhooks=True`` (set by the autouse conftest
+    fixture), webhook is accepted.
+
+    Phase 1 changed the default for "no secret configured" from
+    "accept" to "503 Service Unavailable". The autouse
+    ``_open_phase1_dev_defaults`` fixture in conftest.py flips the
+    escape hatch on so pre-existing tests keep exercising business
+    logic rather than the fail-closed path.
+    """
     payload = _ado_payload(tags="ai-implement")
-    async with await _make_client() as client:
-        response = await client.post("/webhooks/ado", json=payload)
-        assert response.status_code == 202
-        assert response.json()["status"] == "accepted"
+    with _no_ado_auth():
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/ado", json=payload)
+            assert response.status_code == 202
+            assert response.json()["status"] == "accepted"
 
 
 async def test_ado_webhook_rejects_non_json() -> None:
-    async with await _make_client() as client:
-        response = await client.post(
-            "/webhooks/ado",
-            content=b"not json",
-            headers={"Content-Type": "application/json"},
-        )
-        assert response.status_code == 422
+    with _no_ado_auth():
+        async with await _make_client() as client:
+            response = await client.post(
+                "/webhooks/ado",
+                content=b"not json",
+                headers={"Content-Type": "application/json"},
+            )
+            assert response.status_code == 422
 
 
 async def test_ado_webhook_accepts_token_header() -> None:
@@ -199,24 +256,374 @@ async def test_ado_webhook_rejects_wrong_token() -> None:
             assert response.status_code == 401
 
 
+# --- ADO dual-auth parity coverage (parallel to the four Jira auth tests) ---
+#
+# The dual-auth path (HMAC signature OR bearer token) has happy-path coverage
+# above, but until now the four states below weren't explicitly asserted. These
+# mirror the Jira-side auth coverage at lines 45-98 so the two endpoints are
+# provably symmetric.
+
+
+async def test_ado_webhook_rejects_missing_hmac_signature_when_secret_configured() -> None:
+    """Only HMAC secret configured (no bearer). Missing signature → 401.
+
+    Parity with ``test_jira_webhook_rejects_missing_signature_when_secret_set``.
+    Without this test, an operator who turns ON ``webhook_secret`` but forgets
+    to set ``ado_webhook_token`` could ship a regression where unsigned ADO
+    webhooks sneak through via the dual-auth ``no_secret_behavior="open_local_dev"``
+    fallback (since the bearer path short-circuits when its secret is empty).
+    """
+    payload = _ado_payload(tags="ai-implement")
+
+    with patch("main.settings") as mock_settings:
+        mock_settings.webhook_secret = "set"
+        mock_settings.ado_webhook_token = ""
+
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/ado", json=payload)
+            assert response.status_code == 401
+
+
+async def test_ado_webhook_rejects_missing_bearer_when_only_bearer_configured() -> None:
+    """Only bearer token configured (no HMAC). Missing bearer header → 401.
+
+    Parity with ``test_ado_webhook_rejects_without_auth`` but pins the
+    exclusively-bearer configuration so future auth-refactor mistakes can't
+    accidentally swap the two secrets' roles.
+    """
+    payload = _ado_payload(tags="ai-implement")
+
+    with patch("main.settings") as mock_settings:
+        mock_settings.webhook_secret = ""
+        mock_settings.ado_webhook_token = "set"
+
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/ado", json=payload)
+            assert response.status_code == 401
+
+
+async def test_ado_webhook_valid_hmac_accepted() -> None:
+    """Only HMAC secret configured. Valid signed request → 202.
+
+    Proves the HMAC arm of the dual-auth path still accepts signed requests
+    even when the bearer-token secret is empty (i.e., the bearer path must
+    NOT clobber a valid HMAC auth_ok).
+    """
+    payload = _ado_payload(tags="ai-implement")
+    body = json.dumps(payload).encode()
+    secret = "ado-hmac-abc"
+    signature = "sha256=" + hmac.new(
+        secret.encode(), body, hashlib.sha256
+    ).hexdigest()
+
+    with patch("main.settings") as mock_settings:
+        mock_settings.webhook_secret = secret
+        mock_settings.ado_webhook_token = ""
+        mock_settings.ado_org_url = ""
+        mock_settings.ado_pat = ""
+
+        async with await _make_client() as client:
+            response = await client.post(
+                "/webhooks/ado",
+                content=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-hub-signature": signature,
+                },
+            )
+            assert response.status_code == 202
+
+
+async def test_ado_webhook_valid_bearer_accepted() -> None:
+    """Only bearer token configured. Valid bearer header → 202.
+
+    Duplicates the coverage of ``test_ado_webhook_accepts_token_header``
+    above but asserts explicitly in the dual-auth context (named to match
+    the parity suite). Kept so the four-test matrix reads clearly.
+    """
+    payload = _ado_payload(tags="ai-implement")
+
+    with patch("main.settings") as mock_settings:
+        mock_settings.webhook_secret = ""
+        mock_settings.ado_webhook_token = "ado-bearer-abc"
+        mock_settings.ado_org_url = ""
+        mock_settings.ado_pat = ""
+
+        async with await _make_client() as client:
+            response = await client.post(
+                "/webhooks/ado",
+                json=payload,
+                headers={"x-ado-webhook-token": "ado-bearer-abc"},
+            )
+            assert response.status_code == 202
+
+
 async def test_ado_webhook_skips_when_no_ai_tag() -> None:
     """Work items without the ai-implement tag are skipped."""
     payload = _ado_payload(tags="sprint-7; enhancement")
-    async with await _make_client() as client:
-        response = await client.post("/webhooks/ado", json=payload)
-        assert response.status_code == 202
-        data = response.json()
-        assert data["status"] == "skipped"
-        assert "ai-implement" in data["reason"]
+    with _no_ado_auth():
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/ado", json=payload)
+            assert response.status_code == 202
+            data = response.json()
+            assert data["status"] == "skipped"
+            assert "ai-implement" in data["reason"]
 
 
 async def test_ado_webhook_processes_when_ai_tag_present() -> None:
     """Work items with the ai-implement tag are accepted."""
     payload = _ado_payload(tags="ai-implement; sprint-7")
-    async with await _make_client() as client:
-        response = await client.post("/webhooks/ado", json=payload)
-        assert response.status_code == 202
-        assert response.json()["status"] == "accepted"
+    with _no_ado_auth():
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/ado", json=payload)
+            assert response.status_code == 202
+            assert response.json()["status"] == "accepted"
+
+
+# --- Phase 1: Fail-closed webhook auth (ADO) ---
+
+
+async def test_ado_webhook_fails_closed_when_no_auth_configured() -> None:
+    """Phase 1 fail-closed: with neither ``webhook_secret`` nor
+    ``ado_webhook_token`` configured AND ``allow_unsigned_webhooks=False``,
+    the ADO webhook raises 503. Previously this path returned 202.
+    """
+    payload = _ado_payload(tags="ai-implement")
+    with (
+        patch.object(main.settings, "webhook_secret", ""),
+        patch.object(main.settings, "ado_webhook_token", ""),
+        patch.object(main.settings, "allow_unsigned_webhooks", False),
+    ):
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/ado", json=payload)
+            assert response.status_code == 503
+
+
+async def test_ado_webhook_accepts_when_allow_unsigned_set() -> None:
+    """Phase 1 escape hatch: with ``allow_unsigned_webhooks=True`` and
+    no ADO auth configured, the ADO webhook accepts unsigned requests."""
+    payload = _ado_payload(tags="ai-implement")
+    with (
+        patch.object(main.settings, "webhook_secret", ""),
+        patch.object(main.settings, "ado_webhook_token", ""),
+        patch.object(main.settings, "allow_unsigned_webhooks", True),
+    ):
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/ado", json=payload)
+            assert response.status_code == 202
+
+
+# --- github_webhook_proxy: L3 failure surfaces as 503 ---
+
+
+async def test_github_webhook_proxy_returns_503_when_l3_down() -> None:
+    """Phase 1: when L3 is unreachable, the proxy must raise 503 so
+    GitHub retries the delivery. Previously it swallowed the failure
+    and returned 202 with ``{"status": "l3_error"}`` — GitHub treated
+    that as "successfully delivered" and never retried, silently
+    dropping PR events whenever L3 was down.
+    """
+
+    async def _raise_connect_error(*_args: Any, **_kwargs: Any) -> Any:
+        raise httpx.ConnectError("L3 not listening")
+
+    class _MockAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _MockAsyncClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        post = staticmethod(_raise_connect_error)
+
+    payload = {"action": "opened", "pull_request": {"number": 1}}
+    # proxy lives in webhooks.py after the Phase 4 split — patch it there.
+    with patch("webhooks.httpx.AsyncClient", _MockAsyncClient):
+        async with await _make_client() as client:
+            response = await client.post(
+                "/webhooks/github",
+                json=payload,
+                headers={"x-github-event": "pull_request"},
+            )
+    assert response.status_code == 503
+
+
+def _mock_process_ticket_that_releases() -> AsyncMock:
+    """Build an AsyncMock replacement for _process_ticket that releases the
+    active ticket claim (matching the real function's no-spawn behavior) but
+    does NOT clear trigger state. Lets webhook-level tests exercise edge
+    detection without the real pipeline or the no-spawn state-clear path.
+    """
+    async def _release(ticket, trace_id=""):
+        main._release_ticket(ticket.id)
+    return AsyncMock(side_effect=_release)
+
+
+async def test_ado_webhook_second_call_with_same_tag_is_not_a_new_edge() -> None:
+    """Regression test for Finding 4 from session 2026-04-10 post-mortem.
+
+    The trigger tag is a one-shot edge, not a level. Two consecutive webhooks
+    with the tag present (common when ADO fires workitem.updated for a merge
+    commit, comment, or field edit after the pipeline already dispatched) must
+    NOT re-trigger the pipeline. The first call edges absent→present and
+    accepts; the second sees present→present and skips.
+
+    _process_ticket is mocked out so the no-spawn state-clear path from Bug 1's
+    fix doesn't reset the edge memory between the two webhooks — we're testing
+    the webhook-handler level edge detection in isolation.
+    """
+    payload = _ado_payload(work_item_id=7777, tags="ai-implement")
+    with _no_ado_auth(), \
+            patch.object(main, "_process_ticket", _mock_process_ticket_that_releases()):
+        async with await _make_client() as client:
+            first = await client.post("/webhooks/ado", json=payload)
+            assert first.status_code == 202
+            assert first.json()["status"] == "accepted"
+
+            second = await client.post("/webhooks/ado", json=payload)
+            assert second.status_code == 202
+            assert second.json()["status"] == "skipped"
+            assert "not a new edge" in second.json()["reason"]
+
+
+async def test_ado_webhook_tag_removed_then_readded_retriggers() -> None:
+    """If the tag is removed and then re-added, that IS a new edge and the
+    pipeline should fire again. Without clearing state on tag-absent webhooks
+    a re-add after the first cascade would be silently skipped forever."""
+    with _no_ado_auth(), \
+            patch.object(main, "_process_ticket", _mock_process_ticket_that_releases()):
+        async with await _make_client() as client:
+            # First fire: absent → present. Accepted.
+            p1 = _ado_payload(work_item_id=8888, tags="ai-implement")
+            r1 = await client.post("/webhooks/ado", json=p1)
+            assert r1.json()["status"] == "accepted"
+
+            # Tag removed. Webhook arrives with no trigger tags. State cleared.
+            p2 = _ado_payload(work_item_id=8888, tags="sprint-7")
+            r2 = await client.post("/webhooks/ado", json=p2)
+            assert r2.json()["status"] == "skipped"
+            assert "ai-implement" in r2.json()["reason"]  # reason is "tag not found"
+
+            # Tag re-added. Should be treated as a fresh edge, accepted again.
+            p3 = _ado_payload(work_item_id=8888, tags="ai-implement")
+            r3 = await client.post("/webhooks/ado", json=p3)
+            assert r3.json()["status"] == "accepted"
+
+
+def _seed_ticket(ticket_id: str):
+    """Seed a ticket as mid-flight (tag observed, claim held) and return a
+    TicketPayload matching what the ADO adapter would normalize. Shared by
+    the _process_ticket direct regression tests so each one doesn't repeat
+    the four-line setup for _last_trigger_state + _active_tickets + payload
+    construction.
+    """
+    import time as _time
+
+    from models import TicketPayload
+
+    main._last_trigger_state[ticket_id] = True
+    # _active_tickets is now a dict[ticket_id, claim_time] for TTL support.
+    main._active_tickets[ticket_id] = _time.time()
+    return TicketPayload(
+        source="ado", id=ticket_id, ticket_type="story",
+        title="t", description="d", acceptance_criteria=["a"],
+    )
+
+
+def test_try_claim_ticket_expires_stale_claims() -> None:
+    """Bug regression: in the Redis worker path the RQ worker runs in
+    a separate process and never calls _release_ticket, so the claim
+    would leak forever and subsequent webhooks for the same ticket
+    would be permanently rejected as "already processing" until the
+    FastAPI process restarted. Fixed by giving claims a TTL — a stale
+    entry older than _ACTIVE_TICKET_TTL_SEC is treated as free and
+    immediately reclaimed."""
+    # Plant a stale claim that's older than the TTL window.
+    stale_time = __import__("time").time() - (main._ACTIVE_TICKET_TTL_SEC + 1)
+    main._active_tickets["STALE-1"] = stale_time
+
+    # A new webhook attempt should successfully reclaim the ticket.
+    assert main._try_claim_ticket("STALE-1") is True
+    # And the claim is now fresh.
+    assert main._active_tickets["STALE-1"] > stale_time
+
+    main._active_tickets.pop("STALE-1", None)
+
+
+def test_try_claim_ticket_rejects_fresh_claims() -> None:
+    """Happy path: a recent claim must still block a duplicate attempt."""
+    main._active_tickets["FRESH-1"] = __import__("time").time()
+    assert main._try_claim_ticket("FRESH-1") is False
+    main._active_tickets.pop("FRESH-1", None)
+
+
+async def test_process_ticket_clears_trigger_state_on_exception() -> None:
+    """Regression: if _process_ticket raises, the trigger-state must be
+    cleared so a subsequent webhook for the same ticket can re-trigger.
+
+    Without this, _check_trigger_edge has already set the state to True at
+    webhook receipt, and the next webhook (with the same tag still present)
+    is silently dropped as "not a new edge" — permanently wedging the ticket
+    until the tag is removed-and-readded or the service restarts.
+    """
+    ticket = _seed_ticket("FAIL-1")
+
+    failing_pipeline = AsyncMock()
+    failing_pipeline.process = AsyncMock(side_effect=RuntimeError("pipeline boom"))
+
+    with patch("main._get_pipeline", return_value=failing_pipeline):
+        await main._process_ticket(ticket)
+
+    assert "FAIL-1" not in main._last_trigger_state, \
+        "trigger state must be cleared on pipeline failure"
+    assert "FAIL-1" not in main._active_tickets, \
+        "ticket should also be released from _active_tickets on failure"
+
+
+async def test_process_ticket_clears_trigger_state_on_no_spawn() -> None:
+    """Regression: if the pipeline returns without spawning L2 (e.g. analyst
+    decided the ticket needs clarification), trigger-state must be cleared
+    so the user can re-trigger after addressing the clarification request.
+    """
+    ticket = _seed_ticket("NOSPAWN-1")
+
+    # Pipeline returns without spawn_triggered (analyst flagged as
+    # needs-clarification, or enrichment failed, or any non-L2 path).
+    no_spawn_pipeline = AsyncMock()
+    no_spawn_pipeline.process = AsyncMock(
+        return_value={"ticket_id": "NOSPAWN-1", "status": "needs_clarification"}
+    )
+
+    with patch("main._get_pipeline", return_value=no_spawn_pipeline):
+        await main._process_ticket(ticket)
+
+    assert "NOSPAWN-1" not in main._last_trigger_state, \
+        "trigger state must be cleared on no-spawn completion"
+    assert "NOSPAWN-1" not in main._active_tickets
+
+
+async def test_process_ticket_keeps_trigger_state_on_successful_spawn() -> None:
+    """When L2 is spawned successfully, _process_ticket must NOT clear the
+    trigger state (agent-complete's _delayed_release owns cleanup). Clearing
+    early would allow cascading webhooks to re-dispatch during the agent run.
+    """
+    ticket = _seed_ticket("SPAWN-1")
+
+    spawn_pipeline = AsyncMock()
+    spawn_pipeline.process = AsyncMock(
+        return_value={"ticket_id": "SPAWN-1", "spawn_triggered": True}
+    )
+
+    with patch("main._get_pipeline", return_value=spawn_pipeline):
+        await main._process_ticket(ticket)
+
+    assert main._last_trigger_state.get("SPAWN-1") is True, \
+        "trigger state must persist while L2 is running — cleared on agent_complete"
+    assert "SPAWN-1" in main._active_tickets, \
+        "active ticket must also persist until agent_complete"
 
 
 async def test_ado_webhook_remaps_ticket_id(tmp_path: Path) -> None:
@@ -234,7 +641,7 @@ async def test_ado_webhook_remaps_ticket_id(tmp_path: Path) -> None:
 
     payload = _ado_payload(work_item_id=123, project="XC-SF-30in30", tags="ai-implement")
 
-    with patch("main.find_profile_by_ado_project") as mock_find:
+    with _no_ado_auth(), patch("main.find_profile_by_ado_project") as mock_find:
         from client_profile import ClientProfile
 
         profile_data = {
@@ -336,6 +743,172 @@ async def test_agent_complete_escalated_adds_label() -> None:
         mock_adapter.add_label.assert_called_once_with("SCRUM-3", "needs-human")
 
 
+async def test_webhook_stats_counters() -> None:
+    """The /stats/webhooks endpoint exposes cumulative counters for each
+    ADO webhook outcome (accepted edge, skipped not-edge, skipped no-tag)
+    plus the current release-delay setting and live-state sizes. This is
+    the operator-facing visibility for the cascade-prevention fix.
+
+    _process_ticket is patched out so the real analyst pipeline doesn't
+    run — we're testing the webhook-handler counter wiring, not the
+    pipeline. Without the patch the no-spawn-state-clear behavior from
+    Bug 1's fix would reset _last_trigger_state between calls and the
+    second webhook would hit the accepted path instead of not-edge.
+    """
+    with _no_ado_auth(), patch.object(main, "_process_ticket", new_callable=AsyncMock):
+        async with await _make_client() as client:
+            # Accepted edge: fresh ticket, tag present.
+            accepted = _ado_payload(work_item_id=9001, tags="ai-implement")
+            r = await client.post("/webhooks/ado", json=accepted)
+            assert r.json()["status"] == "accepted"
+
+            # Skipped not-edge: same ticket, tag still present.
+            r = await client.post("/webhooks/ado", json=accepted)
+            assert r.json()["status"] == "skipped"
+            assert "not a new edge" in r.json()["reason"]
+
+            # Skipped no-tag: different ticket, no trigger tag.
+            no_tag = _ado_payload(work_item_id=9002, tags="sprint-7")
+            r = await client.post("/webhooks/ado", json=no_tag)
+            assert r.json()["status"] == "skipped"
+
+            stats = await client.get("/stats/webhooks")
+            assert stats.status_code == 200
+            body = stats.json()
+
+    counters = body["counters"]
+    assert counters[main.COUNTER_ACCEPTED_EDGE] == 1
+    assert counters[main.COUNTER_SKIPPED_NOT_EDGE] == 1
+    assert counters[main.COUNTER_SKIPPED_NO_TAG] == 1
+    assert body["release_delay_sec"] == main.settings.agent_complete_release_delay_sec
+
+
+async def test_agent_complete_clears_trigger_state_after_delay() -> None:
+    """After agent-complete fires, the delayed-release background task must
+    clear both _active_tickets and _last_trigger_state once the cooldown
+    window expires. This path was previously untested because the default
+    60-second delay makes tests impractical — now configurable via
+    settings.agent_complete_release_delay_sec which we monkeypatch to 0.
+    """
+    import asyncio
+
+    # Seed state as if a pipeline had dispatched this ticket and was now
+    # completing. _check_trigger_edge would have set state=True at webhook
+    # receipt; _process_ticket keeps it around because spawn_triggered=True.
+    main._active_tickets["SCRUM-9"] = __import__("time").time()
+    main._last_trigger_state["SCRUM-9"] = True
+
+    completion = {
+        "ticket_id": "SCRUM-9",
+        "status": "complete",
+        "pr_url": "https://github.com/org/repo/pull/9",
+        "branch": "ai/SCRUM-9",
+    }
+
+    # Snapshot background tasks BEFORE the POST so we can identify the new
+    # _delayed_release task created by agent_complete.
+    before = set(main._background_tasks)
+
+    with (
+        patch.object(main.settings, "agent_complete_release_delay_sec", 0),
+        patch.object(main, "_get_jira_adapter") as mock_get,
+    ):
+        mock_adapter = AsyncMock()
+        mock_get.return_value = mock_adapter
+
+        async with await _make_client() as client:
+            response = await client.post("/api/agent-complete", json=completion)
+        assert response.status_code == 200
+
+        # Grab the delayed-release task that agent_complete just created and
+        # await it directly instead of guessing the right number of event-loop
+        # yields. This keeps the test deterministic if _delayed_release grows
+        # new await points in the future.
+        new_tasks = main._background_tasks - before
+        assert new_tasks, "agent_complete should have scheduled a delayed_release task"
+        await asyncio.gather(*new_tasks)
+
+    assert "SCRUM-9" not in main._active_tickets, \
+        "ticket should be released from _active_tickets after delay"
+    assert "SCRUM-9" not in main._last_trigger_state, \
+        "trigger state should be cleared after delay so future re-tag retriggers"
+
+    # Bug regression: the spawned delayed-release task must have
+    # auto-removed itself from _background_tasks when it finished.
+    # Previously the add() call had no matching done-callback, so the
+    # set grew unbounded for every /api/agent-complete webhook.
+    assert len(main._background_tasks) == len(before), (
+        "_background_tasks must not grow after a spawned task finishes"
+    )
+
+
+# --- /api/agent-complete ticket_id + branch validation ---
+#
+# Bug regression: /api/retest validates ticket_id and branch because
+# both feed filesystem paths, but /api/agent-complete — which takes
+# the same fields and passes them to append_trace (ticket_id) and
+# consolidate_worktree_logs (branch) — used to accept anything. With
+# a leaked API key, a caller could plant .jsonl files outside
+# LOGS_DIR via ``ticket_id="../../tmp/pwn"`` and point consolidation
+# at an arbitrary git repo via ``branch="../../../../some/other"``.
+# Fixed by adding the same _TICKET_ID_PATTERN check and the shared
+# _resolve_worktree_dir helper.
+
+
+async def test_agent_complete_rejects_path_traversal_ticket_id(
+    tmp_path: Path,
+) -> None:
+    """A ticket_id that would escape LOGS_DIR must be rejected 400."""
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    canary = tmp_path / "pwn.jsonl"
+    canary.write_text("original")
+
+    with patch("tracer.LOGS_DIR", logs_dir):
+        async with await _make_client() as client:
+            resp = await client.post(
+                "/api/agent-complete",
+                json={
+                    "ticket_id": "../../pwn",
+                    "status": "complete",
+                    "branch": "ai/something",
+                    "pr_url": "",
+                },
+            )
+    assert resp.status_code == 400
+    # Canary outside logs_dir untouched.
+    assert canary.read_text() == "original"
+    assert list(logs_dir.iterdir()) == []
+
+
+async def test_agent_complete_rejects_path_traversal_branch(
+    tmp_path: Path,
+) -> None:
+    """A branch containing ``..`` must be rejected 400 — same contract
+    as /api/retest — so consolidate_worktree_logs can't be pointed at
+    a directory outside the worktrees tree."""
+    fake_client = tmp_path / "client-repo"
+    fake_client.mkdir()
+    (fake_client / ".git").mkdir()
+
+    with patch("main.settings") as mock_settings:
+        mock_settings.api_key = ""
+        mock_settings.default_client_repo = str(fake_client)
+        mock_settings.agent_complete_release_delay_sec = 0
+        async with await _make_client() as client:
+            resp = await client.post(
+                "/api/agent-complete",
+                json={
+                    "ticket_id": "PROJ-1",
+                    "status": "complete",
+                    "branch": "../../../../tmp/escape",
+                    "pr_url": "",
+                },
+            )
+    assert resp.status_code == 400
+    assert "branch" in resp.json()["detail"].lower()
+
+
 # --- Jira Webhook: malformed payloads ---
 
 
@@ -416,6 +989,83 @@ async def test_jira_webhook_accepts_signature_without_prefix() -> None:
                 headers={"Content-Type": "application/json", "x-hub-signature": raw_hex},
             )
             assert response.status_code == 202
+
+
+# --- Jira Webhook: delivery-ID idempotency ---
+
+
+async def test_jira_webhook_dedups_on_delivery_id() -> None:
+    """Same X-Atlassian-Webhook-Identifier twice → first accepted, second skipped.
+
+    Jira retries deliveries on 5xx responses. Without dedup, a transient
+    L1 hiccup would cause the same logical event to be processed twice,
+    leading to double-enriched comments and double-spawned agent teams.
+    """
+    payload = json.loads((FIXTURES / "jira_webhook_story.json").read_text())
+    delivery_id = "delivery-abc-123"
+
+    async with await _make_client() as client:
+        # First delivery — normal processing.
+        first = await client.post(
+            "/webhooks/jira",
+            json=payload,
+            headers={"x-atlassian-webhook-identifier": delivery_id},
+        )
+        assert first.status_code == 202
+        assert first.json()["status"] == "accepted"
+
+        # Second delivery with same ID — skipped.
+        second = await client.post(
+            "/webhooks/jira",
+            json=payload,
+            headers={"x-atlassian-webhook-identifier": delivery_id},
+        )
+        assert second.status_code == 202
+        assert second.json() == {
+            "status": "skipped",
+            "reason": "duplicate delivery",
+        }
+
+
+async def test_jira_webhook_allows_different_delivery_ids() -> None:
+    """Two webhooks with different delivery IDs both process.
+
+    Dedup must be keyed on the ID, not on payload content — legitimate
+    back-to-back webhooks (e.g., two different ticket updates in the
+    same second) share the same JSON shape but have distinct IDs.
+    """
+    payload = json.loads((FIXTURES / "jira_webhook_story.json").read_text())
+
+    async with await _make_client() as client:
+        first = await client.post(
+            "/webhooks/jira",
+            json=payload,
+            headers={"x-atlassian-webhook-identifier": "id-one"},
+        )
+        assert first.status_code == 202
+        assert first.json()["status"] == "accepted"
+
+        second = await client.post(
+            "/webhooks/jira",
+            json=payload,
+            headers={"x-atlassian-webhook-identifier": "id-two"},
+        )
+        assert second.status_code == 202
+        assert second.json()["status"] == "accepted"
+
+
+async def test_jira_webhook_without_delivery_header_processes() -> None:
+    """Missing header → skip dedup gracefully, process normally.
+
+    Older webhooks or custom senders may not send the identifier; we
+    shouldn't block them. Just log at DEBUG and proceed.
+    """
+    payload = json.loads((FIXTURES / "jira_webhook_story.json").read_text())
+
+    async with await _make_client() as client:
+        response = await client.post("/webhooks/jira", json=payload)
+        assert response.status_code == 202
+        assert response.json()["status"] == "accepted"
 
 
 # --- Jira Bug Webhook ---
@@ -627,3 +1277,204 @@ class TestJiraBugWebhook:
         body = r.json()
         assert body["status"] == "ignored"
         assert body["reason"] == "not_a_defect_type"
+
+
+# --- /api/retest path-traversal guard ---
+#
+# Bug regression: ``_BRANCH_PATTERN`` used to permit ``..`` because the
+# regex charset included ``.``, and the worktree-containment check used
+# ``str.startswith`` on resolved paths. A sibling-prefix directory like
+# ``worktrees-evil`` satisfied both checks — "../worktrees-evil/x"
+# resolved to ``/repo/worktrees-evil/x`` which literally starts with
+# ``/repo/worktrees``. Fixed by rejecting ``..`` in the branch regex
+# and switching the containment check to ``Path.relative_to``.
+
+
+async def test_retest_rejects_branch_with_dotdot(tmp_path: Path) -> None:
+    """Bug regression: ``..`` in the branch must be rejected at the
+    regex layer, before the containment check even runs."""
+    import re as _re
+
+    fake_client = tmp_path / "client-repo"
+    fake_client.mkdir()
+    (fake_client / ".git").mkdir()
+    # Create a sibling-prefix directory that would have fooled the old
+    # startswith check. It must never be used as cwd.
+    sibling = tmp_path / "worktrees-evil"
+    sibling.mkdir()
+    (sibling / "x").mkdir()
+
+    with patch("main.settings") as mock_settings:
+        mock_settings.api_key = ""  # Open local dev auth
+        mock_settings.default_client_repo = str(fake_client)
+        async with await _make_client() as client:
+            # Attempt 1: explicit traversal via ``..``
+            r = await client.post(
+                "/api/retest",
+                json={
+                    "ticket_id": "PROJ-1",
+                    "phase": "qa",
+                    "branch": "../worktrees-evil/x",
+                },
+            )
+    # Rejected at regex layer — 400 with the branch-name detail.
+    assert r.status_code == 400
+    assert "branch" in r.json()["detail"].lower()
+
+    # The bug-1 regex must also reject the subtler forms.
+    for evil in ("../../outside", "..", "..foo"):
+        assert not _re.match(main._BRANCH_PATTERN, evil), (
+            f"{evil!r} must not match _BRANCH_PATTERN"
+        )
+
+
+# --- _is_safe_branch reserved-name rejection ---
+#
+# The regex alone is too permissive. It would accept literal ``HEAD``,
+# a name ending in ``.lock``, or a leading/trailing slash — all of
+# which either collide with git's ref machinery or corrupt the repo.
+# _is_safe_branch is the belt-and-braces check every caller now uses.
+
+
+def test_branch_validator_rejects_HEAD() -> None:  # noqa: N802 — HEAD is a proper-noun git ref; lowercasing obscures the test's intent
+    assert not main._is_safe_branch("HEAD")
+    assert not main._is_safe_branch("ORIG_HEAD")
+    assert not main._is_safe_branch("FETCH_HEAD")
+    assert not main._is_safe_branch("MERGE_HEAD")
+
+
+def test_branch_validator_rejects_lock_suffix() -> None:
+    # git's refs/heads/<name>.lock is a lockfile — creating a ref
+    # named ``foo.lock`` corrupts the ref database.
+    assert not main._is_safe_branch("foo.lock")
+    assert not main._is_safe_branch("ai/PROJ-1.lock")
+
+
+def test_branch_validator_rejects_leading_slash() -> None:
+    # Leading ``/`` is already rejected by the regex (it must start
+    # with [A-Za-z0-9]), but we pin the behavior to guard against a
+    # future regex relaxation.
+    assert not main._is_safe_branch("/foo")
+
+
+def test_branch_validator_rejects_trailing_slash() -> None:
+    # A branch name ending in ``/`` has historically caused ``git``
+    # to misparse the ref.
+    assert not main._is_safe_branch("foo/")
+    assert not main._is_safe_branch("ai/")
+
+
+def test_branch_validator_rejects_dot_git() -> None:
+    assert not main._is_safe_branch(".git")
+
+
+def test_branch_validator_accepts_ai_slash_ticket_id() -> None:
+    # Regression: the normal production branch name must still pass.
+    assert main._is_safe_branch("ai/PROJ-123")
+    assert main._is_safe_branch("ai/XCSF30-88424")
+    assert main._is_safe_branch("fix/phase-7-polish")
+
+
+async def test_retest_rejects_sibling_prefix_via_relative_to(tmp_path: Path) -> None:
+    """Bug regression: before the fix, the containment check was
+    ``str(resolved).startswith(str(worktrees_parent))`` — so a branch
+    that resolved to ``/tmp/x/worktrees-evil/foo`` passed because the
+    string happened to start with ``/tmp/x/worktrees``. This test
+    verifies that even a crafted branch name that survives the regex
+    (no ``..``) still fails the relative_to containment check.
+
+    The only way to produce such a path without ``..`` is to plant a
+    sibling symlink inside worktrees that resolves out. Simulate that
+    here."""
+    fake_client = tmp_path / "client-repo"
+    fake_client.mkdir()
+    (fake_client / ".git").mkdir()
+    worktrees = tmp_path / "worktrees"
+    worktrees.mkdir()
+    # Plant a sibling-prefix directory the symlink will escape to.
+    sibling = tmp_path / "worktrees-evil" / "target"
+    sibling.mkdir(parents=True)
+    (sibling / "trap").write_text("planted")
+    # Symlink inside worktrees that escapes to the sibling.
+    (worktrees / "evil-link").symlink_to(sibling, target_is_directory=True)
+
+    with patch("main.settings") as mock_settings:
+        mock_settings.api_key = ""
+        mock_settings.default_client_repo = str(fake_client)
+        async with await _make_client() as client:
+            r = await client.post(
+                "/api/retest",
+                json={
+                    "ticket_id": "PROJ-1",
+                    "phase": "qa",
+                    "branch": "evil-link",
+                },
+            )
+    # Must be rejected — the symlink resolves outside worktrees/.
+    assert r.status_code == 400
+    assert "outside" in r.json()["detail"].lower()
+
+
+# --- /api/agent-trace ticket_id validation ---
+#
+# Bug regression: the endpoint is intentionally open for the local
+# file-watcher in spawn_team.py but it used to pass the
+# request-body-supplied ``ticket_id`` straight to ``append_trace()``,
+# which builds ``LOGS_DIR / f"{ticket_id}.jsonl"``. Without input
+# validation, a body like ``{"ticket_id": "../../tmp/pwn", ...}`` would
+# create ``<LOGS_DIR>/../../tmp/pwn.jsonl`` with attacker-controlled
+# JSON. Fixed by calling ``_validate_ticket_id`` before
+# ``append_trace`` — same regex every other ticket_id-consuming
+# endpoint uses.
+
+
+async def test_agent_trace_rejects_path_traversal_ticket_id(
+    tmp_path: Path,
+) -> None:
+    """A malicious ticket_id with path segments must be rejected with
+    400 and produce no file outside LOGS_DIR."""
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    canary = tmp_path / "pwn.jsonl"
+    canary.write_text("original")
+
+    with patch("tracer.LOGS_DIR", logs_dir):
+        async with await _make_client() as client:
+            resp = await client.post(
+                "/api/agent-trace",
+                json={
+                    "ticket_id": "../pwn",
+                    "trace_id": "t1",
+                    "phase": "x",
+                    "event": "tampered",
+                },
+            )
+    assert resp.status_code == 400
+    # Canary outside LOGS_DIR must not be touched.
+    assert canary.read_text() == "original"
+    # And nothing was written inside LOGS_DIR either.
+    assert list(logs_dir.iterdir()) == []
+
+
+async def test_agent_trace_accepts_valid_ticket_id(tmp_path: Path) -> None:
+    """A legitimate ticket_id still reaches append_trace and lands in
+    LOGS_DIR — the validator must not break the happy path."""
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+
+    with patch("tracer.LOGS_DIR", logs_dir):
+        async with await _make_client() as client:
+            resp = await client.post(
+                "/api/agent-trace",
+                json={
+                    "ticket_id": "PROJ-42",
+                    "trace_id": "t1",
+                    "phase": "pipeline",
+                    "event": "phase_started",
+                },
+            )
+    assert resp.status_code == 200
+    # append_trace wrote exactly one jsonl file.
+    assert (logs_dir / "PROJ-42.jsonl").exists()
+    content = (logs_dir / "PROJ-42.jsonl").read_text().strip()
+    assert '"event": "phase_started"' in content
