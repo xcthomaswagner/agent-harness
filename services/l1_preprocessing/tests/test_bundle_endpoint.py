@@ -264,6 +264,48 @@ async def test_artifact_session_stream_404_when_file_missing(
     assert resp.status_code == 404
 
 
+async def test_artifact_session_stream_oserror_returns_generic_500(
+    trace_dir: Path, client: AsyncClient,
+) -> None:
+    """Regression: previously the OSError from ``stream_path.read_bytes()``
+    was interpolated into the 500 response body as ``read failed: {exc}``
+    — which typically contains the full filesystem path. That leaked
+    operator topology (the worktrees parent, the ticket/branch slug) to
+    any caller. Response must be a generic message; the path must
+    appear in structured logs only.
+    """
+    stream = trace_dir / "present-but-unreadable.jsonl"
+    stream.write_text('{"type":"assistant"}\n')
+    _seed_trace(trace_dir, "ART-LEAK", stream_path=stream)
+
+    # Patch Path.read_bytes for this call only so we simulate a
+    # permission denied without actually chmod'ing a tmp file (which
+    # behaves inconsistently when pytest runs as root in CI).
+    from pathlib import Path as _Path
+
+    original = _Path.read_bytes
+
+    def _raise(self: _Path) -> bytes:
+        # Match what a real permission error message looks like.
+        raise OSError(f"{self}: permission denied")
+
+    with patch("tracer.LOGS_DIR", trace_dir):
+        with patch.object(_Path, "read_bytes", _raise):
+            resp = await client.get("/traces/ART-LEAK/artifact/session_stream")
+        # Restore is automatic via the context manager — noted for
+        # future-me in case this assertion ever moves outside the
+        # ``with`` block.
+        _ = original
+
+    assert resp.status_code == 500
+    body = resp.text
+    # Generic message, no path leak.
+    assert "Failed to read artifact" in body
+    assert "permission denied" not in body
+    assert str(stream) not in body
+    assert "present-but-unreadable" not in body
+
+
 async def test_artifact_unknown_type_returns_404(
     trace_dir: Path, client: AsyncClient,
 ) -> None:

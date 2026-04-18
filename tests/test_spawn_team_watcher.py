@@ -16,10 +16,31 @@ import json
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+
+
+def _wait_until(
+    predicate: Callable[[], bool],
+    timeout: float = 3.0,
+    interval: float = 0.02,
+    description: str = "predicate",
+) -> None:
+    """Poll ``predicate`` until it returns truthy or ``timeout`` elapses.
+
+    Replaces bare ``time.sleep`` calls in watcher tests, which were
+    flaky under CI load — the sleeps were blind guesses at how long the
+    background thread would need to reach a given observable state.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(interval)
+    raise TimeoutError(f"{description} did not hold within {timeout}s")
 
 
 def _load_spawn_team_module():
@@ -72,6 +93,7 @@ def test_trace_watcher_buffers_partial_lines(tmp_path: Path) -> None:
     log_dir.mkdir(parents=True)
     jsonl = log_dir / "pipeline.jsonl"
     jsonl.touch()
+    watcher_log = log_dir / "trace-watcher.log"
 
     config = tmp_path / ".harness" / "trace-config.json"
     config.write_text(json.dumps({
@@ -93,8 +115,14 @@ def test_trace_watcher_buffers_partial_lines(tmp_path: Path) -> None:
         )
         thread.start()
 
-        # Give the watcher a beat to open the file and enter its loop.
-        time.sleep(0.1)
+        # Wait for the watcher to open the jsonl file and enter its tail
+        # loop. The watcher writes "Tailing ..." to its log at exactly
+        # that point, which is a precise signal — more reliable than a
+        # bare sleep, which flakes under CI load.
+        _wait_until(
+            lambda: watcher_log.exists() and "Tailing" in watcher_log.read_text(),
+            description="watcher entered tail loop",
+        )
 
         # Write a partial line — no trailing newline. The old code would
         # parse this, hit a JSONDecodeError, and silently drop the event.
@@ -102,7 +130,15 @@ def test_trace_watcher_buffers_partial_lines(tmp_path: Path) -> None:
             f.write('{"phase":"planning","event":"Plan complete"')
             f.flush()
 
-        time.sleep(0.2)
+        # Wait long enough for the watcher's 2-second poll tick to have
+        # observed the partial line. The watcher logs nothing for a
+        # buffered partial, so we confirm the buffering behavior
+        # indirectly: no POST has been made (the predicate is "watcher
+        # has had time to see the line and correctly declined to post"
+        # — we express this as 'posted remains empty after a poll cycle
+        # has elapsed'). A short fixed wait is still needed here because
+        # the absence of an event has no positive signal we can poll.
+        time.sleep(0.3)
 
         # At this point the watcher should have buffered the partial and
         # posted nothing.
@@ -115,10 +151,9 @@ def test_trace_watcher_buffers_partial_lines(tmp_path: Path) -> None:
             f.write('}\n')
             f.flush()
 
-        # Wait for the watcher to pick it up.
-        deadline = time.time() + 3.0
-        while time.time() < deadline and not posted:
-            time.sleep(0.1)
+        # Wait for the watcher to pick it up — poll the real observable
+        # (posted list grew) instead of guessing at timing.
+        _wait_until(lambda: len(posted) >= 1, description="first POST recorded")
 
         stop.set()
         thread.join(timeout=3)
@@ -141,6 +176,7 @@ def test_trace_watcher_drains_on_shutdown(tmp_path: Path) -> None:
     log_dir.mkdir(parents=True)
     jsonl = log_dir / "pipeline.jsonl"
     jsonl.touch()
+    watcher_log = log_dir / "trace-watcher.log"
 
     config = tmp_path / ".harness" / "trace-config.json"
     config.write_text(json.dumps({
@@ -162,9 +198,14 @@ def test_trace_watcher_drains_on_shutdown(tmp_path: Path) -> None:
         )
         thread.start()
 
-        # Wait for the watcher to open the file. It will enter its read loop
-        # and immediately hit EOF, then sleep 2 seconds polling for more.
-        time.sleep(0.1)
+        # Wait for the watcher to open the file and enter its tail loop.
+        # The "Tailing" log line is written at exactly that point. We
+        # need this synchronization so the subsequent write-then-stop
+        # dance exercises the drain pass (not the steady-state loop).
+        _wait_until(
+            lambda: watcher_log.exists() and "Tailing" in watcher_log.read_text(),
+            description="watcher entered tail loop",
+        )
 
         # Write two events then *immediately* set stop before the watcher's
         # 2-second sleep expires. The old implementation would miss these

@@ -1028,6 +1028,53 @@ async def test_retest_rejects_branch_with_dotdot(tmp_path: Path) -> None:
         )
 
 
+# --- _is_safe_branch reserved-name rejection ---
+#
+# The regex alone is too permissive. It would accept literal ``HEAD``,
+# a name ending in ``.lock``, or a leading/trailing slash — all of
+# which either collide with git's ref machinery or corrupt the repo.
+# _is_safe_branch is the belt-and-braces check every caller now uses.
+
+
+def test_branch_validator_rejects_HEAD() -> None:  # noqa: N802 — HEAD is a proper-noun git ref; lowercasing obscures the test's intent
+    assert not main._is_safe_branch("HEAD")
+    assert not main._is_safe_branch("ORIG_HEAD")
+    assert not main._is_safe_branch("FETCH_HEAD")
+    assert not main._is_safe_branch("MERGE_HEAD")
+
+
+def test_branch_validator_rejects_lock_suffix() -> None:
+    # git's refs/heads/<name>.lock is a lockfile — creating a ref
+    # named ``foo.lock`` corrupts the ref database.
+    assert not main._is_safe_branch("foo.lock")
+    assert not main._is_safe_branch("ai/PROJ-1.lock")
+
+
+def test_branch_validator_rejects_leading_slash() -> None:
+    # Leading ``/`` is already rejected by the regex (it must start
+    # with [A-Za-z0-9]), but we pin the behavior to guard against a
+    # future regex relaxation.
+    assert not main._is_safe_branch("/foo")
+
+
+def test_branch_validator_rejects_trailing_slash() -> None:
+    # A branch name ending in ``/`` has historically caused ``git``
+    # to misparse the ref.
+    assert not main._is_safe_branch("foo/")
+    assert not main._is_safe_branch("ai/")
+
+
+def test_branch_validator_rejects_dot_git() -> None:
+    assert not main._is_safe_branch(".git")
+
+
+def test_branch_validator_accepts_ai_slash_ticket_id() -> None:
+    # Regression: the normal production branch name must still pass.
+    assert main._is_safe_branch("ai/PROJ-123")
+    assert main._is_safe_branch("ai/XCSF30-88424")
+    assert main._is_safe_branch("fix/phase-7-polish")
+
+
 async def test_retest_rejects_sibling_prefix_via_relative_to(tmp_path: Path) -> None:
     """Bug regression: before the fix, the containment check was
     ``str(resolved).startswith(str(worktrees_parent))`` — so a branch

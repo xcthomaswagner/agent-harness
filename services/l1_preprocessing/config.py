@@ -20,7 +20,6 @@ class Settings(BaseSettings):
     jira_api_token: str = ""
     jira_user_email: str = ""
     jira_ac_field_id: str = "customfield_10429"
-    jira_story_points_field_id: str = "customfield_10040"
 
     # Jira bug webhook
     jira_implemented_ticket_field_id: str = ""  # e.g. "customfield_10050"

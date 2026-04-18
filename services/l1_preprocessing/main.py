@@ -479,16 +479,19 @@ async def _process_ticket(ticket: TicketPayload, trace_id: str = "") -> None:
 
 
 @app.get("/health")
-async def health() -> dict[str, object]:
-    """Health check with configuration status."""
-    return {
-        "status": "ok",
-        "anthropic_api_key": bool(settings.anthropic_api_key),
-        "jira_configured": bool(settings.jira_base_url and settings.jira_api_token),
-        "ado_configured": bool(settings.ado_org_url and settings.ado_pat),
-        "webhook_secret": bool(settings.webhook_secret),
-        "client_repo": bool(settings.default_client_repo),
-    }
+async def health() -> dict[str, str]:
+    """Health check — minimal liveness probe.
+
+    Previously this endpoint returned a boolean for each configured
+    secret (anthropic_api_key, jira_configured, ado_configured,
+    webhook_secret, client_repo). Those flags were reachable without
+    auth and told an attacker exactly which integrations were wired
+    up — useful for targeting. We no longer expose that surface; the
+    endpoint now reports only liveness. Operators who need
+    configuration visibility should look at the service logs or the
+    internal /stats endpoints (which are API-key protected).
+    """
+    return {"status": "ok"}
 
 
 @app.get("/stats/webhooks")
@@ -1069,7 +1072,22 @@ async def trace_artifact(ticket_id: str, artifact_type: str) -> Response:
         try:
             body = stream_path.read_bytes()
         except OSError as exc:
-            raise HTTPException(status_code=500, detail=f"read failed: {exc}") from exc
+            # Never echo the OSError message in the response — it
+            # typically contains the filesystem path ("/.../worktrees/ai-
+            # PROJ-1/... permission denied") and leaks operator topology
+            # to any caller of /traces/<id>/artifact/session_stream. Log
+            # the full exception (paths are fine in structlog sinks, those
+            # are local) and serve a generic 500.
+            logger.error(
+                "artifact_read_failed",
+                ticket_id=ticket_id,
+                artifact_type=artifact_type,
+                stream_path=str(stream_path),
+                exc_info=exc,
+            )
+            raise HTTPException(
+                status_code=500, detail="Failed to read artifact"
+            ) from exc
         # Force a download rather than letting the browser try to render a
         # multi-MB JSONL blob as a syntax-highlighted JSON document in a new
         # tab. The dashboard Raw Downloads panel expects a file save.
@@ -1530,7 +1548,45 @@ _TICKET_ID_PATTERN = re.compile(r"^[A-Za-z0-9]+-[0-9]+$")
 # Path.is_relative_to as the real guardrail; this regex is belt-and-
 # braces so a bad branch fails fast at input validation.
 _BRANCH_PATTERN = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9/_.-]*$")
+# Reserved git ref names — a branch literally named ``HEAD`` satisfies
+# the regex but makes every ``git`` invocation ambiguous because
+# ``HEAD`` is the symbolic ref for the current checkout. The rest of
+# the *_HEAD names are checked for defense-in-depth even though the
+# leading-underscore/capital form would need them to be uppercase to
+# matter; we include them so a future regex relaxation doesn't silently
+# open the door.
+_RESERVED_BRANCH_NAMES = frozenset({"HEAD", "ORIG_HEAD", "FETCH_HEAD", "MERGE_HEAD"})
 _VALID_PHASES = {"qa", "e2e", "review"}
+
+
+def _is_safe_branch(name: str) -> bool:
+    """Return True iff ``name`` is a safe branch name to use in filesystem
+    and git command construction.
+
+    Rejects:
+      - Anything the regex rejects (``..``, bad chars, empty, etc.)
+      - Reserved git refs (``HEAD``, ``ORIG_HEAD``, ``FETCH_HEAD``,
+        ``MERGE_HEAD``) — these satisfy the regex but make git commands
+        ambiguous against the live symbolic refs.
+      - Names that start or end with ``/`` — git treats these as
+        invalid refs, but the regex was permissive.
+      - Names ending with ``.lock`` — git's lockfile suffix; creating a
+        branch with that name corrupts the ref database.
+      - The literal ``.git`` — a directory name we never want to
+        collide with.
+
+    Callers must route every filesystem or git command involving a
+    user-supplied branch through this function, not the raw regex.
+    """
+    if not name or not _BRANCH_PATTERN.fullmatch(name):
+        return False
+    if name in _RESERVED_BRANCH_NAMES:
+        return False
+    if name.startswith("/") or name.endswith("/"):
+        return False
+    if name.endswith(".lock"):
+        return False
+    return name != ".git"
 
 
 def _resolve_worktree_dir(client_repo: str, branch: str) -> Path:
@@ -1547,7 +1603,7 @@ def _resolve_worktree_dir(client_repo: str, branch: str) -> Path:
     the semantics of "worktree doesn't exist yet" vs "branch is
     invalid" differ across the two endpoints.
     """
-    if not branch or not _BRANCH_PATTERN.match(branch):
+    if not _is_safe_branch(branch):
         raise HTTPException(
             status_code=400,
             detail="Invalid branch name (alphanumeric, slashes, dots, hyphens only)",
