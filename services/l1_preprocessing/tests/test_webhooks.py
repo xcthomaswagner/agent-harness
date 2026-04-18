@@ -206,6 +206,108 @@ async def test_ado_webhook_rejects_wrong_token() -> None:
             assert response.status_code == 401
 
 
+# --- ADO dual-auth parity coverage (parallel to the four Jira auth tests) ---
+#
+# The dual-auth path (HMAC signature OR bearer token) has happy-path coverage
+# above, but until now the four states below weren't explicitly asserted. These
+# mirror the Jira-side auth coverage at lines 45-98 so the two endpoints are
+# provably symmetric.
+
+
+async def test_ado_webhook_rejects_missing_hmac_signature_when_secret_configured() -> None:
+    """Only HMAC secret configured (no bearer). Missing signature → 401.
+
+    Parity with ``test_jira_webhook_rejects_missing_signature_when_secret_set``.
+    Without this test, an operator who turns ON ``webhook_secret`` but forgets
+    to set ``ado_webhook_token`` could ship a regression where unsigned ADO
+    webhooks sneak through via the dual-auth ``no_secret_behavior="open_local_dev"``
+    fallback (since the bearer path short-circuits when its secret is empty).
+    """
+    payload = _ado_payload(tags="ai-implement")
+
+    with patch("main.settings") as mock_settings:
+        mock_settings.webhook_secret = "set"
+        mock_settings.ado_webhook_token = ""
+
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/ado", json=payload)
+            assert response.status_code == 401
+
+
+async def test_ado_webhook_rejects_missing_bearer_when_only_bearer_configured() -> None:
+    """Only bearer token configured (no HMAC). Missing bearer header → 401.
+
+    Parity with ``test_ado_webhook_rejects_without_auth`` but pins the
+    exclusively-bearer configuration so future auth-refactor mistakes can't
+    accidentally swap the two secrets' roles.
+    """
+    payload = _ado_payload(tags="ai-implement")
+
+    with patch("main.settings") as mock_settings:
+        mock_settings.webhook_secret = ""
+        mock_settings.ado_webhook_token = "set"
+
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/ado", json=payload)
+            assert response.status_code == 401
+
+
+async def test_ado_webhook_valid_hmac_accepted() -> None:
+    """Only HMAC secret configured. Valid signed request → 202.
+
+    Proves the HMAC arm of the dual-auth path still accepts signed requests
+    even when the bearer-token secret is empty (i.e., the bearer path must
+    NOT clobber a valid HMAC auth_ok).
+    """
+    payload = _ado_payload(tags="ai-implement")
+    body = json.dumps(payload).encode()
+    secret = "ado-hmac-abc"
+    signature = "sha256=" + hmac.new(
+        secret.encode(), body, hashlib.sha256
+    ).hexdigest()
+
+    with patch("main.settings") as mock_settings:
+        mock_settings.webhook_secret = secret
+        mock_settings.ado_webhook_token = ""
+        mock_settings.ado_org_url = ""
+        mock_settings.ado_pat = ""
+
+        async with await _make_client() as client:
+            response = await client.post(
+                "/webhooks/ado",
+                content=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-hub-signature": signature,
+                },
+            )
+            assert response.status_code == 202
+
+
+async def test_ado_webhook_valid_bearer_accepted() -> None:
+    """Only bearer token configured. Valid bearer header → 202.
+
+    Duplicates the coverage of ``test_ado_webhook_accepts_token_header``
+    above but asserts explicitly in the dual-auth context (named to match
+    the parity suite). Kept so the four-test matrix reads clearly.
+    """
+    payload = _ado_payload(tags="ai-implement")
+
+    with patch("main.settings") as mock_settings:
+        mock_settings.webhook_secret = ""
+        mock_settings.ado_webhook_token = "ado-bearer-abc"
+        mock_settings.ado_org_url = ""
+        mock_settings.ado_pat = ""
+
+        async with await _make_client() as client:
+            response = await client.post(
+                "/webhooks/ado",
+                json=payload,
+                headers={"x-ado-webhook-token": "ado-bearer-abc"},
+            )
+            assert response.status_code == 202
+
+
 async def test_ado_webhook_skips_when_no_ai_tag() -> None:
     """Work items without the ai-implement tag are skipped."""
     payload = _ado_payload(tags="sprint-7; enhancement")

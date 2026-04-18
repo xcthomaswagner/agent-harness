@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
+from collections.abc import Callable
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -14,6 +16,60 @@ import main as l3_main
 from main import app
 
 TEST_SECRET = "test-webhook-secret"
+
+
+async def _wait_for(
+    predicate: Callable[[], bool],
+    *,
+    timeout: float = 3.0,
+    poll: float = 0.01,
+) -> None:
+    """Poll ``predicate`` until truthy or ``timeout`` seconds elapse.
+
+    Replaces the fixed ``await asyncio.sleep(0.05)`` pattern that was
+    sprinkled through this file to wait for FastAPI BackgroundTasks
+    completion. Fixed sleeps are flaky on slow CI (0.05s isn't always
+    enough for a scheduler to schedule + run the background task) AND
+    wasteful on fast CI (the test pays 50ms even when the task runs
+    in 2ms). Polling exits as soon as the mock is observed, bounded
+    by ``timeout`` so a genuinely unfired task fails loud instead of
+    hanging the test session.
+
+    Usage:
+      await _wait_for(lambda: mock_forward.await_count >= 1)
+
+    The predicate is wrapped in ``bool()`` so simple integer counts
+    work directly. ``pytest.fail`` is not imported here because tests
+    that use ``_wait_for`` already assert the state right after — the
+    timeout surfaces as a fast assertion failure on the next line.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    while True:
+        if predicate():
+            return
+        if asyncio.get_event_loop().time() >= deadline:
+            return
+        await asyncio.sleep(poll)
+
+
+async def _settle(cycles: int = 10) -> None:
+    """Yield control to the event loop enough times to drain scheduled tasks.
+
+    Used by tests that assert ``await_count == 0`` after a background
+    handler was scheduled — we need a POSITIVE signal that any queued
+    task has had a chance to run. A chain of ``asyncio.sleep(0)``
+    passes control back to the scheduler repeatedly, which runs any
+    task that's already on the ready queue without adding wall-clock
+    delay. Ten cycles covers handler-to-forwarder-to-httpx chains
+    several levels deep on current CPython; very fast but deterministic.
+
+    Unlike ``asyncio.sleep(N)``, this doesn't wait wall-clock time —
+    it purely advances the event loop state. On a busy machine a
+    single ``sleep(0.05)`` could actually miss the scheduling window
+    (the loop might not preempt back to the test coroutine in time).
+    """
+    for _ in range(cycles):
+        await asyncio.sleep(0)
 
 
 async def _make_client() -> AsyncClient:
@@ -524,8 +580,7 @@ async def test_pr_opened_forwards_autonomy_event() -> None:
 
         assert response.status_code == 202
         # Allow background task to run
-        import asyncio as _asyncio
-        await _asyncio.sleep(0.05)
+        await _wait_for(lambda: mock_forward.await_count >= 1)
 
         assert mock_forward.await_count >= 1
         event = mock_forward.await_args.args[0]
@@ -560,8 +615,7 @@ async def test_review_approved_forwards_autonomy_event() -> None:
             response = await _post_webhook(client, payload, "pull_request_review")
 
         assert response.status_code == 202
-        import asyncio as _asyncio
-        await _asyncio.sleep(0.05)
+        await _wait_for(lambda: mock_forward.await_count >= 1)
 
         assert mock_forward.await_count >= 1
         event = mock_forward.await_args.args[0]
@@ -589,8 +643,7 @@ async def test_pr_merged_forwards_autonomy_event() -> None:
         assert response.status_code == 202
         assert response.json()["event_type"] == "pr_merged"
 
-        import asyncio as _asyncio
-        await _asyncio.sleep(0.05)
+        await _wait_for(lambda: mock_forward.await_count >= 1)
 
         assert mock_forward.await_count >= 1
         event = mock_forward.await_args.args[0]
@@ -736,8 +789,7 @@ class TestHumanIssueForwarding:
                 response = await _post_webhook(client, payload, "pull_request_review")
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            await _wait_for(lambda: mock_forward.await_count >= 1)
 
             assert mock_forward.await_count == 1
             issue = mock_forward.await_args.args[0]
@@ -778,8 +830,10 @@ class TestHumanIssueForwarding:
                 response = await _post_webhook(client, payload, "pull_request_review")
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            # Handler runs but short-circuits on empty body; drain the
+            # event loop so any would-be forward has executed, then
+            # verify it didn't happen.
+            await _settle()
 
             assert mock_forward.await_count == 0
 
@@ -806,8 +860,9 @@ class TestHumanIssueForwarding:
                 response = await _post_webhook(client, payload, "pull_request_review")
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            # Handler runs but short-circuits on bot author; drain the
+            # event loop and verify no forward happened.
+            await _settle()
 
             assert mock_forward.await_count == 0
 
@@ -837,8 +892,7 @@ class TestHumanIssueForwarding:
                 response = await _post_webhook(client, payload, "pull_request_review")
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            await _wait_for(lambda: mock_forward.await_count >= 1)
 
             assert mock_forward.await_count == 1
             issue = mock_forward.await_args.args[0]
@@ -882,8 +936,7 @@ class TestHumanIssueForwarding:
 
             assert response.status_code == 202
             assert response.json()["event_type"] == "review_comment_created"
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            await _wait_for(lambda: mock_forward.await_count >= 1)
 
             assert mock_forward.await_count == 1
             issue = mock_forward.await_args.args[0]
@@ -927,8 +980,7 @@ class TestHumanIssueForwarding:
                 )
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            await _wait_for(lambda: mock_forward.await_count >= 1)
 
             assert mock_forward.await_count == 1
 
@@ -963,9 +1015,9 @@ class TestHumanIssueForwarding:
                 )
 
             assert response.status_code == 202
-            # deleted is classified as IGNORED, so no handler runs
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            # deleted is classified as IGNORED, so no handler runs.
+            # Drain the event loop so we see any stray forward if one fires.
+            await _settle()
 
             assert mock_forward.await_count == 0
 
@@ -1000,8 +1052,9 @@ class TestHumanIssueForwarding:
                 )
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-            await _asyncio.sleep(0.05)
+            # Handler runs but short-circuits on missing ticket_id;
+            # drain the event loop and verify no forward happened.
+            await _settle()
 
             assert mock_forward.await_count == 0
 
@@ -1161,9 +1214,7 @@ class TestAutoMergeTrigger:
                 )
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-
-            await _asyncio.sleep(0.1)
+            await _wait_for(lambda: mock_eval.await_count >= 1)
 
             assert mock_eval.await_count == 1
             kwargs = mock_eval.await_args.kwargs
@@ -1199,9 +1250,7 @@ class TestAutoMergeTrigger:
                 response = await _post_webhook(client, payload, "check_suite")
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-
-            await _asyncio.sleep(0.1)
+            await _wait_for(lambda: mock_eval.await_count >= 1)
 
             assert mock_eval.await_count == 1
             kwargs = mock_eval.await_args.kwargs
@@ -1246,9 +1295,7 @@ class TestAutoMergeTrigger:
                 )
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-
-            await _asyncio.sleep(0.1)
+            await _wait_for(lambda: mock_eval.await_count >= 1)
             assert mock_eval.await_count == 1
 
     async def test_review_approved_skips_non_ai_branch(self) -> None:
@@ -1294,9 +1341,9 @@ class TestAutoMergeTrigger:
                 )
 
             assert response.status_code == 202
-            import asyncio as _asyncio
-
-            await _asyncio.sleep(0.1)
+            # Non-AI branch should short-circuit in the handler — no
+            # background work scheduled. Drain the loop and assert.
+            await _settle()
 
             # Neither L1 /api/agent-complete nor the auto-merge
             # evaluator should fire for a non-AI branch.
