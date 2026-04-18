@@ -233,13 +233,24 @@ class TestFrameRendering:
         file_resp = httpx.Response(
             200, json=_FILE_RESPONSE_JSON, request=_DUMMY_REQUEST,
         )
+        # Use the real Figma CDN host so the SSRF guard (which checks
+        # both allowlist membership and DNS resolution) accepts it.
+        # The host is in ``_FIGMA_CDN_HOSTS`` and resolves to public
+        # AWS IPs — the guard only rejects RFC1918/loopback/link-local,
+        # so public DNS results pass.
         image_api_resp = httpx.Response(
             200,
             json={
                 "err": None,
                 "images": {
-                    "1:10": "https://figma-s3.amazonaws.com/img1.png",
-                    "2:20": "https://figma-s3.amazonaws.com/img2.png",
+                    "1:10": (
+                        "https://figma-alpha-api.s3.us-west-2"
+                        ".amazonaws.com/img1.png"
+                    ),
+                    "2:20": (
+                        "https://figma-alpha-api.s3.us-west-2"
+                        ".amazonaws.com/img2.png"
+                    ),
                 },
             },
             request=_DUMMY_REQUEST,

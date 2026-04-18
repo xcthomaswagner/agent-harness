@@ -520,7 +520,16 @@ class TestDownloadAttachment:
 
     @pytest.fixture
     def stream_adapter(self, settings: Settings, stream_client: AsyncMock) -> JiraAdapter:
-        return JiraAdapter(settings=settings, client=stream_client)
+        # The adapter now uses a separate unauthenticated client for
+        # attachment downloads (so the auth PAT never rides along on
+        # an attacker-controlled URL). Wire ``stream_client`` into
+        # both slots so existing tests that mock ``client.stream(...)``
+        # still see their setups applied.
+        return JiraAdapter(
+            settings=settings,
+            client=stream_client,
+            attachment_client=stream_client,
+        )
 
     def _setup_stream(
         self, client: AsyncMock, data: bytes, content_length: str | None = None
@@ -722,15 +731,31 @@ class TestDownloadImageAttachments:
         stream_ctx.__aexit__.return_value = None
         client.stream.return_value = stream_ctx
 
-        adapter = JiraAdapter(settings=settings, client=client)
+        # Wire the mocked client into BOTH the generic write-back slot
+        # and the attachment-fetch slot: the adapter uses the latter
+        # for streaming downloads. URLs must pass the new SSRF guard —
+        # ``acme.atlassian.net`` matches the ``atlassian.net`` allowlist
+        # entry that ``_attachment_allowed_hosts`` returns.
+        adapter = JiraAdapter(
+            settings=settings, client=client, attachment_client=client,
+        )
 
         attachments = [
-            Attachment(filename="design.png", url="https://jira/att/1", content_type="image/png"),
             Attachment(
-                filename="spec.pdf", url="https://jira/att/2",
+                filename="design.png",
+                url="https://acme.atlassian.net/att/1",
+                content_type="image/png",
+            ),
+            Attachment(
+                filename="spec.pdf",
+                url="https://acme.atlassian.net/att/2",
                 content_type="application/pdf",
             ),
-            Attachment(filename="photo.jpg", url="https://jira/att/3", content_type="image/jpeg"),
+            Attachment(
+                filename="photo.jpg",
+                url="https://acme.atlassian.net/att/3",
+                content_type="image/jpeg",
+            ),
         ]
 
         result = await adapter.download_image_attachments(attachments, str(tmp_path))

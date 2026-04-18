@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import re
 import subprocess
@@ -23,6 +25,88 @@ BOT_COMMENT_MARKER = "<!-- xcagent -->"
 
 LOGS_DIR = Path(__file__).resolve().parents[2] / "data" / "logs" / "l3"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Per-PR claim directory. Lives under LOGS_DIR (not /tmp) so an L3
+# restart doesn't orphan claim files — they get recycled when the
+# process reopens the lock and picks up the stale file.
+_CLAIMS_DIR = LOGS_DIR / ".spawn-claims"
+_CLAIMS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _sanitize_repo_slug(repo: str) -> str:
+    """Turn ``owner/name`` into ``owner_name`` for use as a path segment.
+
+    Webhook-controlled; without sanitization the slash would break the
+    claim path into a directory. Only keep alphanumerics, dash, dot,
+    and underscore — everything else becomes ``_``. Same guard we use
+    everywhere webhook strings hit the filesystem.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "_", repo)
+
+
+def _try_claim_pr_session(
+    logs_dir: Path, repo: str, pr: int, session_type: str
+) -> int | None:
+    """Try to acquire an exclusive lock on the claim file for this PR
+    and session type. Returns the open fd on success, None if the file
+    is already held by another spawn.
+
+    GitHub retries failed webhook deliveries with NEW ``X-GitHub-Delivery``
+    IDs, which bypasses L3's ``_processed_deliveries`` dedup. Without
+    this file-lock claim two concurrent ``claude -p`` processes would
+    race on ``git fetch``/``git checkout`` inside the same worktree,
+    corrupting the branch state.
+
+    The lock survives for the duration of the spawn (caller must hold
+    the fd until the process is launched). Closing the fd — either
+    explicitly or via GC — releases the lock; the try/finally in the
+    caller guarantees the close happens.
+
+    Stale claim files from crashed prior runs are fine: ``LOCK_EX |
+    LOCK_NB`` succeeds on a file whose prior fd was closed without
+    releasing, and we truncate the file here so the content represents
+    the live claim.
+    """
+    claim_path = logs_dir / ".spawn-claims" / (
+        f"pr-{_sanitize_repo_slug(repo)}-{pr}-{session_type}.lock"
+    )
+    claim_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Open in read-write + create mode; we don't want to truncate
+    # before the lock attempt because a competing process may be
+    # holding the lock and still need its content.
+    fd = os.open(str(claim_path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+
+    # Claim acquired — truncate and write the live PID so the file
+    # content reflects the current owner for operators inspecting
+    # /data/logs/l3/.spawn-claims/ manually.
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode())
+    except OSError:
+        # Writing the PID is a nicety; the lock state is what gates
+        # concurrency. Don't fail the claim if the write fails.
+        pass
+    return fd
+
+
+def _release_pr_claim(fd: int | None) -> None:
+    """Release a PR-session claim by closing the fd. ``flock`` is
+    released automatically when the last fd referencing the lock is
+    closed. None-safe so callers can unconditionally call this from
+    a finally block without a None check.
+    """
+    if fd is None:
+        return
+    with contextlib.suppress(OSError):
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    with contextlib.suppress(OSError):
+        os.close(fd)
 
 # Safe branch name pattern — mirrors git's own restrictions (no leading
 # dash, no whitespace/control chars, no shell metacharacters, no '..').
@@ -272,17 +356,49 @@ class SessionSpawner:
 
         Reads the diff, evaluates architecture and security, and
         posts a review directly to the GitHub PR via gh CLI.
+
+        Concurrency: GitHub webhook retries bypass
+        ``_processed_deliveries`` with fresh delivery IDs, so two
+        concurrent spawn requests for the same PR can otherwise race
+        on ``git fetch``/``git checkout`` inside the shared worktree.
+        We take a file-lock claim on
+        ``<logs>/.spawn-claims/pr-<repo>-<pr>-pr-review.lock`` before
+        any work; a second concurrent spawn returns early with
+        ``pr_review_spawn_already_in_progress`` instead of corrupting
+        branch state.
         """
-        self._prepare_session(
-            "pr-review", pr_number=pr_number, branch=branch, repo=repo,
-        )
-        prompt = _PROMPT_PR_REVIEW.format(
-            pr_number=pr_number,
-            bot_marker=BOT_COMMENT_MARKER,
-            ticket_context=self._sanitize_user_content(ticket_context[:1500]),
-            pr_diff=self._sanitize_user_content(pr_diff[:1500]),
-        )
-        return self._spawn("pr-review", prompt, model="opus", pr_number=pr_number)
+        claim_fd = _try_claim_pr_session(LOGS_DIR, repo, pr_number, "pr-review")
+        if claim_fd is None:
+            logger.info(
+                "pr_review_spawn_already_in_progress",
+                pr_number=pr_number,
+                repo=repo,
+            )
+            return False
+
+        try:
+            self._prepare_session(
+                "pr-review", pr_number=pr_number, branch=branch, repo=repo,
+            )
+            prompt = _PROMPT_PR_REVIEW.format(
+                pr_number=pr_number,
+                bot_marker=BOT_COMMENT_MARKER,
+                ticket_context=self._sanitize_user_content(ticket_context[:1500]),
+                pr_diff=self._sanitize_user_content(pr_diff[:1500]),
+            )
+            # _spawn takes ownership of the claim fd: it releases the
+            # lock from inside the watchdog's finally block so the
+            # claim stays held for the full process lifetime. If
+            # _spawn itself fails (e.g. FileNotFoundError before the
+            # watchdog starts), it releases the fd before returning.
+            return self._spawn(
+                "pr-review", prompt, model="opus", pr_number=pr_number,
+                claim_fd=claim_fd,
+            )
+        except BaseException:
+            # Don't leak the fd if _spawn never got to own it.
+            _release_pr_claim(claim_fd)
+            raise
 
     def spawn_ci_fix(
         self, pr_number: int, branch: str, failure_logs: str,
@@ -357,9 +473,16 @@ class SessionSpawner:
     }
 
     def _spawn(
-        self, session_type: str, prompt: str, model: str = "opus", pr_number: int = 0
+        self, session_type: str, prompt: str, model: str = "opus", pr_number: int = 0,
+        claim_fd: int | None = None,
     ) -> bool:
-        """Launch a Claude Code headless session with logging and timeout."""
+        """Launch a Claude Code headless session with logging and timeout.
+
+        ``claim_fd``: if provided, the fd of a per-PR file-lock claim
+        acquired by the caller (see ``_try_claim_pr_session``). The
+        watchdog releases it when the subprocess exits. On early
+        failure paths (CLI not found, OSError) we release it here.
+        """
         cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions"]
         if model == "sonnet":
             cmd.extend(["--model", "sonnet"])
@@ -438,6 +561,9 @@ class SessionSpawner:
                         )
                 finally:
                     pid_file.unlink(missing_ok=True)
+                    # Release the per-PR claim so a subsequent webhook
+                    # for this PR can spawn a fresh session.
+                    _release_pr_claim(claim_fd)
 
             watchdog = threading.Thread(target=_watchdog, daemon=True)
             watchdog.start()
@@ -446,8 +572,10 @@ class SessionSpawner:
         except FileNotFoundError:
             log.error("claude_cli_not_found")
             pid_file.unlink(missing_ok=True)
+            _release_pr_claim(claim_fd)
             return False
         except OSError as exc:
             log.error("session_spawn_failed", error=str(exc))
             pid_file.unlink(missing_ok=True)
+            _release_pr_claim(claim_fd)
             return False

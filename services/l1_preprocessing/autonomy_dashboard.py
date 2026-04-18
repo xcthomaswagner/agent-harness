@@ -33,6 +33,11 @@ from client_profile import load_profile
 from config import settings
 from dashboard_common import (
     LANGFUSE_BASE_CSS,
+    STANDARD_CARD_CSS,
+    STANDARD_TABLE_CSS,
+)
+from dashboard_common import (
+    MODE_BADGE as _MODE_BADGE,
 )
 from dashboard_common import escape_html as _e
 from dashboard_common import fmt_pct as _fmt_pct
@@ -44,15 +49,10 @@ router = APIRouter()
 
 # --- Langfuse Design System (copied from trace_dashboard) ---
 
-# Base CSS (body/typography/badge) comes from dashboard_common;
-# autonomy-specific rules (different card-grid sizing, table styling,
-# selector bar) are appended here.
+# Base CSS + shared card/table pieces come from dashboard_common;
+# autonomy-specific rules (card-grid sizing = 320px, table with
+# collapse borders, the selector bar chrome) are appended here.
 _AUTONOMY_LOCAL_CSS = """
-h2 { font-size: 15px; font-weight: 600; color: #0F172A; margin-bottom: 8px; }
-.card {
-  border: 1px solid #E2E8F0; border-radius: 8px; padding: 16px;
-  background: #FFFFFF; margin-bottom: 12px;
-}
 .card-grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 16px; margin: 16px 0;
@@ -61,32 +61,24 @@ h2 { font-size: 15px; font-weight: 600; color: #0F172A; margin-bottom: 8px; }
   display: flex; justify-content: space-between; padding: 4px 0;
   font-size: 12.5px;
 }
-.metric-label { color: #64748B; }
-.metric-value { font-weight: 600; color: #0F172A; }
 table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 12px; }
 thead th {
   text-align: left; padding: 8px 12px; border-bottom: 1px solid #E2E8F0;
   font-weight: 600; color: #64748B; background: #F8FAFC;
 }
-tbody td { padding: 8px 12px; border-bottom: 1px solid #E2E8F0; vertical-align: middle; }
-tbody tr:last-child td { border-bottom: none; }
 .selector { margin: 16px 0; font-size: 12.5px; }
 .selector a { margin: 0 4px; }
 .selector .sep { color: #CBD5E1; }
 """
 
-_LANGFUSE_STYLES = LANGFUSE_BASE_CSS + _AUTONOMY_LOCAL_CSS
+_LANGFUSE_STYLES = (
+    LANGFUSE_BASE_CSS + STANDARD_CARD_CSS + STANDARD_TABLE_CSS + _AUTONOMY_LOCAL_CSS
+)
 
 
-_MODE_BADGE: dict[str, str] = {
-    "conservative": "badge-secondary",
-    "semi_autonomous": "badge-warning",
-    "full_autonomous": "badge-success",
-}
-
-
-# _fmt_pct imported from dashboard_common (was duplicated with a
-# subtle em-dash drift — one copy used \u2014 escape, one the literal).
+# _MODE_BADGE imported from dashboard_common (was duplicated identically
+# between unified_dashboard and autonomy_dashboard). _fmt_pct similarly
+# — previously duplicated with a subtle em-dash drift.
 
 
 def _compute_profile_metrics(

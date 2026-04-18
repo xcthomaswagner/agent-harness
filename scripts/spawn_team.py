@@ -28,6 +28,9 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR.parent / "services"))
+sys.path.insert(0, str(SCRIPT_DIR))
+
+from worktree_safety import safe_remove_worktree  # noqa: E402
 
 from shared.env_sanitize import sanitized_env  # noqa: E402
 
@@ -242,9 +245,12 @@ def main() -> None:
         except Exception:
             pass  # Trace is best-effort — don't block cleanup
 
-        result = run_git(str(client_repo), "worktree", "remove", str(worktree_dir_candidate), "--force", check=False)
-        if result.returncode != 0 and worktree_dir_candidate.exists():
-            shutil.rmtree(worktree_dir_candidate, ignore_errors=True)
+        safe_remove_worktree(
+            worktree_dir_candidate,
+            archive_dir=client_repo.parent / "trace-archive",
+            client_repo=client_repo,
+            run_fn=subprocess.run,
+        )
         run_git(str(client_repo), "worktree", "prune", check=False)
         run_git(str(client_repo), "branch", "-D", branch_name, check=False)
         print("[spawn] Prior worktree cleaned up")
@@ -299,7 +305,26 @@ def main() -> None:
                 json.dump(sc_context, f, indent=2)
             print(f"[spawn] Source control context written ({profile.source_control_type})")
 
-            # Rewrite git remote for Azure Repos PAT auth
+            # Rewrite git remote for Azure Repos PAT auth.
+            #
+            # Previously this path wrote ``https://ado-agent:{PAT}@host/...``
+            # verbatim into ``.git/config`` via ``git remote set-url``. That
+            # file persists inside the worktree for the full session and
+            # stays on disk whenever the worktree is preserved for
+            # debugging (failed / escalated runs, completion-pending
+            # backlog) — exfiltrating a grep of ``.git/config`` across all
+            # worktrees would leak the PAT.
+            #
+            # New shape: remote URL is plain (no credentials inline) and
+            # authentication flows through a ``GIT_ASKPASS`` helper that
+            # reads ``$ADO_PAT`` from the child process environment at
+            # run time. The helper script contains NO secrets; the PAT
+            # lives only in the parent process memory and is passed to
+            # the child via the sanitized env (which re-exports ADO_PAT
+            # just before the ``claude`` exec). The helper file is
+            # ``chmod 0700`` (owner-only) and deleted in the finally
+            # block after the session exits, success or failure, so a
+            # grep across preserved worktrees finds nothing.
             if profile.is_azure_repos:
                 ado_pat = os.environ.get("ADO_PAT", "")
                 org_url = sc.get("org", "")  # e.g., https://dev.azure.com/myorg
@@ -307,13 +332,55 @@ def main() -> None:
                 repo_name = sc.get("repo", "")
                 if ado_pat and org_url and ado_project and repo_name:
                     # Strip protocol and trailing slash for URL construction
-                    host = org_url.replace("https://", "").replace("http://", "").rstrip("/")
-                    auth_url = f"https://ado-agent:{ado_pat}@{host}/{ado_project}/_git/{repo_name}"
-                    result = run_git(str(worktree_dir), "remote", "set-url", "origin", auth_url, check=False)
+                    host = (
+                        org_url.replace("https://", "")
+                        .replace("http://", "")
+                        .rstrip("/")
+                    )
+                    # Plain remote URL — NO embedded credentials.
+                    plain_url = (
+                        f"https://{host}/{ado_project}/_git/{repo_name}"
+                    )
+                    result = run_git(
+                        str(worktree_dir), "remote", "set-url", "origin",
+                        plain_url, check=False,
+                    )
                     if result.returncode != 0:
                         print("[spawn] ERROR: Failed to set Azure Repos remote URL")
                     else:
-                        print(f"[spawn] Azure Repos remote set: {host}/{ado_project}/_git/{repo_name}")
+                        print(
+                            f"[spawn] Azure Repos remote set: {host}/{ado_project}/_git/{repo_name}"
+                        )
+                    # Write the askpass helper. It reads ADO_PAT from
+                    # the env each invocation so the file body has no
+                    # secrets. Mode 0700 — owner-only read/execute.
+                    #
+                    # The helper lives inside ``.harness/`` (not inside
+                    # ``.git/`` which is a FILE in worktree mode —
+                    # ``gitdir: /path/to/repo/.git/worktrees/<name>``).
+                    # Writing to ``.git/.harness-askpass`` mkdir'd over
+                    # the git-worktree pointer-file and broke git in
+                    # the process.
+                    askpass_path = (
+                        worktree_dir / ".harness" / ".harness-askpass"
+                    )
+                    askpass_path.parent.mkdir(parents=True, exist_ok=True)
+                    askpass_path.write_text(
+                        '#!/bin/sh\necho "$ADO_PAT"\n'
+                    )
+                    askpass_path.chmod(0o700)
+                    # Configure the username for this origin so git's
+                    # credential helper knows to pair it with the PAT
+                    # from askpass. Using ``url.<origin>.username`` is
+                    # shorter and survives future ``set-url`` rewrites.
+                    run_git(
+                        str(worktree_dir), "config",
+                        f"credential.{plain_url}.username", "ado-agent",
+                        check=False,
+                    )
+                    print(
+                        "[spawn] ADO credential helper installed (askpass mode)"
+                    )
                 else:
                     missing = []
                     if not ado_pat:
@@ -388,6 +455,25 @@ def main() -> None:
 
     env = sanitized_env()
 
+    # Re-inject ADO_PAT + GIT_ASKPASS after env sanitization when the
+    # client is on Azure Repos. ``sanitized_env()`` strips ADO_PAT by
+    # default (it's a secret, and most client repos don't need it); the
+    # askpass helper needs the PAT in the env on every git invocation
+    # the agent makes. Scope this narrowly to the Azure Repos case so
+    # Jira-and-GitHub clients keep the strict sanitization.
+    askpass_path: Path | None = None
+    if profile and profile.is_azure_repos:
+        ado_pat_env = os.environ.get("ADO_PAT", "")
+        candidate = worktree_dir / ".harness" / ".harness-askpass"
+        if ado_pat_env and candidate.exists():
+            askpass_path = candidate
+            env["ADO_PAT"] = ado_pat_env
+            env["GIT_ASKPASS"] = str(askpass_path)
+            # Defeat git's interactive prompt fallback when askpass
+            # fails for any reason (so a misconfiguration doesn't
+            # hang the session waiting for stdin).
+            env["GIT_TERMINAL_PROMPT"] = "0"
+
     # Session timeout: prevent runaway agents from holding resources indefinitely.
     # Quick mode: 30 minutes. Multi mode: 90 minutes. Override via AGENT_TIMEOUT_SECONDS.
     default_timeout = 1800 if pipeline_mode == "quick" else 5400
@@ -420,26 +506,41 @@ def main() -> None:
     session_stream = worktree_dir / ".harness" / "logs" / "session-stream.jsonl"
     session_log = worktree_dir / ".harness" / "logs" / "session.log"
     timed_out = False
-    with session_stream.open("w") as stream_file:
-        try:
-            proc = subprocess.run(
-                [
-                    "claude", "-p", prompt,
-                    "--dangerously-skip-permissions",
-                    "--output-format", "stream-json",
-                    "--verbose",  # required by Claude Code headless when output-format=stream-json
-                ],
-                cwd=str(worktree_dir),
-                env=env,
-                stdout=stream_file,
-                stderr=subprocess.STDOUT,
-                timeout=timeout_seconds,
-            )
-            exit_code = proc.returncode
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            exit_code = 124  # Standard timeout exit code
-            print(f"[spawn] Session timed out after {timeout_seconds}s")
+    try:
+        with session_stream.open("w") as stream_file:
+            try:
+                proc = subprocess.run(
+                    [
+                        "claude", "-p", prompt,
+                        "--dangerously-skip-permissions",
+                        "--output-format", "stream-json",
+                        "--verbose",  # required by Claude Code headless when output-format=stream-json
+                    ],
+                    cwd=str(worktree_dir),
+                    env=env,
+                    stdout=stream_file,
+                    stderr=subprocess.STDOUT,
+                    timeout=timeout_seconds,
+                )
+                exit_code = proc.returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                exit_code = 124  # Standard timeout exit code
+                print(f"[spawn] Session timed out after {timeout_seconds}s")
+    finally:
+        # Delete the askpass helper no matter how the session exited.
+        # The file has no secrets inline, but keeping it around is a
+        # second chance for an attacker with worktree access to pair
+        # a lucky ``ADO_PAT`` leak from `ps`-style env sniffing with
+        # a known-good git credential helper script. Removing it on
+        # exit limits the TTL to exactly the session window.
+        if askpass_path is not None:
+            try:
+                askpass_path.unlink(missing_ok=True)
+            except OSError as _unlink_exc:
+                print(
+                    f"[spawn] WARNING: could not delete askpass helper: {_unlink_exc}"
+                )
 
     # Extract the final assistant text from the stream and write it to
     # session.log for human readability. Stream events are NDJSON; look for
@@ -581,10 +682,13 @@ def main() -> None:
         except OSError as exc:
             print(f"[spawn] WARNING: Log archival failed: {exc}")
 
-        # Remove worktree
-        result = run_git(str(client_repo), "worktree", "remove", str(worktree_dir), "--force", check=False)
-        if result.returncode != 0 and worktree_dir.exists():
-            shutil.rmtree(worktree_dir, ignore_errors=True)
+        # Remove worktree (archive uncommitted work via safe_remove_worktree).
+        safe_remove_worktree(
+            worktree_dir,
+            archive_dir=client_repo.parent / "trace-archive",
+            client_repo=client_repo,
+            run_fn=subprocess.run,
+        )
         run_git(str(client_repo), "worktree", "prune", check=False)
         print("[spawn] Worktree removed")
     elif status != "complete":
