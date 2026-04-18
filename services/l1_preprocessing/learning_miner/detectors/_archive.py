@@ -18,9 +18,15 @@ walks and keeps the helper pure.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
+
+import structlog
 
 from config import settings
+
+logger = structlog.get_logger()
 
 
 def archive_root(override: Path | None) -> Path | None:
@@ -76,3 +82,41 @@ def judge_verdict_path(ticket_id: str, override: Path | None) -> Path | None:
         return candidate if candidate.is_file() else None
     except OSError:
         return None
+
+
+def load_json_object(
+    path: Path, *, event_prefix: str
+) -> dict[str, Any] | None:
+    """Read and parse ``path`` as a JSON object; return None on any error.
+
+    Logs one debug-level warning with ``<event_prefix>_read_failed`` or
+    ``<event_prefix>_json_decode_failed`` so operators can grep a
+    specific detector's diagnostics without the helpers mixing names.
+    Non-object JSON (lists, scalars) returns ``None`` — every current
+    caller reads an object-shaped sidecar file.
+
+    Previously each of the three sidecar-reading detectors (ticket.json,
+    plan-vN.json, judge-verdict.json) carried an identical read+parse
+    helper with its own logger event name. Centralizing the boilerplate
+    here leaves the event-prefix per detector intact via the keyword
+    argument.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        logger.debug(
+            f"{event_prefix}_read_failed",
+            path=str(path),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return None
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError as exc:
+        logger.debug(
+            f"{event_prefix}_json_decode_failed",
+            path=str(path),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return None
+    return doc if isinstance(doc, dict) else None

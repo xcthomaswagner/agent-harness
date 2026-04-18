@@ -40,6 +40,7 @@ from typing import Any
 
 import structlog
 
+from learning_miner.detectors._archive import load_json_object
 from learning_miner.detectors._archive import plans_dir as _plans_dir_helper
 from learning_miner.detectors.base import CandidateProposal, EvidenceItem
 from learning_miner.detectors.human_issue_cluster import (
@@ -83,25 +84,7 @@ def _locate_plans_dir(ticket_id: str) -> Path | None:
 
 
 def _load_plan(path: Path) -> dict[str, Any] | None:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        logger.debug(
-            "cross_unit_object_pivot_read_failed",
-            path=str(path),
-            error=f"{type(exc).__name__}: {exc}",
-        )
-        return None
-    try:
-        doc = json.loads(text)
-    except json.JSONDecodeError as exc:
-        logger.debug(
-            "cross_unit_object_pivot_json_decode_failed",
-            path=str(path),
-            error=f"{type(exc).__name__}: {exc}",
-        )
-        return None
-    return doc if isinstance(doc, dict) else None
+    return load_json_object(path, event_prefix="cross_unit_object_pivot")
 
 
 def _list_plan_versions(plans_dir: Path) -> list[tuple[int, Path]]:

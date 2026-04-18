@@ -50,7 +50,10 @@ from autonomy_store import (
     list_recent_metrics,
     upsert_pipeline_metric,
 )
-from learning_miner.detectors._archive import judge_verdict_path
+from learning_miner.detectors._archive import (
+    judge_verdict_path,
+    load_json_object,
+)
 from learning_miner.detectors.base import CandidateProposal, EvidenceItem
 from learning_miner.detectors.human_issue_cluster import (
     _resolve_platform_profile,
@@ -98,25 +101,9 @@ def _locate_judge_verdict(ticket_id: str) -> Path | None:
 
 
 def _load_judge_verdict(path: Path) -> dict[str, Any] | None:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        logger.debug(
-            "reviewer_judge_rejection_rate_read_failed",
-            path=str(path),
-            error=f"{type(exc).__name__}: {exc}",
-        )
-        return None
-    try:
-        doc = json.loads(text)
-    except json.JSONDecodeError as exc:
-        logger.debug(
-            "reviewer_judge_rejection_rate_json_decode_failed",
-            path=str(path),
-            error=f"{type(exc).__name__}: {exc}",
-        )
-        return None
-    return doc if isinstance(doc, dict) else None
+    return load_json_object(
+        path, event_prefix="reviewer_judge_rejection_rate"
+    )
 
 
 def _compute_rejection_rate(verdict: dict[str, Any]) -> float | None:
