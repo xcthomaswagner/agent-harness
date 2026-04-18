@@ -28,6 +28,7 @@ overall detector graph.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterable
 from pathlib import Path
@@ -342,9 +343,20 @@ def _coerce_evidence(
     trace_id: str,
     observed_at: str,
 ) -> list[EvidenceItem]:
-    """Convert reflector evidence_refs → EvidenceItem list."""
+    """Convert reflector evidence_refs → EvidenceItem list.
+
+    source_ref collision proofing: within one retrospective, multiple
+    evidence items referencing the same artifact are disambiguated by
+    index. Across retrospectives sharing a trace_id, the path hash is
+    appended so two retrospective files can both emit a "#reflector-0"
+    entry without colliding on the
+    ``(lesson_id, trace_id, source_ref)`` UNIQUE constraint.
+    """
     if not isinstance(raw, list):
         return []
+    path_hash = hashlib.sha256(
+        str(source_path).encode("utf-8", "replace")
+    ).hexdigest()[:8]
     out: list[EvidenceItem] = []
     for i, ev in enumerate(raw):
         if not isinstance(ev, dict):
@@ -355,8 +367,10 @@ def _coerce_evidence(
         # Collision-proof source_ref: two evidence items in the same
         # retrospective referencing the same artifact both need to land.
         # Append the index so the (lesson_id, trace_id, source_ref) UNIQUE
-        # constraint doesn't reject the second one.
-        source_ref = f"{source_ref}#reflector-{i}"
+        # constraint doesn't reject the second one. Include a short hash
+        # of source_path so retrospectives from different files also
+        # can't collide on the same index.
+        source_ref = f"{source_ref}#reflector-{path_hash}-{i}"
         snippet = str(ev.get("snippet") or "").strip()
         out.append(
             EvidenceItem(

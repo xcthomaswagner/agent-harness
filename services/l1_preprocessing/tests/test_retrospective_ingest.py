@@ -169,6 +169,63 @@ class TestHappyPath:
         # (lesson_id, trace_id, source_ref) rejects the second one.
         assert evid[0].source_ref != evid[1].source_ref
 
+    def test_source_refs_do_not_collide_across_retrospectives(
+        self, tmp_path: Path
+    ) -> None:
+        """Two different retrospective.json files each emit evidence
+        at index 0 referencing the same artifact with the same trace_id
+        (e.g., the same ticket got re-analyzed, or two reflectors ran
+        on overlapping traces). Previously source_ref was
+        ``<artifact>#reflector-0`` in both cases — identical — so the
+        (lesson_id, trace_id, source_ref) UNIQUE constraint rejected
+        the second. Including a hash of the source path in the suffix
+        keeps each file's source_ref distinct.
+        """
+        shared_trace_id = "trace-SHARED"
+        shared_pattern = "overlap_pattern"
+        shared_scope = "xcsf30|salesforce|overlap_pattern"
+        ticket_a = tmp_path / "A"
+        ticket_b = tmp_path / "B"
+        for dir_ in (ticket_a, ticket_b):
+            dir_.mkdir(parents=True, exist_ok=True)
+            doc = {
+                "schema_version": 1,
+                "status": "ok",
+                "ticket_id": "OVERLAP-1",
+                "trace_id": shared_trace_id,
+                "generated_at": "2026-04-17T16:30:00Z",
+                "markdown_summary": "",
+                "error": None,
+                "lesson_candidates": [
+                    {
+                        "pattern_key": shared_pattern,
+                        "scope_key": shared_scope,
+                        "severity": "info",
+                        "client_profile": "xcsf30",
+                        "platform_profile": "salesforce",
+                        "proposed_delta_json": "{}",
+                        "evidence_refs": [
+                            {
+                                "source_ref": "judge-verdict.json",
+                                "snippet": "x",
+                            }
+                        ],
+                    }
+                ],
+            }
+            (dir_ / "retrospective.json").write_text(
+                json.dumps(doc), encoding="utf-8"
+            )
+        out = ingest_retrospectives([tmp_path])
+        # Same lesson_id (same detector_name + pattern_key + scope_key)
+        # and same trace_id. source_ref must differ between the two
+        # or the UNIQUE (lesson_id, trace_id, source_ref) constraint
+        # in lesson_evidence would reject the second row.
+        assert len(out) == 2
+        assert out[0].evidence[0].source_ref != (
+            out[1].evidence[0].source_ref
+        )
+
     def test_string_proposed_delta_is_passed_through(
         self, tmp_path: Path
     ) -> None:
