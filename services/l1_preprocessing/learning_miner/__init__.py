@@ -38,10 +38,16 @@ def _build_form_controls_ac_gaps() -> Detector:
     return build()
 
 
+def _build_cross_unit_object_pivot() -> Detector:
+    from learning_miner.detectors.cross_unit_object_pivot import build
+    return build()
+
+
 _DETECTOR_BUILDERS: dict[str, Callable[[], Detector]] = {
     "human_issue_cluster": _build_human_issue_cluster,
     "mcp_drift": _build_mcp_drift,
     "form_controls_ac_gaps": _build_form_controls_ac_gaps,
+    "cross_unit_object_pivot": _build_cross_unit_object_pivot,
 }
 
 
