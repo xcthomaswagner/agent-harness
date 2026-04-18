@@ -204,6 +204,22 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
         (target_dir / ".harness" / subdir).mkdir(parents=True, exist_ok=True)
 
     print("[inject] Harness directories created")
+
+    # --- Step 7: Write runtime version stamp ---
+    # Previously only the shell variant (inject-runtime.sh) wrote this
+    # marker, so production agents launched through the Python injector
+    # ended up with empty ``runtime_version`` fields in their telemetry.
+    # Copying the source-of-truth VERSION file directly keeps both
+    # injectors in lockstep.
+    version_file = RUNTIME_DIR / "VERSION"
+    if version_file.exists():
+        stamp = target_dir / ".harness" / "runtime-version"
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(version_file.read_text())
+        print(f"[inject] Runtime version: {version_file.read_text().strip()}")
+    else:
+        print("[inject] WARNING: runtime/VERSION not found — skipping version marker")
+
     print("[inject] Done.")
 
 

@@ -8,10 +8,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+
+from worktree_safety import safe_remove_worktree  # noqa: E402
 
 
 def main() -> None:
@@ -47,12 +51,14 @@ def main() -> None:
         return
 
     print(f"[cleanup] Removing worktree: {worktree_dir}")
-    result = subprocess.run(
-        ["git", "-C", str(client_repo), "worktree", "remove", str(worktree_dir), "--force"],
-        capture_output=True, check=False,
+    # Pass this module's ``subprocess.run`` so tests patching
+    # ``cleanup_worktree.subprocess.run`` still intercept the call.
+    safe_remove_worktree(
+        worktree_dir,
+        archive_dir=client_repo.parent / "trace-archive",
+        client_repo=client_repo,
+        run_fn=subprocess.run,
     )
-    if result.returncode != 0:
-        shutil.rmtree(worktree_dir, ignore_errors=True)
 
     print("[cleanup] Pruning stale worktree references...")
     subprocess.run(

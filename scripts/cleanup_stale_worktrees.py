@@ -22,6 +22,11 @@ import sys
 import time
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+
+from worktree_safety import safe_remove_worktree  # noqa: E402
+
 
 def _parse_worktree_list(output: str) -> list[dict[str, str]]:
     """Parse ``git worktree list --porcelain`` output into a list of dicts.
@@ -191,15 +196,18 @@ def main() -> None:
             archived += 1
             print(f"[cleanup] Archived logs: {label} -> {archive_base / wt_path.name}")
 
-        # Remove worktree
+        # Remove worktree (archives any still-uncommitted work + guards
+        # against typo'd paths that could point outside the worktrees tree).
+        # Pass this module's ``subprocess.run`` so tests patching
+        # ``cleanup_stale_worktrees.subprocess.run`` still intercept the
+        # call.
         print(f"[cleanup] Removing: {label} (age {age_hours:.1f}h)")
-        rm_result = subprocess.run(
-            ["git", "-C", str(client_repo), "worktree", "remove", "--force", str(wt_path)],
-            capture_output=True,
-            check=False,
+        safe_remove_worktree(
+            wt_path,
+            archive_dir=archive_base,
+            client_repo=client_repo,
+            run_fn=subprocess.run,
         )
-        if rm_result.returncode != 0 and wt_path.exists():
-            shutil.rmtree(wt_path, ignore_errors=True)
         removed += 1
 
     # Prune once at the end (not per worktree)

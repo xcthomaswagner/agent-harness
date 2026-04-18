@@ -338,7 +338,8 @@ async def test_github_webhook_proxy_returns_503_when_l3_down() -> None:
         post = staticmethod(_raise_connect_error)
 
     payload = {"action": "opened", "pull_request": {"number": 1}}
-    with patch("main.httpx.AsyncClient", _MockAsyncClient):
+    # proxy lives in webhooks.py after the Phase 4 split — patch it there.
+    with patch("webhooks.httpx.AsyncClient", _MockAsyncClient):
         async with await _make_client() as client:
             response = await client.post(
                 "/webhooks/github",

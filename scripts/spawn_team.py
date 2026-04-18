@@ -28,6 +28,9 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR.parent / "services"))
+sys.path.insert(0, str(SCRIPT_DIR))
+
+from worktree_safety import safe_remove_worktree  # noqa: E402
 
 from shared.env_sanitize import sanitized_env  # noqa: E402
 
@@ -242,9 +245,12 @@ def main() -> None:
         except Exception:
             pass  # Trace is best-effort — don't block cleanup
 
-        result = run_git(str(client_repo), "worktree", "remove", str(worktree_dir_candidate), "--force", check=False)
-        if result.returncode != 0 and worktree_dir_candidate.exists():
-            shutil.rmtree(worktree_dir_candidate, ignore_errors=True)
+        safe_remove_worktree(
+            worktree_dir_candidate,
+            archive_dir=client_repo.parent / "trace-archive",
+            client_repo=client_repo,
+            run_fn=subprocess.run,
+        )
         run_git(str(client_repo), "worktree", "prune", check=False)
         run_git(str(client_repo), "branch", "-D", branch_name, check=False)
         print("[spawn] Prior worktree cleaned up")
@@ -676,10 +682,13 @@ def main() -> None:
         except OSError as exc:
             print(f"[spawn] WARNING: Log archival failed: {exc}")
 
-        # Remove worktree
-        result = run_git(str(client_repo), "worktree", "remove", str(worktree_dir), "--force", check=False)
-        if result.returncode != 0 and worktree_dir.exists():
-            shutil.rmtree(worktree_dir, ignore_errors=True)
+        # Remove worktree (archive uncommitted work via safe_remove_worktree).
+        safe_remove_worktree(
+            worktree_dir,
+            archive_dir=client_repo.parent / "trace-archive",
+            client_repo=client_repo,
+            run_fn=subprocess.run,
+        )
         run_git(str(client_repo), "worktree", "prune", check=False)
         print("[spawn] Worktree removed")
     elif status != "complete":

@@ -27,7 +27,11 @@ from autonomy_store import (
     list_latest_outcomes,
     list_lesson_candidates,
 )
-from dashboard_common import LANGFUSE_BASE_CSS
+from dashboard_common import (
+    LANGFUSE_BASE_CSS,
+    STANDARD_CARD_CSS,
+    STANDARD_TABLE_CSS,
+)
 from dashboard_common import badge as _badge
 from dashboard_common import escape_html as _e
 from dashboard_common import fmt_ts as _fmt_ts
@@ -71,13 +75,17 @@ _VERDICT_BADGE: dict[str, str] = {
 }
 
 
+# Base + shared card/table CSS come from dashboard_common. The
+# learning-dashboard-local additions here are: h3 heading, separator-
+# style table border, per-row top-aligned cells (the dashboard wraps
+# long rows), the <details> evidence disclosure, approval/reject/
+# snooze action buttons, and the unified-diff preformatted block.
+# Note that learning uses ``vertical-align: top`` and ``padding: 10px 12px``
+# in tbody td, which differs from the shared default — the override
+# lands after concatenation so it wins.
 _LOCAL_CSS = """
-h2 { font-size: 15px; font-weight: 600; color: #0F172A; margin: 8px 0; }
 h3 { font-size: 13px; font-weight: 600; color: #334155; margin: 8px 0; }
-.card {
-  border: 1px solid #E2E8F0; border-radius: 8px; padding: 16px;
-  background: #FFFFFF; margin-bottom: 12px;
-}
+h2 { margin: 8px 0; }
 .meta { font-size: 11.2px; color: #64748B; }
 .selector { margin: 16px 0; font-size: 12.5px; }
 .selector a, .selector span.current {
@@ -96,7 +104,6 @@ thead th {
 tbody td {
   padding: 10px 12px; border-bottom: 1px solid #E2E8F0; vertical-align: top;
 }
-tbody tr:last-child td { border-bottom: none; }
 details.evidence summary {
   cursor: pointer; color: #4D45E5; font-size: 11.2px; padding: 4px 0;
 }
@@ -122,7 +129,7 @@ pre.delta {
 }
 """
 
-_STYLES = LANGFUSE_BASE_CSS + _LOCAL_CSS
+_STYLES = LANGFUSE_BASE_CSS + STANDARD_CARD_CSS + STANDARD_TABLE_CSS + _LOCAL_CSS
 
 
 _PROFILE_ANY = "(all)"
