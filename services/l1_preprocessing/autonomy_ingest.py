@@ -15,7 +15,7 @@ import time
 from typing import Any, Literal
 
 import structlog
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
 from autonomy_attribution import attribute_human_issues_to_commits
@@ -874,6 +874,34 @@ async def _guard_admin_request(
     return body
 
 
+async def _guard_admin_read(
+    x_autonomy_admin_token: str | None = Header(
+        default=None, alias="x-autonomy-admin-token"
+    ),
+) -> None:
+    """FastAPI dependency for read-only admin GET endpoints.
+
+    Validates the admin token with the same constant-time comparison
+    as ``_guard_admin_request`` but without reading the body or
+    consuming the shared rate-limit bucket — reads don't carry a
+    payload and shouldn't compete with writes for the limiter.
+
+    Phase 1 left three GET routes unauthenticated
+    (``/api/autonomy/auto-merge-toggle``,
+    ``/api/autonomy/auto-merge-decisions``, and ``/api/autonomy``).
+    Attaching this guard via ``dependencies=[Depends(_guard_admin_read)]``
+    protects them consistently. 503 if the admin token isn't set on
+    the service, 401 otherwise — same shape as the write guard so
+    clients can reuse their error handling.
+    """
+    if not settings.autonomy_admin_token:
+        raise HTTPException(status_code=503, detail="Admin API not configured")
+    if not x_autonomy_admin_token or not hmac.compare_digest(
+        x_autonomy_admin_token, settings.autonomy_admin_token
+    ):
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+
+
 class ManualDefectIn(BaseModel):
     """Payload for POST /api/autonomy/manual-defect."""
 
@@ -1241,7 +1269,10 @@ async def post_auto_merge_toggle(
     return {"status": "ok", "override_id": row_id, "enabled": payload.enabled}
 
 
-@router.get("/api/autonomy/auto-merge-toggle")
+@router.get(
+    "/api/autonomy/auto-merge-toggle",
+    dependencies=[Depends(_guard_admin_read)],
+)
 async def get_auto_merge_toggle_effective(
     client_profile: str,
 ) -> dict[str, Any]:
@@ -1270,7 +1301,10 @@ async def get_auto_merge_toggle_effective(
     }
 
 
-@router.get("/api/autonomy/auto-merge-decisions")
+@router.get(
+    "/api/autonomy/auto-merge-decisions",
+    dependencies=[Depends(_guard_admin_read)],
+)
 async def get_auto_merge_decisions(
     client_profile: str | None = None,
     repo_full_name: str | None = None,
@@ -1338,7 +1372,10 @@ async def get_profile_by_repo(
     }
 
 
-@router.get("/api/autonomy")
+@router.get(
+    "/api/autonomy",
+    dependencies=[Depends(_guard_admin_read)],
+)
 async def get_autonomy(
     client_profile: str = "",
     window_days: int = 30,

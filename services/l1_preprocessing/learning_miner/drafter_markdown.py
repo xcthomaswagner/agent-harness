@@ -209,8 +209,16 @@ class MarkdownDrafter:
     ) -> str:
         snippet_cap = 20
         total = len(evidence_snippets)
+        # Evidence snippets come from trace output that's only a short
+        # hop from untrusted input (commit messages, ticket descriptions,
+        # LLM-generated content). Strip the sentinel closing tag from
+        # each snippet so a snippet containing ``</evidence>`` cannot
+        # terminate the wrapping tag early and inject instructions into
+        # the drafter's prompt. The consistency checker (see
+        # drafter_consistency_check.py) uses the same sentinel shape.
+        sanitized = [s.replace("</evidence>", "") for s in evidence_snippets[:snippet_cap]]
         evidence_block = "\n".join(
-            f"- {s}" for s in evidence_snippets[:snippet_cap]
+            f"- {s}" for s in sanitized
         ) or "(no evidence snippets captured)"
         # Only say "truncated" when we actually dropped snippets —
         # previously the prompt always said "truncated" even when
@@ -226,7 +234,9 @@ class MarkdownDrafter:
             f"```json\n{json.dumps(proposed_delta, indent=2, sort_keys=True)}\n```\n\n"
             "Evidence snippets the detector collected "
             f"({count_suffix}):\n\n"
-            f"{evidence_block}\n\n"
+            "<evidence>\n"
+            f"{evidence_block}\n"
+            "</evidence>\n\n"
             "Current content of the target file "
             f"(`{proposed_delta.get('target_path')}`):\n\n"
             "<target_file>\n"

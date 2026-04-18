@@ -1,6 +1,7 @@
 """Tests for auto_merge orchestrator."""
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -172,11 +173,13 @@ async def test_dry_run_records_dry_run_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("AUTO_MERGE_ENABLED", "false")
+    # Default pr_state.head_sha is "abc123"; webhook sha must match to
+    # survive the Task 3.2 build_sha_stale skip.
     mocks = _patch_fetches(monkeypatch)
     result = await evaluate_and_maybe_merge(
         repo_full_name="acme/repo",
         pr_number=2,
-        head_sha="sha2",
+        head_sha="abc123",
         ticket_id="T-2",
         ticket_type="bug",
         trigger_event="review_approved",
@@ -197,7 +200,7 @@ async def test_global_enabled_calls_merge_pr(
     result = await evaluate_and_maybe_merge(
         repo_full_name="acme/repo",
         pr_number=3,
-        head_sha="sha3",
+        head_sha="abc123",  # matches _good_pr_state default
         ticket_id="T-3",
         ticket_type="bug",
         trigger_event="review_approved",
@@ -219,7 +222,7 @@ async def test_skipped_records_skipped_decision(
     result = await evaluate_and_maybe_merge(
         repo_full_name="acme/repo",
         pr_number=4,
-        head_sha="sha4",
+        head_sha="abc123",  # matches _good_pr_state default
         ticket_id="T-4",
         ticket_type="bug",
         trigger_event="review_approved",
@@ -241,7 +244,7 @@ async def test_global_enabled_merge_failure_records_failed(
     result = await evaluate_and_maybe_merge(
         repo_full_name="acme/repo",
         pr_number=5,
-        head_sha="sha5",
+        head_sha="abc123",  # matches _good_pr_state default
         ticket_id="T-5",
         ticket_type="bug",
         trigger_event="review_approved",
@@ -311,43 +314,53 @@ async def test_dedup_fifo_eviction_preserves_recent_merged(
 async def test_dedup_records_both_webhook_and_pr_state_sha(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Force-push between webhook and get_pr_state: both shas must dedup."""
+    """Empty head_sha webhook records outcome under BOTH the placeholder
+    key AND the discovered pr_state sha key. A retry with either key
+    must see the cached outcome.
+
+    Rewritten from the pre-Phase-3 force-push test which let a webhook
+    with a stale non-empty sha merge anyway. Task 3.2 added a
+    ``build_sha_stale`` skip for non-empty webhooks that don't match
+    the PR head, so the force-push tolerance case no longer exists —
+    the use case now is ``head_sha=""`` from build.complete webhooks.
+    """
     monkeypatch.setenv("AUTO_MERGE_ENABLED", "true")
-    # pr_state returns a different (newer) head_sha than the webhook's.
     pr_state = _good_pr_state()
-    pr_state["head_sha"] = "newer_sha"
+    pr_state["head_sha"] = "real_sha"
     _patch_fetches(monkeypatch, pr_state=pr_state, merge_result=(True, "merged"))
 
+    # First call: empty head_sha (build.complete). pr_state discovers
+    # "real_sha". Merge proceeds and both dedup keys are recorded.
     r1 = await evaluate_and_maybe_merge(
         repo_full_name="acme/repo",
         pr_number=1,
-        head_sha="webhook_sha",  # stale sha from the delayed webhook
+        head_sha="",
         ticket_id="T",
         ticket_type="bug",
-        trigger_event="review_approved",
+        trigger_event="ci_passed",
     )
     assert r1["status"] == "merged"
 
-    # A retry of the same webhook (same stale sha) must be deduped.
+    # A retry with the same empty sha must be deduped (placeholder key).
     r2 = await evaluate_and_maybe_merge(
         repo_full_name="acme/repo",
         pr_number=1,
-        head_sha="webhook_sha",
+        head_sha="",
         ticket_id="T",
         ticket_type="bug",
         trigger_event="ci_passed",
     )
     assert r2["status"] == "deduped"
 
-    # A NEW webhook delivered with the actual pr_state sha must ALSO
-    # be deduped — we recorded against both keys.
+    # A NEW webhook delivered with the real pr_state sha must ALSO be
+    # deduped — we recorded the outcome under the real-sha key too.
     r3 = await evaluate_and_maybe_merge(
         repo_full_name="acme/repo",
         pr_number=1,
-        head_sha="newer_sha",
+        head_sha="real_sha",
         ticket_id="T",
         ticket_type="bug",
-        trigger_event="ci_passed",
+        trigger_event="review_approved",
     )
     assert r3["status"] == "deduped"
 
@@ -419,7 +432,7 @@ async def test_evaluate_ado_dry_run(
         project="proj",
         repo_id="repo-id",
         pr_id=2,
-        head_sha="sha2",
+        head_sha="abc123",  # matches _good_pr_state default
         ticket_id="T-2",
         ticket_type="bug",
         trigger_event="review_approved",
@@ -474,3 +487,148 @@ async def test_evaluate_ado_empty_head_sha_upgrades_dedup_key(
         f"Expected dry_run (re-evaluation), got {r2['status']}. "
         "Empty head_sha dedup collision?"
     )
+
+
+# --- Task 3.1: per-dedup asyncio.Lock serialization ---
+#
+# Two concurrent webhooks on the same PR (review_approved + ci_passed)
+# used to race: both read prior=None, both set in_progress, both
+# called the merger. GitHub's sha-locked PUT /merge deduplicates but
+# ADO's complete_ado_pr has no sha guarantee → nondeterministic.
+# Worse: unhandled exceptions mid-merge left in_progress set forever,
+# wedging the PR until process restart.
+#
+# Fix: MergeDedupStore wraps the entire evaluation in a per-dedup
+# asyncio.Lock, and a try/finally downgrades in_progress → failed on
+# exceptions.
+
+
+async def test_concurrent_evaluations_on_same_dedup_serialize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two concurrent evaluations on the same dedup must serialize:
+    only one merger call fires; the second sees the cached outcome."""
+    monkeypatch.setenv("AUTO_MERGE_ENABLED", "true")
+    _patch_fetches(monkeypatch, merge_result=(True, "merged"))
+
+    # Replace merge_pr with a merger that waits on an event to
+    # prove the lock serializes concurrent entries. If the second
+    # task sneaks past the dedup check, it will ALSO start waiting,
+    # and our assertion on merger_calls==1 will catch it.
+    merger_calls: list[str] = []
+    ready_to_finish = asyncio.Event()
+
+    async def _slow_merger(repo: str, pr_number: int, sha: str, **kw: Any) -> tuple[bool, str]:
+        merger_calls.append(sha)
+        # Wait for the test to release us, simulating a real merge
+        # API call taking time. Windows of time where both tasks
+        # could be in the merger simultaneously are what we're
+        # guarding against.
+        await ready_to_finish.wait()
+        return (True, "merged")
+
+    monkeypatch.setattr(auto_merge, "merge_pr", _slow_merger)
+
+    async def _run() -> dict[str, Any]:
+        return await evaluate_and_maybe_merge(
+            repo_full_name="acme/repo",
+            pr_number=1,
+            head_sha="abc123",
+            ticket_id="T-1",
+            ticket_type="bug",
+            trigger_event="review_approved",
+        )
+
+    task1 = asyncio.create_task(_run())
+    task2 = asyncio.create_task(_run())
+
+    # Give task1 a beat to acquire the lock and start the merger;
+    # task2 will queue on the same lock. When we release, task1
+    # finishes, records "merged", releases the lock, and task2 picks
+    # it up — but sees prior="merged" and returns "deduped" instead
+    # of calling the merger a second time.
+    await asyncio.sleep(0.01)
+    ready_to_finish.set()
+
+    r1, r2 = await asyncio.gather(task1, task2)
+
+    # One merger call exactly
+    assert len(merger_calls) == 1, (
+        f"expected serialization → 1 merger call, got {len(merger_calls)}. "
+        "Lock not held across check-then-merge-then-record?"
+    )
+    # First finished "merged", second saw cache and "deduped"
+    outcomes = {r1["status"], r2["status"]}
+    assert outcomes == {"merged", "deduped"}, (
+        f"expected {{merged, deduped}}, got {outcomes}"
+    )
+
+
+async def test_exception_during_merger_records_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the merger raises, the dedup outcome must downgrade to
+    'failed' so the PR isn't wedged at 'in_progress' forever."""
+    monkeypatch.setenv("AUTO_MERGE_ENABLED", "true")
+    _patch_fetches(monkeypatch)
+
+    async def _raising_merger(repo: str, pr_number: int, sha: str, **kw: Any) -> tuple[bool, str]:
+        raise RuntimeError("merge API hit a bug")
+
+    monkeypatch.setattr(auto_merge, "merge_pr", _raising_merger)
+
+    with pytest.raises(RuntimeError):
+        await evaluate_and_maybe_merge(
+            repo_full_name="acme/repo",
+            pr_number=1,
+            head_sha="abc123",
+            ticket_id="T-1",
+            ticket_type="bug",
+            trigger_event="review_approved",
+        )
+
+    dedup = auto_merge._dedup_key("acme/repo", 1, "abc123")
+    assert auto_merge._dedup_store.get_outcome(dedup) == "failed", (
+        "in_progress leaked past exception — PR would wedge"
+    )
+
+    # A subsequent evaluation must be able to re-enter the lock
+    # (it sees "failed" which is NOT in {merged, in_progress}, so it
+    # proceeds). Swap the merger for a succeeding one and retry.
+    _patch_fetches(monkeypatch, merge_result=(True, "merged"))
+    r = await evaluate_and_maybe_merge(
+        repo_full_name="acme/repo",
+        pr_number=1,
+        head_sha="abc123",
+        ticket_id="T-1",
+        ticket_type="bug",
+        trigger_event="ci_passed",
+    )
+    assert r["status"] == "merged"
+
+
+async def test_dedup_key_upgrade_records_both_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Start with empty head_sha (build.complete), verify after success
+    both placeholder-key and real-sha-key return 'merged'."""
+    monkeypatch.setenv("AUTO_MERGE_ENABLED", "true")
+    pr_state = _good_pr_state()
+    pr_state["head_sha"] = "sha123"
+    _patch_fetches(monkeypatch, pr_state=pr_state, merge_result=(True, "merged"))
+
+    r = await evaluate_and_maybe_merge(
+        repo_full_name="acme/repo",
+        pr_number=1,
+        head_sha="",
+        ticket_id="T",
+        ticket_type="bug",
+        trigger_event="ci_passed",
+    )
+    assert r["status"] == "merged"
+
+    # Both dedup keys must return "merged"
+    placeholder_key = auto_merge._dedup_key("acme/repo", 1, "")
+    real_key = auto_merge._dedup_key("acme/repo", 1, "sha123")
+    assert auto_merge._dedup_store.get_outcome(placeholder_key) == "merged"
+    assert auto_merge._dedup_store.get_outcome(real_key) == "merged"

@@ -149,15 +149,99 @@ _LINE_PATTERNS: list[_LinePattern] = [
         re.compile(r"00D[A-Za-z0-9]{12}![A-Za-z0-9+/=._-]+"),
         "[SF_TOKEN_REDACTED]",
     ),
+    # ADO PAT tokens. ADO PATs are opaque 52-character base64-ish
+    # strings. They don't have a fixed prefix like ``ghp_``, so the
+    # pattern is keyed off the LABEL that precedes them in a log
+    # line (``ADO_PAT=``, ``AZDO_PAT=``, ``ado_pat:``) — same technique
+    # as ``aws_secret_access_key`` below. Bare 52-char strings get
+    # caught by the entropy pass instead.
+    #
+    # Label family covered:
+    #   - ``ADO_PAT`` / ``ado_pat``
+    #   - ``AZDO_PAT`` / ``AZDO-PAT``
+    #   - ``AZURE_DEVOPS_PAT`` / ``azure_devops_pat``
+    # Followed by ``=``, ``:``, or whitespace, then the 52-char token.
+    #
+    # Order matters: this pattern runs BEFORE the generic .env-style
+    # pattern below so ``ADO_PAT=...`` renders as ``ADO_PAT=[ADO_PAT_
+    # REDACTED]`` instead of the less-specific ``[ENV_SECRET_REDACTED]``.
+    # Either placeholder is safe — both remove the secret — but the
+    # specific label helps log consumers distinguish an ADO PAT leak
+    # from a generic env assignment.
+    _LinePattern(
+        re.compile(
+            r"(?i)"
+            r"(ado[_-]?pat|az(?:do|ure)[_-]?(?:devops[_-]?)?pat|azdo)"
+            r"[\s:=]+"
+            r"([A-Za-z0-9+/=]{52})"
+        ),
+        r"\1=[ADO_PAT_REDACTED]",
+    ),
+    # Jira Cloud API tokens. New-style Jira tokens start with ``ATATT``
+    # followed by 40+ base64url chars. Ship a dedicated pattern so we
+    # don't rely on the entropy pass to catch them.
+    _LinePattern(
+        re.compile(r"ATATT[A-Za-z0-9_\-]{40,}"),
+        "[JIRA_TOKEN_REDACTED]",
+    ),
+    # Stripe live / test secret keys. Pattern is stable across Stripe's
+    # key versions: ``sk_live_`` or ``sk_test_`` then 24+ alnum chars.
+    _LinePattern(
+        re.compile(r"sk_live_[A-Za-z0-9]{24,}"),
+        "sk_live_[REDACTED]",
+    ),
+    _LinePattern(
+        re.compile(r"sk_test_[A-Za-z0-9]{24,}"),
+        "sk_test_[REDACTED]",
+    ),
+    # Twilio Account SIDs. ``AC`` prefix + 32 hex chars. Not a secret
+    # by itself but enough of an indicator to redact — customers often
+    # log the SID and auth token on the same line.
+    _LinePattern(
+        re.compile(r"AC[a-f0-9]{32}"),
+        "[TWILIO_SID_REDACTED]",
+    ),
+    # AWS secret access key. The 40-char base64 body is entropy-flag
+    # -able on its own, but anchoring the pattern to the
+    # ``aws_secret_access_key`` label catches well-formed
+    # ``aws_secret_access_key = ABC...`` assignments before the entropy
+    # pass runs so the replacement is semantically clearer.
+    _LinePattern(
+        re.compile(
+            r"(?i)(aws[_-]?secret[_-]?access[_-]?key)\s*[:=]\s*([A-Za-z0-9/+=]{40})"
+        ),
+        r"\1=[AWS_SECRET_REDACTED]",
+    ),
+    # ``.env``-style KEY=VALUE assignments where the key ends in a
+    # known secret suffix. Matches a broad family: ``API_TOKEN=...``,
+    # ``SLACK_SECRET=...``, ``DB_PASSWORD=...``, ``CUSTOMER_CREDENTIAL=...``
+    # — anything a reasonable developer might dump to an .env file.
+    # The value regex stops at whitespace / quote so we don't swallow
+    # trailing comments or other tokens on the same line. A negative
+    # lookahead skips values that already contain ``REDACTED`` so the
+    # redactor stays idempotent and doesn't overwrite a more specific
+    # prior placeholder (e.g. ``ADO_PAT=[ADO_PAT_REDACTED]`` from the
+    # ADO pattern above must NOT become ``ADO_PAT=[ENV_SECRET_REDACTED]``
+    # on the same pass).
+    _LinePattern(
+        re.compile(
+            r"([A-Z][A-Z0-9_]*(?:TOKEN|SECRET|KEY|PAT|PASSWORD|CREDENTIAL|CREDENTIALS))="
+            r"(?![^\s\"']*REDACTED)"
+            r"([^\s\"']+)"
+        ),
+        r"\1=[ENV_SECRET_REDACTED]",
+    ),
     # Bearer authentication headers. Case-insensitive — covers ``Bearer``,
     # ``bearer``, and shouty ``BEARER``.
     _LinePattern(
         re.compile(r"bearer\s+[A-Za-z0-9+/._=-]{20,}", re.IGNORECASE),
         "Bearer [REDACTED]",
     ),
-    # Git / HTTP URLs with embedded basic auth credentials.
+    # Git / HTTP URLs with embedded basic auth credentials. Covers
+    # both ``https://user:password@host`` and ``http://user:pass@``.
+    # We're intentionally broad on the leading scheme ([Hh]ttp[s]?).
     _LinePattern(
-        re.compile(r"https://[^@\s/:]+:[^@\s/]+@"),
+        re.compile(r"https?://[^@\s/:]+:[^@\s/]+@"),
         "https://[REDACTED]@",
     ),
     # Google API keys (AIza...).

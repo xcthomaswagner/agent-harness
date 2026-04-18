@@ -1,6 +1,7 @@
 """Auto-merge policy evaluation. Pure decision logic; no I/O except L1 reads."""
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -125,6 +126,20 @@ def _parse_recommended_mode(data: dict[str, Any]) -> tuple[str, str]:
     return (mode, dq)
 
 
+def _autonomy_admin_headers() -> dict[str, str]:
+    """Build the X-Autonomy-Admin-Token header when the env var is set.
+
+    Phase 2 protected the L1 ``/api/autonomy*`` GET routes behind this
+    token. Without the header, reads return 401 and every lookup
+    fail-closes — correct in the absence of configured credentials,
+    but breaks production when the operator has configured the token
+    on L1 but L3 doesn't forward it. Centralised here so future
+    autonomy reads use the same path.
+    """
+    token = os.getenv("AUTONOMY_ADMIN_TOKEN", "")
+    return {"X-Autonomy-Admin-Token": token} if token else {}
+
+
 async def fetch_recommended_mode(
     client_profile: str,
     *,
@@ -141,6 +156,7 @@ async def fetch_recommended_mode(
         fail_closed=("conservative", "unknown"),
         parse=_parse_recommended_mode,
         params={"client_profile": client_profile},
+        headers=_autonomy_admin_headers(),
         log_event="l1_autonomy_fetch_failed",
         log_context={"client_profile": client_profile},
         client=client,
@@ -160,6 +176,7 @@ async def fetch_auto_merge_enabled(
         fail_closed=False,
         parse=lambda data: bool(data.get("enabled", False)),
         params={"client_profile": client_profile},
+        headers=_autonomy_admin_headers(),
         client=client,
     )
 

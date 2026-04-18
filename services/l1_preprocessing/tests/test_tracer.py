@@ -1174,16 +1174,21 @@ class TestRedactEntryInPlace:
         # Sibling tool_counts must not be touched.
         assert entry["index"]["tool_counts"] == {"Bash": 1}
 
-    def test_does_not_touch_unknown_fields(self) -> None:
+    def test_redacts_unknown_fields_via_recursive_walk(self) -> None:
+        """Phase 2 change: the redactor now walks recursively across
+        every reachable string, not just a fixed top-level allowlist.
+        An unknown field containing a known-shape credential gets
+        redacted. The allowlist in ``_REDACT_IMPORTED_FIELDS`` is
+        retained as a contributor hint (and for the seeded scenarios
+        older tests reference), but the walk is the single source of
+        truth — anything reachable from the entry dict is covered."""
         secret = "sk-ant-api03-" + "C" * 40
-        # `custom_field` is NOT in _REDACT_IMPORTED_FIELDS — it's the
-        # caller's responsibility to add fields to the frozenset. The
-        # helper's contract is "walk the known set," not "find every
-        # string anywhere," so this unknown field must pass through.
         entry: dict = {"custom_field": secret, "event": "raw"}
         n = redact_entry_in_place(entry)
-        assert n == 0
-        assert entry["custom_field"] == secret
+        assert n >= 1
+        assert secret not in entry["custom_field"]
+        # Metadata key ``event`` is in the skip set and untouched.
+        assert entry["event"] == "raw"
 
 
 class TestRunStartIdxKwarg:
@@ -1549,3 +1554,167 @@ class TestBillingField:
         assert summary["billing_api_tokens_out"] == 75
         assert summary["billing_max_tokens_in"] == 0
         assert summary["billing_max_tokens_out"] == 0
+
+
+# --- Task 3.5: per-ticket write lock (append vs rewrite serialization) ---
+#
+# Bug 1: append_trace opened <ticket>.jsonl in append mode with no
+#        lock. POSIX append atomicity only holds for writes <PIPE_BUF
+#        (4096 bytes on Linux). Trace entries can be larger — e.g.
+#        tool_index.first_tool_error.message captures up to 500 chars
+#        of raw tool output, which combined with surrounding metadata
+#        frequently exceeds 4KB. Two concurrent writers would have
+#        their bytes interleaved, corrupting the JSONL stream.
+#
+# Bug 2: /admin/re-redact rewrote trace files in place via os.replace
+#        with no lock. A concurrent appender between read_text() and
+#        os.replace() had its entry silently lost when the rewritten
+#        file clobbered the appended one.
+#
+# Fix: per-ticket threading.Lock, held around both append_trace writes
+# AND the re-redact read-rewrite-replace cycle. Different tickets'
+# operations proceed in parallel; same-ticket operations serialize.
+
+
+class TestAppendTraceConcurrency:
+    def test_concurrent_append_trace_no_interleaving(
+        self, trace_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """20 threads appending 10KB entries to the same ticket must
+        produce exactly 200 valid JSON lines with no byte interleaving.
+
+        Without the per-ticket lock, a payload larger than PIPE_BUF
+        (4KB) splits mid-write and produces corrupt JSONL.
+        """
+        import threading
+
+        import tracer
+
+        # Clear any existing locks from prior tests
+        with tracer._ticket_locks_mutex:
+            tracer._ticket_locks.clear()
+
+        # Set LOGS_DIR once at the module level rather than via
+        # ``with patch()`` inside each thread. ``unittest.mock.patch``
+        # as a context manager is not thread-safe: concurrent
+        # __enter__/__exit__ race on the target's attribute, which
+        # was corrupting the write path and dropping entries.
+        monkeypatch.setattr(tracer, "LOGS_DIR", trace_dir)
+
+        # Force each entry to exceed PIPE_BUF (4096 bytes) so append
+        # atomicity can't save us — the lock is the ONLY defense.
+        big_payload = "x" * 10000
+
+        def _writer(worker_id: int) -> None:
+            for i in range(10):
+                tracer.append_trace(
+                    "CONCURRENT-1",
+                    "tid",
+                    "test",
+                    f"event-{worker_id}-{i}",
+                    blob=big_payload,
+                )
+
+        threads = [
+            threading.Thread(target=_writer, args=(w,)) for w in range(20)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        path = trace_dir / "CONCURRENT-1.jsonl"
+        lines = [line for line in path.read_text().splitlines() if line.strip()]
+        assert len(lines) == 200, (
+            f"expected 200 JSON lines, got {len(lines)} — lost or interleaved"
+        )
+
+        # Each line must parse. Interleaved bytes would produce
+        # JSONDecodeError on split entries.
+        for i, line in enumerate(lines):
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise AssertionError(
+                    f"line {i} is corrupt — byte interleaving: {exc}\n"
+                    f"line[:200]={line[:200]!r}"
+                ) from exc
+            assert entry["blob"] == big_payload, (
+                f"line {i} blob was corrupted during concurrent write"
+            )
+
+    def test_re_redact_blocks_appends_during_rewrite(
+        self, trace_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A re-redact rewrite must hold the per-ticket lock, so an
+        append attempted during the rewrite waits and lands AFTER the
+        replace rather than being clobbered."""
+        import threading
+        import time
+
+        import tracer
+
+        with tracer._ticket_locks_mutex:
+            tracer._ticket_locks.clear()
+
+        # Set LOGS_DIR once — monkeypatch is thread-safe for simple
+        # attribute overrides, mock.patch as a CM is not.
+        monkeypatch.setattr(tracer, "LOGS_DIR", trace_dir)
+
+        # Seed the trace file with one line
+        tracer.append_trace(
+            "LOCKED-1", "tid", "test", "initial", val="before",
+        )
+        assert (trace_dir / "LOCKED-1.jsonl").exists()
+
+        # Simulate the re-redact code path: acquire the per-ticket
+        # lock, hold it briefly, then release.
+        rewrite_started = threading.Event()
+        rewrite_done = threading.Event()
+        append_result: dict[str, object] = {}
+
+        def _rewriter() -> None:
+            with tracer._get_ticket_lock("LOCKED-1"):
+                rewrite_started.set()
+                # Hold the lock long enough that the appender
+                # definitely has time to reach the lock request.
+                time.sleep(0.1)
+                rewrite_done.set()
+
+        def _appender() -> None:
+            # Wait for rewriter to grab the lock first, then attempt
+            # to append. The append should block until rewriter releases.
+            rewrite_started.wait(timeout=2)
+            append_start = time.monotonic()
+            tracer.append_trace(
+                "LOCKED-1", "tid", "test", "appended_during_rewrite",
+                val="after",
+            )
+            append_end = time.monotonic()
+            append_result["elapsed"] = append_end - append_start
+            append_result["rewriter_done"] = rewrite_done.is_set()
+
+        t1 = threading.Thread(target=_rewriter)
+        t2 = threading.Thread(target=_appender)
+        t1.start()
+        t2.start()
+        t1.join(timeout=2)
+        t2.join(timeout=2)
+
+        # The appender must have waited at least until the rewriter
+        # released the lock. Allow a small scheduling slop.
+        elapsed = append_result["elapsed"]
+        assert isinstance(elapsed, float)
+        assert elapsed >= 0.05, (
+            f"appender did not wait for lock — elapsed {elapsed!r} "
+            "suggests no serialization"
+        )
+        assert append_result["rewriter_done"] is True, (
+            "appender landed BEFORE rewriter finished — lock not honored"
+        )
+
+        # Both entries must be in the final file (appender was not clobbered)
+        lines = (trace_dir / "LOCKED-1.jsonl").read_text().splitlines()
+        events = [json.loads(ln)["event"] for ln in lines if ln.strip()]
+        assert "initial" in events
+        assert "appended_during_rewrite" in events

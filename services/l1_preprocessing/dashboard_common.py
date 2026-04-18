@@ -22,8 +22,9 @@ import html
 from datetime import datetime
 from typing import Any
 
-# Status → badge class mapping. Extend here; every dashboard reading this
-# dict will pick up the change.
+# Status → badge class mapping for pipeline run states (trace dashboard,
+# unified dashboard). Extend here; every dashboard reading this dict will
+# pick up the change.
 STATUS_BADGE: dict[str, str] = {
     "Complete": "badge-success",
     "PR Created": "badge-success",
@@ -42,6 +43,26 @@ STATUS_BADGE: dict[str, str] = {
     "Processing": "badge-blue",
     "Enriched": "badge-secondary",
     "Received": "badge-secondary",
+}
+
+# Kept as an alias for readers that want an explicit "defaults I can
+# extend" label. Per-dashboard extensions (e.g. learning_dashboard has
+# its own ``proposed / draft_ready / approved / applied / rejected``
+# namespace) should shallow-merge ``STATUS_BADGE_DEFAULTS`` with their
+# extras: ``{**STATUS_BADGE_DEFAULTS, **LEARNING_STATUS_BADGE}``. The
+# base dict is frozen below with a deliberate copy at merge time so
+# mutation in one dashboard does not leak to another.
+STATUS_BADGE_DEFAULTS: dict[str, str] = dict(STATUS_BADGE)
+
+
+# Autonomy mode → badge class. Shared by ``unified_dashboard`` and
+# ``autonomy_dashboard`` which previously each held an identical copy —
+# adding a new mode required editing two places. Consolidating here
+# makes that a one-file change.
+MODE_BADGE: dict[str, str] = {
+    "conservative": "badge-secondary",
+    "semi_autonomous": "badge-warning",
+    "full_autonomous": "badge-success",
 }
 
 
@@ -140,4 +161,32 @@ h1 { font-size: 20.8px; font-weight: 600; color: #0F172A; }
 .badge-warning { background: #FEFCE8; color: #C79004; }
 .badge-blue { background: #DAEAFD; color: #3B82F5; }
 .badge-secondary { background: #F1F5F9; color: #0F172A; }
+"""
+
+
+# Shared card + metric-row CSS. Previously every dashboard redefined these
+# selectors locally with subtle copy-paste drift (autonomy used a 320px
+# minimum for card-grid, unified used 260px). The base set below captures
+# the rules they agree on; each dashboard concatenates with its own local
+# CSS for anything that really is view-specific (e.g. the card-grid min
+# width).
+STANDARD_CARD_CSS = """
+h2 { font-size: 15px; font-weight: 600; color: #0F172A; margin-bottom: 8px; }
+.card {
+  border: 1px solid #E2E8F0; border-radius: 8px; padding: 16px;
+  background: #FFFFFF; margin-bottom: 12px;
+}
+.metric-label { color: #64748B; }
+.metric-value { font-weight: 600; color: #0F172A; }
+"""
+
+
+# Shared table chrome — row padding, header fill, and the bottom-border
+# cleanup are identical across dashboards. Table BORDER style differs
+# between autonomy (collapse) and unified/learning (separate with
+# rounded outer border), so neither a ``table {...}`` outer rule nor
+# ``thead th`` is included here; each dashboard appends its own.
+STANDARD_TABLE_CSS = """
+tbody td { padding: 8px 12px; border-bottom: 1px solid #E2E8F0; vertical-align: middle; }
+tbody tr:last-child td { border-bottom: none; }
 """
