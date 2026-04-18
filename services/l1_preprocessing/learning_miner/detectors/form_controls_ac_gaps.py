@@ -7,14 +7,33 @@ matching finding. Over several runs, a silent review gap in one of
 those categories is a signal that the code-review supplement needs
 an explicit check.
 
+Implementation note: phrase-match heuristic, not structured taxonomy
+-------------------------------------------------------------------
+The original plan (self-learning-plan §4.4) called for classifying
+each acceptance criterion against an "AC taxonomy" emitted by the
+analyst. The analyst does not yet emit a structured ``category`` field
+on ``generated_acceptance_criteria`` items — the AC list is still
+flat strings. As a deliberate interim implementation, this detector
+substring-matches against the ``_TAXONOMY`` phrase table below. That
+is defensible in practice (the phrases are narrow and case-folded)
+but it is intentionally NOT the spec — false positives are possible
+on AC text that happens to contain a keyword without the underlying
+concern.
+
+Planned evolution: when ``generated_acceptance_criteria`` items gain a
+``category`` field (e.g., ``{"text": "...", "category": "race_safety"}``),
+replace ``_categorize`` with a direct lookup against the new field
+and keep ``_TAXONOMY`` only as a fallback for legacy records. The
+rest of the detector (cluster gating, emission, delta) stays the same.
+
 Gating:
 
 1. A pr_run is eligible only when its archived ``ticket.json`` has
    at least one acceptance criterion (generated or authored) that
-   matches a known taxonomy category.
+   matches a known category via the phrase-match heuristic above.
 2. For an eligible run, a "gap" exists when the AI review did NOT
    flag any issue whose category or summary mentions that same
-   taxonomy category.
+   category keyword.
 3. When at least ``MIN_CLUSTER_SIZE`` distinct pr_runs show the
    gap for the same (client_profile, platform_profile, category),
    emit one candidate.

@@ -103,7 +103,7 @@ Do NOT duplicate patterns already covered by dedicated detectors:
 
 - Simplify wrote no sidecar → covered by `simplify_no_sidecar` detector.
 - Cross-unit object pivot without permset realignment → covered by `cross_unit_object_pivot` detector.
-- Form-control AC gap (cross-field validation, race safety, URL state, session timeout) → covered by `form_controls_ac_gaps` detector.
+- Form-control AC gap (cross-field validation, race safety, URL state, session timeout) → covered by `form_controls_ac_gaps` detector. Note: the detector currently uses phrase-match heuristics against AC text because the analyst does not emit a structured `category` field on generated acceptance criteria. When analyst output gains AC taxonomy, the detector will switch to category-lookup; today's behavior is an intentional interim.
 - Reviewer/Judge rejection rate trend → covered by `reviewer_judge_rejection_rate` detector.
 
 ## Failure Protocol
