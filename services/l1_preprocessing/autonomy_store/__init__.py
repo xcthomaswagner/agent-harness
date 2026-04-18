@@ -74,6 +74,10 @@ from .lessons import set_lesson_merged_commit_sha as set_lesson_merged_commit_sh
 from .lessons import set_lesson_status_reason as set_lesson_status_reason
 from .lessons import update_lesson_status as update_lesson_status
 from .lessons import upsert_lesson_candidate as upsert_lesson_candidate
+from .pipeline_metrics import PipelineMetric as PipelineMetric
+from .pipeline_metrics import count_metrics as count_metrics
+from .pipeline_metrics import list_recent_metrics as list_recent_metrics
+from .pipeline_metrics import upsert_pipeline_metric as upsert_pipeline_metric
 from .pr_runs import PrRunUpsert as PrRunUpsert
 from .pr_runs import find_latest_merged_pr_run_by_ticket as find_latest_merged_pr_run_by_ticket
 from .pr_runs import get_pr_run_by_unique as get_pr_run_by_unique
@@ -87,6 +91,7 @@ from .schema import _migrate_to_v2 as _migrate_to_v2
 from .schema import _migrate_to_v3 as _migrate_to_v3
 from .schema import _migrate_to_v4 as _migrate_to_v4
 from .schema import _migrate_to_v5 as _migrate_to_v5
+from .schema import _migrate_to_v6 as _migrate_to_v6
 from .schema import _now_iso as _now_iso
 from .schema import autonomy_conn as autonomy_conn
 from .schema import ensure_schema as ensure_schema

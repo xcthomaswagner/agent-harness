@@ -55,7 +55,10 @@ class TestMigrationApplies:
         conn = open_connection(db_path)
         try:
             version = ensure_schema(conn)
-            assert version == 5
+            # ensure_schema reaches the current latest (v6 after
+            # pipeline_metrics migration), but the v5 tables must still
+            # exist. Assert presence of v5 rather than equality.
+            assert version >= 5
             row = conn.execute(
                 "SELECT version FROM schema_version WHERE version = 5"
             ).fetchone()
@@ -68,12 +71,14 @@ class TestMigrationApplies:
         try:
             ensure_schema(conn)
             ensure_schema(conn)
-            # One row per applied migration (1..5). Second call must not add more.
+            # One row per applied migration. Second call must not add more.
             rows = conn.execute(
                 "SELECT version FROM schema_version ORDER BY version"
             ).fetchall()
             versions = [int(r["version"]) for r in rows]
-            assert versions == [1, 2, 3, 4, 5]
+            # Must include the full v1..v5 chain in order. Trailing
+            # versions (v6+) are allowed — they're independent migrations.
+            assert versions[:5] == [1, 2, 3, 4, 5]
         finally:
             conn.close()
 
@@ -385,19 +390,25 @@ class TestIncrementalUpgradeFromV4:
         conn = open_connection(db_path)
         try:
             ensure_schema(conn)
-            # Rewind to v4 by removing the v5 marker row + tables, so the
-            # next ensure_schema() exercises the incremental-upgrade path.
-            conn.execute("DELETE FROM schema_version WHERE version = 5")
+            # Rewind to v4 by removing the v5+v6 marker rows + tables, so
+            # the next ensure_schema() exercises the incremental-upgrade
+            # path. The test targets the v4→v5 branch; any post-v5
+            # migration needs the same rewind treatment so we don't skew
+            # the starting version.
+            conn.execute("DELETE FROM schema_version WHERE version >= 5")
             conn.execute("DROP TABLE IF EXISTS lesson_outcomes")
             conn.execute("DROP TABLE IF EXISTS lesson_evidence")
             conn.execute("DROP TABLE IF EXISTS lesson_candidates")
+            conn.execute("DROP TABLE IF EXISTS pipeline_metrics")
             conn.commit()
 
             assert store._current_schema_version(conn) == 4
 
             with patch.object(store.logger, "info"):
                 version = ensure_schema(conn)
-            assert version == 5
+            # The full migration chain continues past v5 now (v6 adds
+            # pipeline_metrics). Just assert we reached at least v5.
+            assert version >= 5
             for t in ("lesson_candidates", "lesson_evidence", "lesson_outcomes"):
                 row = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
