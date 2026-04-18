@@ -290,7 +290,20 @@ def _one_candidate_to_proposal(
         )
 
     severity_raw = str(candidate.get("severity") or "info").lower().strip()
-    severity = _SEVERITY_MAP.get(severity_raw, "info")
+    severity = _SEVERITY_MAP.get(severity_raw)
+    if severity is None:
+        # Unknown severity values degrade to "info" rather than rejecting
+        # the candidate — a lesson with a wrong severity is still
+        # recoverable; rejecting would lose the signal. Surface a
+        # warning so the skill author can tighten the retrospective
+        # template that emitted the unrecognized value.
+        logger.warning(
+            "retrospective_unknown_severity",
+            severity_raw=severity_raw,
+            ticket_id=ticket_id,
+            lesson_pattern_key=pattern_key,
+        )
+        severity = "info"
 
     proposed_delta_json = _coerce_proposed_delta(
         candidate.get("proposed_delta_json"),

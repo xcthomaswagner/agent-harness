@@ -412,6 +412,36 @@ class TestCandidateValidation:
         assert sev_map["p-info"] == "info"
         assert sev_map["p-unknown-word"] == "info"
 
+    def test_unknown_severity_logs_warning(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """An unrecognized severity still degrades to ``info`` but the
+        author needs a diagnostic — a silent fallback makes malformed
+        retrospective templates impossible to notice. Warning must
+        include the raw value, ticket_id, and pattern_key so the log
+        reader can locate the offending source.
+        """
+        doc = _valid_doc(ticket_id="T-UNKNOWN-SEV")
+        doc["lesson_candidates"][0]["severity"] = "HIGH"
+        doc["lesson_candidates"][0]["pattern_key"] = "p-bad-sev"
+        doc["lesson_candidates"][0]["scope_key"] = (
+            "xcsf30|salesforce|p-bad-sev|T-UNKNOWN-SEV"
+        )
+        _write_retrospective(tmp_path, "T-UNKNOWN-SEV", doc)
+
+        out = ingest_retrospectives([tmp_path])
+
+        assert len(out) == 1
+        assert out[0].severity == "info"
+        # structlog writes to stderr in this project; verify the
+        # event name lands there so operators can grep for unknown
+        # severities without inspecting individual retrospective files.
+        captured = capsys.readouterr()
+        stream = captured.err + captured.out
+        assert "retrospective_unknown_severity" in stream
+        assert "severity_raw=high" in stream
+        assert "ticket_id=T-UNKNOWN-SEV" in stream
+
 
 class TestSearchRoots:
     def test_missing_search_root_is_skipped(self, tmp_path: Path) -> None:
