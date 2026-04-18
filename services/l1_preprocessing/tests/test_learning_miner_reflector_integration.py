@@ -208,9 +208,75 @@ class TestRunMinerReflectorPath:
             conn, detectors=[], window_days=14,
             retrospective_search_roots=[tmp_path],
         )
-        # Second run upserts into the same row — no duplication.
+        # Second run upserts into the same row — no duplication,
+        # and frequency does NOT inflate on replay (incoming trace_ids
+        # are excluded from the "existing distinct traces" count so
+        # rescanning the same retrospective keeps frequency=1).
         rows = list_lesson_candidates(conn)
         assert len(rows) == 1
+        assert rows[0]["frequency"] == 1
+
+    def test_frequency_reflects_cross_retrospective_count(
+        self, conn, tmp_path: Path
+    ) -> None:
+        """Three distinct retrospectives sharing one pattern_key push
+        the stored frequency to 3, satisfying the ``>= 3`` dashboard-
+        emit rule. Previously ``window_frequency`` was hardcoded to 1
+        so this count plateaued and the lesson never reached the
+        threshold.
+        """
+        # Three tickets, each writes its own retrospective.json with
+        # the same pattern_key + scope_key (and same lesson_id).
+        shared_pattern = "judge_rejected_most_findings"
+        shared_scope = "xcsf30|salesforce|judge_rejected_most_findings"
+        for ticket_id in ("XCSF30-1", "XCSF30-2", "XCSF30-3"):
+            target = tmp_path / ticket_id
+            target.mkdir(parents=True, exist_ok=True)
+            doc = {
+                "schema_version": 1,
+                "status": "ok",
+                "ticket_id": ticket_id,
+                "trace_id": f"trace-{ticket_id}",
+                "generated_at": "2026-04-17T16:30:00Z",
+                "markdown_summary": "",
+                "error": None,
+                "lesson_candidates": [
+                    {
+                        "pattern_key": shared_pattern,
+                        "scope_key": shared_scope,
+                        "severity": "warning",
+                        "client_profile": "xcsf30",
+                        "platform_profile": "salesforce",
+                        "proposed_delta_json": json.dumps(
+                            {"rule": "tighten reviewer rubric"}
+                        ),
+                        "evidence_refs": [
+                            {
+                                "source_ref": "judge-verdict.json",
+                                "snippet": "12 of 14 rejected",
+                            }
+                        ],
+                    }
+                ],
+            }
+            (target / "retrospective.json").write_text(
+                json.dumps(doc), encoding="utf-8"
+            )
+
+        # Single run picks up all three. They collapse to one lesson
+        # row whose frequency reflects the 3 distinct traces that
+        # contributed.
+        run_miner(
+            conn, detectors=[], window_days=14,
+            retrospective_search_roots=[tmp_path],
+        )
+        rows = list_lesson_candidates(conn)
+        assert len(rows) == 1
+        assert rows[0]["pattern_key"] == shared_pattern
+        assert rows[0]["frequency"] == 3, (
+            "Expected frequency=3 (one per distinct retrospective) "
+            "but cross-run frequency rebuild appears broken."
+        )
 
 
 class TestIngestRetrospectivesExported:

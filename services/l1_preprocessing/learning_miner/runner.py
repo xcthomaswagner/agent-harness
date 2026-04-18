@@ -16,7 +16,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import structlog
@@ -153,6 +153,16 @@ def _ingest_reflector_proposals(
     we record its accounting under its own DetectorRunStats entry. A
     failure here is logged and collapsed into ``stats.failed`` so the
     overall run still completes — same contract as a crashing detector.
+
+    ``upsert_lesson_candidate`` keeps ``frequency = MAX(existing, new)``.
+    Retrospective proposals default to ``window_frequency=1``, so a
+    lesson pattern observed across N distinct retrospectives would
+    stay at frequency=1 and never satisfy the ``>= 3`` dashboard-emit
+    rule. Before persisting each reflector proposal, re-derive its
+    ``window_frequency`` from the existing distinct ``trace_id`` count
+    in ``lesson_evidence``: N previously-observed retrospectives + this
+    one = N + 1. The upsert's MAX semantics then store the correct
+    cross-retrospective count.
     """
     # Local import to avoid pulling retrospective_ingest (and its
     # transitive path / yaml dependencies) at package load time for the
@@ -165,7 +175,10 @@ def _ingest_reflector_proposals(
         proposals = ingest_retrospectives(search_roots)
         stats.proposals_emitted = len(proposals)
         for proposal in proposals:
-            _persist_proposal(conn, proposal, stats)
+            adjusted = _reflector_proposal_with_cross_run_frequency(
+                conn, proposal
+            )
+            _persist_proposal(conn, adjusted, stats)
     except Exception as exc:
         stats.failed = True
         stats.error = f"{type(exc).__name__}: {exc}"
@@ -176,6 +189,55 @@ def _ingest_reflector_proposals(
     finally:
         stats.duration_ms = int((time.perf_counter() - det_start) * 1000)
         result.per_detector.append(stats)
+
+
+def _reflector_proposal_with_cross_run_frequency(
+    conn: sqlite3.Connection,
+    proposal: CandidateProposal,
+) -> CandidateProposal:
+    """Return a new proposal with ``window_frequency`` reflecting DB evidence.
+
+    Counts distinct ``trace_id`` rows already in ``lesson_evidence``
+    for the proposal's ``lesson_id`` — excluding this proposal's own
+    trace_ids so idempotent replay (same retrospective scanned twice)
+    doesn't keep incrementing the count. Adds the proposal's distinct
+    trace_ids for the frequency that should land. The upsert's
+    ``MAX(existing, new)`` semantics then absorb any lower value so a
+    narrower later scan can't regress the stored count.
+
+    On SQL error, pass through the original proposal — this helper
+    must not block the persist path.
+    """
+    incoming = {ev.trace_id for ev in proposal.evidence if ev.trace_id}
+    try:
+        if incoming:
+            placeholder = ",".join(["?"] * len(incoming))
+            row = conn.execute(
+                f"SELECT COUNT(DISTINCT trace_id) AS n "
+                f"FROM lesson_evidence "
+                f"WHERE lesson_id = ? "
+                f"AND trace_id NOT IN ({placeholder})",
+                (proposal.lesson_id, *sorted(incoming)),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT trace_id) AS n FROM lesson_evidence "
+                "WHERE lesson_id = ?",
+                (proposal.lesson_id,),
+            ).fetchone()
+        existing_other = int(row["n"]) if row else 0
+    except sqlite3.DatabaseError as exc:
+        logger.warning(
+            "reflector_cross_run_frequency_failed",
+            lesson_id=proposal.lesson_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return proposal
+
+    new_frequency = max(1, existing_other + max(1, len(incoming)))
+    if new_frequency == proposal.window_frequency:
+        return proposal
+    return replace(proposal, window_frequency=new_frequency)
 
 
 def _clear_per_run_caches() -> None:
