@@ -744,6 +744,121 @@ class TestRunOutcomes:
         assert stats.outcomes_measured == 0
         assert clone_calls == []
 
+    def test_clone_failure_defers_measurement_for_old_lessons(
+        self,
+        learning_conn,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """When the scratch clone fails AND the lesson is older than the
+        reedit window, measurement must defer (no outcome row written)
+        so a later tick with a successful clone can score human-reedits.
+
+        Without this, ``_detect_human_reedits`` would silently return
+        ``(0, [])`` for a lesson whose edit may have been reverted by an
+        engineer — and the verdict would lock in as CONFIRMED.
+        """
+        from config import settings
+
+        monkeypatch.setattr(
+            settings, "autonomy_db_path", str(tmp_path / "a.db")
+        )
+        monkeypatch.setattr(settings, "learning_outcomes_window_days", 14)
+
+        # Force clone failure by making _prepare_scratch_root return None.
+        monkeypatch.setattr(
+            outcomes_mod,
+            "_prepare_scratch_root",
+            lambda _repo_root: (None, False),
+        )
+
+        # Capture structlog events by patching the module logger.
+        logged_events: list[tuple[str, dict]] = []
+        orig_info = outcomes_mod.logger.info
+
+        def capture_info(event, **kwargs):
+            logged_events.append((event, dict(kwargs)))
+            return orig_info(event, **kwargs)
+
+        monkeypatch.setattr(outcomes_mod.logger, "info", capture_info)
+
+        # Lesson is 20 days past updated_at — well past the 48h reedit window.
+        lid = self._seed_applied_lesson(
+            days_since_merge=20, merged_commit_sha="feeddead20"
+        )
+
+        stats = run_outcomes()
+
+        # Deferred — not measured, no row written.
+        assert stats.outcomes_measured == 0
+        with autonomy_conn() as conn:
+            assert get_latest_outcome(conn, lid) is None
+
+        # The deferral reason was logged with lesson_id + updated_at.
+        deferred = [
+            (event, kw)
+            for event, kw in logged_events
+            if event == "learning_outcomes_deferred_clone_failed"
+        ]
+        assert len(deferred) == 1
+        assert deferred[0][1]["lesson_id"] == lid
+        assert deferred[0][1].get("updated_at")
+
+    def test_clone_failure_proceeds_for_fresh_lessons(
+        self,
+        learning_conn,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Freshly-applied lessons (age < reedit window) still measure.
+
+        A lesson that's only been merged for an hour has no plausible
+        reedit-by-human scenario, so the ``(0, [])`` fallback is
+        legitimate. A tighter window must not block measurement here.
+        """
+        from config import settings
+
+        monkeypatch.setattr(
+            settings, "autonomy_db_path", str(tmp_path / "a.db")
+        )
+        # A short outcomes window so a 1h-old lesson is "ready to
+        # measure" while still inside the 48h reedit-defer window.
+        monkeypatch.setattr(settings, "learning_outcomes_window_days", 0)
+
+        # Clone returns None (simulating failure). Because the lesson
+        # is < 48h old, the defer check should let measurement proceed.
+        monkeypatch.setattr(
+            outcomes_mod,
+            "_prepare_scratch_root",
+            lambda _repo_root: (None, False),
+        )
+
+        # days_since_merge in fractional days: use hours via a direct
+        # pivot override. Seed at days=1 then overwrite updated_at to 1h ago.
+        lid = self._seed_applied_lesson(
+            days_since_merge=1, merged_commit_sha="freshsha01"
+        )
+        fresh_pivot = (
+            datetime.now(UTC) - timedelta(hours=1)
+        ).isoformat()
+        with autonomy_conn() as conn:
+            conn.execute(
+                "UPDATE lesson_candidates SET updated_at = ? "
+                "WHERE lesson_id = ?",
+                (fresh_pivot, lid),
+            )
+            conn.commit()
+
+        stats = run_outcomes()
+
+        # Measurement ran despite the clone failure — the lesson is
+        # fresh enough that missing human-reedit detection is safe.
+        assert stats.outcomes_measured == 1
+        with autonomy_conn() as conn:
+            outcome = get_latest_outcome(conn, lid)
+        assert outcome is not None
+        assert outcome["human_reedit_count"] == 0
+
     def test_merge_poll_writes_commit_sha(
         self,
         learning_conn,
