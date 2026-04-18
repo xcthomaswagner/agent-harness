@@ -41,7 +41,7 @@ from learning_miner.detectors.base import CandidateProposal, EvidenceItem
 from learning_miner.detectors.human_issue_cluster import (
     _resolve_platform_profile,
 )
-from tracer import ARTIFACT_SIMPLIFY, read_trace
+from tracer import ARTIFACT_SIMPLIFY, safe_read_trace
 
 logger = structlog.get_logger()
 
@@ -101,19 +101,6 @@ def _has_simplify_artifact(entries: list[dict[str, Any]]) -> bool:
         ):
             return True
     return False
-
-
-def _safe_read_trace(ticket_id: str) -> list[dict[str, Any]]:
-    """``read_trace`` wrapped so a corrupt file can't crash the scan."""
-    try:
-        return read_trace(ticket_id)
-    except Exception as exc:
-        logger.debug(
-            "simplify_no_sidecar_read_trace_failed",
-            ticket_id=ticket_id,
-            error=f"{type(exc).__name__}: {exc}",
-        )
-        return []
 
 
 def _build_scope_key(client_profile: str, platform_profile: str) -> str:
@@ -193,7 +180,7 @@ class SimplifyNoSidecarDetector:
             ticket_id = str(pr["ticket_id"])
             if ticket_id in seen:
                 continue
-            entries = _safe_read_trace(ticket_id)
+            entries = safe_read_trace(ticket_id)
             if not entries:
                 continue
             claimed = any(
