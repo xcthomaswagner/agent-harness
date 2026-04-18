@@ -66,9 +66,12 @@ router = APIRouter()
 async def _validate_and_parse_webhook(
     request: Request, signature: str | None,
 ) -> dict[str, Any]:
-    """Validate webhook signature and parse JSON body.
+    """Validate webhook HMAC signature and parse JSON body.
 
-    Shared by Jira and ADO webhook handlers.
+    Phase 1 fail-closed posture: when no ``webhook_secret`` is
+    configured, reject with 503 unless ``allow_unsigned_webhooks``
+    is true (the local-dev opt-in). Previously no-secret silently
+    opened access.
     """
     body = await request.body()
     settings = _settings()
@@ -82,6 +85,8 @@ async def _validate_and_parse_webhook(
         sig_value = signature.removeprefix("sha256=")
         if not hmac.compare_digest(expected, sig_value):
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    elif not settings.allow_unsigned_webhooks:
+        raise HTTPException(status_code=503, detail="Webhook auth not configured")
 
     try:
         payload = json.loads(body)
@@ -155,7 +160,17 @@ async def _validate_and_parse_webhook_dual_auth(
                     detail=f"{auth_label} not configured",
                 )
             if no_secret_behavior == "open_local_dev":
-                auth_ok = True
+                # Phase 1: fail closed by default. Local dev must
+                # explicitly set ALLOW_UNSIGNED_WEBHOOKS=true to
+                # accept unsigned webhooks; production deployments
+                # that forget the secret no longer fail open.
+                if settings.allow_unsigned_webhooks:
+                    auth_ok = True
+                else:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"{auth_label} not configured",
+                    )
             else:
                 raise ValueError(
                     f"Invalid no_secret_behavior: {no_secret_behavior!r}"
@@ -452,6 +467,11 @@ async def github_webhook_proxy(request: Request) -> dict[str, str]:
     body = await request.body()
     headers = dict(request.headers)
 
+    # Phase 1: on any L3 failure (connect error, 4xx/5xx, HTTP error)
+    # raise 503 so GitHub retries the delivery. Previously we returned
+    # 202 with ``{"status": "l3_error"}`` in the body, which GitHub
+    # treats as successful delivery — so an L3 outage silently dropped
+    # every webhook until GitHub was manually re-driven.
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(
@@ -472,12 +492,21 @@ async def github_webhook_proxy(request: Request) -> dict[str, str]:
                     "l3_proxy_http_error",
                     status=response.status_code,
                 )
-                return {"status": "l3_error", "http_status": str(response.status_code)}
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"L3 PR review service error: {response.status_code}",
+                )
             result: dict[str, str] = response.json()
             return result
-        except httpx.ConnectError:
+        except httpx.ConnectError as exc:
             logger.warning("l3_service_unavailable")
-            return {"status": "l3_unavailable"}
+            raise HTTPException(
+                status_code=503,
+                detail="L3 PR review service unavailable",
+            ) from exc
         except (httpx.HTTPError, ValueError) as exc:
             logger.warning("l3_proxy_failed", error=str(exc)[:200])
-            return {"status": "l3_error"}
+            raise HTTPException(
+                status_code=503,
+                detail="L3 PR review service error",
+            ) from exc

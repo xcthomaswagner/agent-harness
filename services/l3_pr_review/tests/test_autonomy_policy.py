@@ -304,6 +304,42 @@ async def test_fetch_auto_merge_enabled_happy() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_recommended_mode_sends_autonomy_admin_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When AUTONOMY_ADMIN_TOKEN is set, L3 forwards it on /api/autonomy GETs."""
+    monkeypatch.setenv("AUTONOMY_ADMIN_TOKEN", "admin-secret")
+    client = _mock_httpx_client(
+        200,
+        {"recommended_mode": "semi_autonomous", "data_quality": {"status": "good"}},
+    )
+    await fetch_recommended_mode("profile1", l1_url="http://l1", client=client)
+    _args, kwargs = client.get.call_args
+    assert kwargs["headers"]["X-Autonomy-Admin-Token"] == "admin-secret"
+
+
+@pytest.mark.asyncio
+async def test_fetch_recommended_mode_omits_header_when_no_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When no token configured, header is omitted (not sent as empty string)."""
+    monkeypatch.delenv("AUTONOMY_ADMIN_TOKEN", raising=False)
+    client = _mock_httpx_client(
+        200,
+        {"recommended_mode": "conservative", "data_quality": {"status": "unknown"}},
+    )
+    await fetch_recommended_mode("profile1", l1_url="http://l1", client=client)
+    _args, kwargs = client.get.call_args
+    assert "X-Autonomy-Admin-Token" not in (kwargs.get("headers") or {})
+
+
+@pytest.mark.asyncio
+async def test_fetch_auto_merge_enabled_sends_autonomy_admin_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """auto-merge-toggle GET also forwards the token."""
+    monkeypatch.setenv("AUTONOMY_ADMIN_TOKEN", "admin-secret")
+    client = _mock_httpx_client(200, {"enabled": True})
+    await fetch_auto_merge_enabled("profile1", l1_url="http://l1", client=client)
+    _args, kwargs = client.get.call_args
+    assert kwargs["headers"]["X-Autonomy-Admin-Token"] == "admin-secret"
+
+
+@pytest.mark.asyncio
 async def test_fetch_profile_by_repo_auth_header_sent() -> None:
     client = _mock_httpx_client(
         200,

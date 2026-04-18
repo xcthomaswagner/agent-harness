@@ -544,3 +544,216 @@ def test_shannon_entropy_ordering() -> None:
     english = "the quick brown fox jumps over the lazy dog"
     blob = "aB3xYz0QRS7tUvWxYzAbCdEfGhIjKlMnOpQrStUvWxYz"
     assert _shannon_entropy(english) < _shannon_entropy(blob)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — new pattern coverage
+# ---------------------------------------------------------------------------
+
+
+def test_ado_pat_label_redacted() -> None:
+    # ADO PATs are 52-char base64-ish strings. We anchor on the label.
+    pat = "A" * 52
+    text = f"ADO_PAT={pat} keep-this"
+    out, n = redact(text)
+    assert pat not in out
+    assert "[ADO_PAT_REDACTED]" in out
+    assert "keep-this" in out
+    assert n >= 1
+
+
+def test_ado_pat_azdo_label_also_caught() -> None:
+    # The pattern is ``(?i)(ado[_-]?pat|azdo)[_=:\s]+...``. Verify AZDO
+    # variant also fires.
+    pat = "B" * 52
+    text = f"AZDO_PAT: {pat}"
+    out, _ = redact(text)
+    assert pat not in out
+    assert "[ADO_PAT_REDACTED]" in out
+
+
+def test_jira_cloud_api_token_redacted() -> None:
+    # ATATT prefix + 40+ base64url chars — real shape of a Jira Cloud
+    # API token.
+    token = "ATATT" + "x" * 48
+    text = f"Authorization: Basic user:{token}"
+    out, n = redact(text)
+    assert token not in out
+    assert "[JIRA_TOKEN_REDACTED]" in out
+    assert n >= 1
+
+
+def test_env_file_style_token_redacted() -> None:
+    # KEY ending in TOKEN / SECRET / KEY / PAT / PASSWORD / CREDENTIAL
+    # with any value → value replaced. Covers most ``.env`` leaks.
+    text = (
+        "MY_API_TOKEN=abc123secretvalue\n"
+        "DB_PASSWORD=hunter2\n"
+        "STRIPE_SECRET=not-really-a-stripe-key\n"
+        "USER_CREDENTIAL=somestuff"
+    )
+    out, n = redact(text)
+    assert "abc123secretvalue" not in out
+    assert "hunter2" not in out
+    assert "not-really-a-stripe-key" not in out
+    assert "somestuff" not in out
+    # Four assignments → four redactions.
+    assert n >= 4
+
+
+def test_env_file_negative_normal_assignment_preserved() -> None:
+    # Var names that don't end in a secret suffix should pass through.
+    text = "DEBUG=true\nLOG_LEVEL=info\nHOST=example.com"
+    out, n = redact(text)
+    assert out == text
+    assert n == 0
+
+
+def test_aws_secret_access_key_redacted() -> None:
+    # 40-char base64 value anchored on the key name.
+    secret = "A" * 40
+    text = f"aws_secret_access_key = {secret}"
+    out, n = redact(text)
+    assert secret not in out
+    assert "[AWS_SECRET_REDACTED]" in out
+    assert n >= 1
+
+
+def test_stripe_live_key_redacted() -> None:
+    # Built at runtime so source-file scanners (GitHub push protection)
+    # don't flag a 24-char payload after ``sk_live_`` as a real key.
+    payload = "abcdefghijklmnopqrstuvwx"
+    text = f"key=sk_{'live'}_{payload}"
+    out, n = redact(text)
+    assert "sk_live_[REDACTED]" in out
+    assert payload not in out
+    assert n >= 1
+
+
+def test_stripe_test_key_redacted() -> None:
+    payload = "abcdefghijklmnopqrstuvwx"
+    text = f"key=sk_{'test'}_{payload}"
+    out, _ = redact(text)
+    assert "sk_test_[REDACTED]" in out
+
+
+def test_twilio_sid_redacted() -> None:
+    # AC + 32 hex chars.
+    sid = "AC" + "a" * 32
+    text = f"twilio_sid={sid}"
+    out, n = redact(text)
+    assert sid not in out
+    assert "[TWILIO_SID_REDACTED]" in out
+    assert n >= 1
+
+
+def test_url_with_credentials_redacted() -> None:
+    # ``https://user:password@host/path`` - password portion masked.
+    url = "Cloning https://ado-agent:secretpat123@dev.azure.com/acme/_git/repo"
+    out, n = redact(url)
+    assert "secretpat123" not in out
+    assert "https://[REDACTED]@dev.azure.com" in out
+    assert n >= 1
+
+
+def test_url_with_credentials_http_scheme_also_redacted() -> None:
+    # The HTTP variant must also hit the pattern.
+    url = "http://user:pass@example.com/"
+    out, n = redact(url)
+    assert "pass" not in out.split("@")[0].split(":", 2)[-1]
+    assert n >= 1
+
+
+def test_combined_bundle_with_ado_and_jira_tokens() -> None:
+    """Diagnostic bundle regression: a mock bundle body containing an
+    ADO PAT and a Jira Cloud API token must have both masked on a
+    single call to redact()."""
+    ado_pat = "P" * 52
+    jira_token = "ATATT" + "J" * 60
+    body = (
+        "# Diagnostic dump\n"
+        "error_context:\n"
+        f"  ADO_PAT={ado_pat}\n"
+        f"  Authorization: Basic user:{jira_token}\n"
+    )
+    out, n = redact(body)
+    assert ado_pat not in out
+    assert jira_token not in out
+    assert "[ADO_PAT_REDACTED]" in out
+    assert "[JIRA_TOKEN_REDACTED]" in out
+    assert n >= 2
+
+
+# ---------------------------------------------------------------------------
+# Recursive tracer redaction (nested dict/list walking)
+# ---------------------------------------------------------------------------
+
+
+def test_tracer_recursive_redaction_nested_dict() -> None:
+    """Regression: the previous tracer code only redacted a fixed list of
+    top-level string fields. Secrets nested inside dicts (``error_context``
+    → ``body`` → sk_live_...) went to disk verbatim. The recursive walker
+    must catch them."""
+    from tracer import redact_entry_in_place
+
+    # Test fixtures built from components at runtime so GitHub's
+    # secret-scanner doesn't flag this test file itself as leaking a
+    # "real" Stripe / GitHub / bearer key.
+    stripe_payload = "abcdefghijklmnopqrstuvwx"
+    stripe_fake = f"sk_{'live'}_{stripe_payload}"
+    bearer_payload = "abcdefghijklmnopqrstuvwxyz012345"
+    bearer_fake = f"{'Bearer'} {bearer_payload}"
+    ghp_payload = "abcdefghijklmnopqrstuvwxyz0123456789"
+    ghp_fake = f"gh{'p'}_{ghp_payload}"
+    entry: dict[str, object] = {
+        "trace_id": "t-abc",
+        "ticket_id": "TEST-1",
+        "phase": "planning",
+        "event": "error",
+        "error_context": {
+            "body": stripe_fake,
+            "headers": {"authorization": bearer_fake},
+        },
+        "nested_list": [{"stderr": ghp_fake}],
+    }
+    n = redact_entry_in_place(entry)
+    # Identifier fields preserved — never redacted.
+    assert entry["trace_id"] == "t-abc"
+    assert entry["ticket_id"] == "TEST-1"
+    assert entry["phase"] == "planning"
+    assert entry["event"] == "error"
+    # All three secrets masked in place.
+    ec = entry["error_context"]
+    assert isinstance(ec, dict)
+    assert stripe_fake not in str(ec)
+    assert bearer_fake not in str(ec)
+    nl = entry["nested_list"]
+    assert isinstance(nl, list)
+    assert ghp_fake not in str(nl)
+    # At least three redactions (sk_live, bearer, ghp) happened.
+    assert n >= 3
+
+
+def test_tracer_recursive_redaction_skips_metadata_keys() -> None:
+    """Ensure the skip-keys set guards against accidental mutation of
+    identifier fields even if their values happen to look secret-ish
+    to the entropy pass (high-entropy trace_ids are valid)."""
+    from tracer import redact_entry_in_place
+
+    # 12-hex trace_id — under the entropy threshold anyway, but if it
+    # were a base64 UUID the skip set is the belt-and-braces guard.
+    entry = {
+        "trace_id": "ff1122334455",
+        "ticket_id": "PROJ-999",
+        "timestamp": "2026-04-17T12:00:00+00:00",
+        "phase": "completion",
+        "event": "Pipeline complete",
+        "content": "no secrets here",
+    }
+    _ = redact_entry_in_place(entry)
+    # Identifiers stable.
+    assert entry["trace_id"] == "ff1122334455"
+    assert entry["ticket_id"] == "PROJ-999"
+    assert entry["timestamp"] == "2026-04-17T12:00:00+00:00"
+    assert entry["phase"] == "completion"
+    assert entry["event"] == "Pipeline complete"

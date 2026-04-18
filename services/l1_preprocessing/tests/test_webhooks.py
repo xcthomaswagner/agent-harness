@@ -6,8 +6,10 @@ import hashlib
 import hmac
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
 from httpx import ASGITransport, AsyncClient
 
 import main
@@ -90,12 +92,51 @@ async def test_jira_webhook_rejects_missing_signature_when_secret_set() -> None:
             assert response.status_code == 401
 
 
-async def test_jira_webhook_skips_signature_when_no_secret() -> None:
-    """When webhook_secret is empty, signature validation is skipped."""
+async def test_jira_webhook_allow_unsigned_true_allows_unsigned() -> None:
+    """Phase 1: with no ``webhook_secret`` configured AND
+    ``allow_unsigned_webhooks=True`` (the local-dev escape hatch), an
+    unsigned webhook is accepted. Renamed from
+    ``test_jira_webhook_skips_signature_when_no_secret`` — the
+    autouse conftest fixture sets ``allow_unsigned_webhooks=True`` so
+    this exercises the opt-in path, not the old always-accept path.
+    """
     payload = json.loads((FIXTURES / "jira_webhook_story.json").read_text())
-    async with await _make_client() as client:
-        response = await client.post("/webhooks/jira", json=payload)
-        assert response.status_code == 202
+    with patch.object(main.settings, "allow_unsigned_webhooks", True):
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/jira", json=payload)
+            assert response.status_code == 202
+
+
+# --- Phase 1: Fail-closed webhook auth (Jira) ---
+
+
+async def test_jira_webhook_fails_closed_when_no_secret_configured() -> None:
+    """Phase 1 fail-closed: with no ``webhook_secret`` configured AND
+    ``allow_unsigned_webhooks=False``, the Jira webhook raises 503.
+    Previously this path returned 202 — that's the behavior Phase 1
+    is explicitly closing.
+    """
+    payload = json.loads((FIXTURES / "jira_webhook_story.json").read_text())
+    with (
+        patch.object(main.settings, "webhook_secret", ""),
+        patch.object(main.settings, "allow_unsigned_webhooks", False),
+    ):
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/jira", json=payload)
+            assert response.status_code == 503
+
+
+async def test_jira_webhook_accepts_unsigned_when_allow_unsigned_set() -> None:
+    """Phase 1 escape hatch: with ``allow_unsigned_webhooks=True`` and
+    no ``webhook_secret``, the Jira webhook accepts unsigned requests."""
+    payload = json.loads((FIXTURES / "jira_webhook_story.json").read_text())
+    with (
+        patch.object(main.settings, "webhook_secret", ""),
+        patch.object(main.settings, "allow_unsigned_webhooks", True),
+    ):
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/jira", json=payload)
+            assert response.status_code == 202
 
 
 # --- ADO Webhook ---
@@ -133,7 +174,16 @@ def _no_ado_auth():
 
 
 async def test_ado_webhook_accepts_valid_payload() -> None:
-    """When no auth secrets are configured, webhook is accepted (local dev)."""
+    """Phase 1 local-dev path: when no auth secrets are configured but
+    ``allow_unsigned_webhooks=True`` (set by the autouse conftest
+    fixture), webhook is accepted.
+
+    Phase 1 changed the default for "no secret configured" from
+    "accept" to "503 Service Unavailable". The autouse
+    ``_open_phase1_dev_defaults`` fixture in conftest.py flips the
+    escape hatch on so pre-existing tests keep exercising business
+    logic rather than the fail-closed path.
+    """
     payload = _ado_payload(tags="ai-implement")
     with _no_ado_auth():
         async with await _make_client() as client:
@@ -226,6 +276,77 @@ async def test_ado_webhook_processes_when_ai_tag_present() -> None:
             response = await client.post("/webhooks/ado", json=payload)
             assert response.status_code == 202
             assert response.json()["status"] == "accepted"
+
+
+# --- Phase 1: Fail-closed webhook auth (ADO) ---
+
+
+async def test_ado_webhook_fails_closed_when_no_auth_configured() -> None:
+    """Phase 1 fail-closed: with neither ``webhook_secret`` nor
+    ``ado_webhook_token`` configured AND ``allow_unsigned_webhooks=False``,
+    the ADO webhook raises 503. Previously this path returned 202.
+    """
+    payload = _ado_payload(tags="ai-implement")
+    with (
+        patch.object(main.settings, "webhook_secret", ""),
+        patch.object(main.settings, "ado_webhook_token", ""),
+        patch.object(main.settings, "allow_unsigned_webhooks", False),
+    ):
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/ado", json=payload)
+            assert response.status_code == 503
+
+
+async def test_ado_webhook_accepts_when_allow_unsigned_set() -> None:
+    """Phase 1 escape hatch: with ``allow_unsigned_webhooks=True`` and
+    no ADO auth configured, the ADO webhook accepts unsigned requests."""
+    payload = _ado_payload(tags="ai-implement")
+    with (
+        patch.object(main.settings, "webhook_secret", ""),
+        patch.object(main.settings, "ado_webhook_token", ""),
+        patch.object(main.settings, "allow_unsigned_webhooks", True),
+    ):
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/ado", json=payload)
+            assert response.status_code == 202
+
+
+# --- github_webhook_proxy: L3 failure surfaces as 503 ---
+
+
+async def test_github_webhook_proxy_returns_503_when_l3_down() -> None:
+    """Phase 1: when L3 is unreachable, the proxy must raise 503 so
+    GitHub retries the delivery. Previously it swallowed the failure
+    and returned 202 with ``{"status": "l3_error"}`` — GitHub treated
+    that as "successfully delivered" and never retried, silently
+    dropping PR events whenever L3 was down.
+    """
+
+    async def _raise_connect_error(*_args: Any, **_kwargs: Any) -> Any:
+        raise httpx.ConnectError("L3 not listening")
+
+    class _MockAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _MockAsyncClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        post = staticmethod(_raise_connect_error)
+
+    payload = {"action": "opened", "pull_request": {"number": 1}}
+    # proxy lives in webhooks.py after the Phase 4 split — patch it there.
+    with patch("webhooks.httpx.AsyncClient", _MockAsyncClient):
+        async with await _make_client() as client:
+            response = await client.post(
+                "/webhooks/github",
+                json=payload,
+                headers={"x-github-event": "pull_request"},
+            )
+    assert response.status_code == 503
 
 
 def _mock_process_ticket_that_releases() -> AsyncMock:

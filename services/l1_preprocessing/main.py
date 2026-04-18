@@ -28,13 +28,14 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from adapters.ado_adapter import AdoAdapter
 from adapters.jira_adapter import JiraAdapter
 from auth import _require_api_key as _require_api_key
+from auth import _require_dashboard_auth as _require_dashboard_auth
 from autonomy_dashboard import router as autonomy_dashboard_router
 from autonomy_ingest import router as autonomy_router
 
@@ -111,14 +112,36 @@ app = FastAPI(
     description="Receives Jira/ADO webhooks, enriches tickets, dispatches to Agent Teams.",
     version="0.1.0",
 )
-app.include_router(unified_router)
-app.include_router(trace_router)
+# Dashboard routers are pure-GET views — apply _require_dashboard_auth
+# globally at the include site so every route requires X-API-Key (or
+# DASHBOARD_ALLOW_ANONYMOUS=true for local dev).
+app.include_router(
+    unified_router, dependencies=[Depends(_require_dashboard_auth)]
+)
+app.include_router(
+    trace_router, dependencies=[Depends(_require_dashboard_auth)]
+)
+# autonomy_router mixes internal-POST (own admin-token auth) and
+# dashboard-GET endpoints; leave existing per-route auth untouched.
 app.include_router(autonomy_router)
-app.include_router(autonomy_dashboard_router)
-app.include_router(learning_api_router)
-app.include_router(learning_dashboard_router)
+app.include_router(
+    autonomy_dashboard_router, dependencies=[Depends(_require_dashboard_auth)]
+)
+# learning_api_router has mixed GET/POST — GETs get dashboard auth via
+# the router-include dependency; POST admin writes retain their own
+# ``_guard_admin_request`` token check layered on top.
+app.include_router(
+    learning_api_router, dependencies=[Depends(_require_dashboard_auth)]
+)
+app.include_router(
+    learning_dashboard_router, dependencies=[Depends(_require_dashboard_auth)]
+)
 app.include_router(webhook_router)
-app.include_router(trace_bundle_router)
+# trace_bundle exposes /traces/{id}/bundle + artifact reads — same
+# dashboard-auth posture as the other GET surfaces.
+app.include_router(
+    trace_bundle_router, dependencies=[Depends(_require_dashboard_auth)]
+)
 app.include_router(completion_router)
 
 
@@ -129,6 +152,24 @@ async def _validate_config() -> None:
         logger.warning(
             "webhook_secret_not_configured",
             hint="Webhook signature validation is DISABLED. Set WEBHOOK_SECRET in .env",
+        )
+    if settings.allow_unsigned_webhooks:
+        logger.error(
+            "allow_unsigned_webhooks_enabled",
+            hint=(
+                "ALLOW_UNSIGNED_WEBHOOKS=true — webhook auth is DISABLED. "
+                "This MUST only be used for local development. Unset in "
+                "production or anyone on the network can inject tickets."
+            ),
+        )
+    if not settings.api_key and settings.dashboard_allow_anonymous:
+        logger.error(
+            "dashboard_allow_anonymous_enabled",
+            hint=(
+                "DASHBOARD_ALLOW_ANONYMOUS=true and no API_KEY set — "
+                "dashboards and trace bundles are unauthenticated. "
+                "Set API_KEY in production."
+            ),
         )
     if not settings.anthropic_api_key:
         logger.error("anthropic_api_key_missing", hint="Analyst will fail without API key")
@@ -298,18 +339,19 @@ async def _process_ticket(ticket: TicketPayload, trace_id: str = "") -> None:
 
 @app.get("/health")
 async def health() -> dict[str, object]:
-    """Health check with configuration status."""
-    return {
-        "status": "ok",
-        "anthropic_api_key": bool(settings.anthropic_api_key),
-        "jira_configured": bool(settings.jira_base_url and settings.jira_api_token),
-        "ado_configured": bool(settings.ado_org_url and settings.ado_pat),
-        "webhook_secret": bool(settings.webhook_secret),
-        "client_repo": bool(settings.default_client_repo),
-    }
+    """Health check.
+
+    Intentionally returns only liveness status — no secret-presence
+    booleans. Phase 1: prior fields like ``webhook_secret`` and
+    ``anthropic_api_key`` leaked information about which credentials
+    were configured to any unauthenticated caller that could probe
+    the endpoint. Operators checking config should look at startup
+    logs (warnings + errors for missing / open-mode config) instead.
+    """
+    return {"status": "ok"}
 
 
-@app.get("/stats/webhooks")
+@app.get("/stats/webhooks", dependencies=[Depends(_require_dashboard_auth)])
 async def webhook_stats() -> dict[str, object]:
     """Cumulative webhook outcome counts since process start / last reset.
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -384,10 +385,19 @@ async def test_rejects_invalid_signature() -> None:
         assert response.status_code == 401
 
 
-async def test_accepts_without_secret_in_dev_mode() -> None:
-    """When WEBHOOK_SECRET is empty (dev mode), requests are accepted without signature."""
+async def test_github_webhook_skips_signature_when_no_secret_configured_with_allow_unsigned(
+    monkeypatch,
+) -> None:
+    """Phase 1: with no ``WEBHOOK_SECRET`` configured AND
+    ``ALLOW_UNSIGNED_WEBHOOKS=true`` (local-dev escape hatch), the
+    github webhook accepts unsigned requests. Renamed from
+    ``test_accepts_without_secret_in_dev_mode`` — previously the
+    no-secret path was always open; now it requires the explicit
+    env var, enforced at the webhook handler.
+    """
     payload = {"action": "opened", "pull_request": {"number": 1, "diff_url": "", "body": ""}}
 
+    monkeypatch.setenv("ALLOW_UNSIGNED_WEBHOOKS", "true")
     with (
         patch.object(l3_main, "WEBHOOK_SECRET", ""),
         patch.object(l3_main, "_get_spawner") as mock_get,
@@ -400,6 +410,47 @@ async def test_accepts_without_secret_in_dev_mode() -> None:
                 headers={"x-github-event": "pull_request"},
             )
         assert response.status_code == 202
+
+
+async def test_github_webhook_fails_closed_when_no_secret_configured(
+    monkeypatch,
+) -> None:
+    """Phase 1 fail-closed: with no ``WEBHOOK_SECRET`` and no
+    ``ALLOW_UNSIGNED_WEBHOOKS=true``, the github webhook raises 503.
+    This is the new default — previously the endpoint silently
+    accepted unsigned requests whenever no secret was configured.
+    """
+    monkeypatch.delenv("ALLOW_UNSIGNED_WEBHOOKS", raising=False)
+    payload = {"action": "opened"}
+    with patch.object(l3_main, "WEBHOOK_SECRET", ""):
+        async with await _make_client() as client:
+            response = await client.post(
+                "/webhooks/github",
+                json=payload,
+                headers={"x-github-event": "pull_request"},
+            )
+    assert response.status_code == 503
+
+
+async def test_github_webhook_accepts_when_allow_unsigned(
+    monkeypatch,
+) -> None:
+    """Phase 1 escape hatch: ``ALLOW_UNSIGNED_WEBHOOKS=true`` + no
+    secret accepts the request."""
+    monkeypatch.setenv("ALLOW_UNSIGNED_WEBHOOKS", "true")
+    payload = {"action": "opened", "pull_request": {"number": 1, "diff_url": "", "body": ""}}
+    with (
+        patch.object(l3_main, "WEBHOOK_SECRET", ""),
+        patch.object(l3_main, "_get_spawner") as mock_get,
+    ):
+        mock_get.return_value = MagicMock()
+        async with await _make_client() as client:
+            response = await client.post(
+                "/webhooks/github",
+                json=payload,
+                headers={"x-github-event": "pull_request"},
+            )
+    assert response.status_code == 202
 
 
 async def test_accepts_valid_signature() -> None:
@@ -1172,6 +1223,84 @@ class TestAutoMergeTrigger:
             assert kwargs["head_sha"] == "abc123"
             assert kwargs["ticket_id"] == "SCRUM-16"
             assert kwargs["trigger_event"] == "review_approved"
+
+    async def test_agent_complete_includes_auth_header(
+        self, monkeypatch,
+    ) -> None:
+        """Phase 1: the /api/agent-complete call to L1 must carry
+        ``X-API-Key`` sourced from ``L1_INTERNAL_API_TOKEN``. Previously
+        the call sent ``headers={}`` which only worked because L1 ran
+        with ``API_KEY`` unset. With Phase 1 enforcing the API key, the
+        call would 401 without an explicit header."""
+        monkeypatch.setenv("L1_INTERNAL_API_TOKEN", "shared-secret-abc")
+        payload = _base_pr_payload("submitted")
+        payload["review"] = {
+            "state": "approved",
+            "id": 1,
+            "body": "",
+            "html_url": "https://github.com/org/repo/pull/42",
+            "user": {"login": "lead"},
+        }
+
+        captured: list[dict[str, Any]] = []
+
+        class _CapturingClient:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            async def __aenter__(self) -> _CapturingClient:
+                return self
+
+            async def __aexit__(self, *args: Any) -> None:
+                return None
+
+            async def post(
+                self,
+                url: str,
+                json: Any = None,
+                headers: dict[str, str] | None = None,
+            ) -> MagicMock:
+                captured.append({"url": url, "headers": headers})
+                resp = MagicMock()
+                resp.status_code = 200
+                resp.raise_for_status = MagicMock()
+                return resp
+
+        with (
+            patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+            patch.object(
+                l3_main, "_forward_autonomy_event", new_callable=AsyncMock
+            ),
+            patch.object(
+                l3_main, "_forward_human_issue", new_callable=AsyncMock
+            ),
+            patch.object(
+                l3_main, "evaluate_and_maybe_merge",
+                AsyncMock(return_value={"status": "dry_run"}),
+            ),
+            patch("main.httpx.AsyncClient", _CapturingClient),
+        ):
+            async with await _make_client() as client:
+                response = await _post_webhook(
+                    client, payload, "pull_request_review"
+                )
+            assert response.status_code == 202
+            import asyncio as _asyncio
+
+            await _asyncio.sleep(0.1)
+
+        agent_complete_calls = [
+            c for c in captured if c["url"].endswith("/api/agent-complete")
+        ]
+        assert len(agent_complete_calls) == 1, (
+            f"expected exactly one /api/agent-complete call, got "
+            f"{[c['url'] for c in captured]}"
+        )
+        headers = agent_complete_calls[0]["headers"] or {}
+        assert headers.get("X-API-Key") == "shared-secret-abc", (
+            f"expected X-API-Key header sourced from L1_INTERNAL_API_TOKEN, "
+            f"got headers={headers!r}"
+        )
 
     async def test_ci_passed_calls_evaluate_and_maybe_merge(self) -> None:
         payload = {
