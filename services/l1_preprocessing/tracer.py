@@ -98,11 +98,10 @@ def atomic_write_text(path: Path, content: str) -> None:
     Uses the same pattern ``admin_re_redact`` already had inline:
     write to ``<path>.<suffix>.atomic-write.tmp``, then ``os.replace``
     it over the real path. A crash mid-write leaves the original
-    file intact instead of producing a truncated one. Shared with
-    ``cross_ticket_coordinator._save`` so the tracking file can't be
-    corrupted if two concurrent tasks race on the same save — the
-    winning ``os.replace`` is atomic on POSIX and the loser's temp
-    file is silently overwritten.
+    file intact instead of producing a truncated one. The winning
+    ``os.replace`` is atomic on POSIX and any loser's temp file is
+    silently overwritten, so concurrent writers cannot corrupt the
+    target.
 
     On failure the temp file is best-effort unlinked so a botched
     write doesn't leave garbage next to the target.
