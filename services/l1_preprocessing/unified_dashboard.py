@@ -23,6 +23,11 @@ from client_profile import load_profile
 from config import settings
 from dashboard_common import (
     LANGFUSE_BASE_CSS,
+    STANDARD_CARD_CSS,
+    STANDARD_TABLE_CSS,
+)
+from dashboard_common import (
+    MODE_BADGE as _MODE_BADGE,
 )
 from dashboard_common import (
     badge as _badge,
@@ -49,15 +54,10 @@ router = APIRouter()
 # Styles — copied from trace_dashboard to avoid coupling
 # ---------------------------------------------------------------------------
 
-# Base CSS (body/typography/badge) comes from dashboard_common;
-# unified-specific rules (card grid, table chrome, nav link) are
-# appended here.
+# Base CSS + shared card/table chrome come from dashboard_common;
+# unified-specific rules (card-grid sizing = 260px, separated border
+# table chrome, nav links) are appended here.
 _UNIFIED_LOCAL_CSS = """
-h2 { font-size: 15px; font-weight: 600; color: #0F172A; margin-bottom: 8px; }
-.card {
-  border: 1px solid #E2E8F0; border-radius: 8px; padding: 16px;
-  background: #FFFFFF; margin-bottom: 12px;
-}
 .card-grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 12px; margin: 16px 0;
@@ -66,8 +66,6 @@ h2 { font-size: 15px; font-weight: 600; color: #0F172A; margin-bottom: 8px; }
   display: flex; justify-content: space-between; padding: 2px 0;
   font-size: 12px;
 }
-.metric-label { color: #64748B; }
-.metric-value { font-weight: 600; color: #0F172A; }
 table { width: 100%; border-collapse: separate; border-spacing: 0;
   border: 1px solid #E2E8F0; border-radius: 8px; overflow: hidden;
   margin-top: 12px; font-size: 12px; }
@@ -76,14 +74,14 @@ thead th {
   text-align: left; padding: 10px 12px; border-bottom: 1px solid #E2E8F0;
   white-space: nowrap;
 }
-tbody td { padding: 8px 12px; border-bottom: 1px solid #E2E8F0; vertical-align: middle; }
-tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover { background: rgba(241,245,249,0.5); }
 .nav-link { font-size: 12.5px; padding: 4px 10px; border-radius: 6px; }
 .nav-link.active { background: #0F172A; color: #F7F9FB; font-weight: 600; }
 """
 
-_LANGFUSE_STYLES = LANGFUSE_BASE_CSS + _UNIFIED_LOCAL_CSS
+_LANGFUSE_STYLES = (
+    LANGFUSE_BASE_CSS + STANDARD_CARD_CSS + STANDARD_TABLE_CSS + _UNIFIED_LOCAL_CSS
+)
 
 # Status badge mapping — imported from dashboard_common so the mapping
 # here can't drift from trace_dashboard's. Previously this copy was
@@ -91,11 +89,7 @@ _LANGFUSE_STYLES = LANGFUSE_BASE_CSS + _UNIFIED_LOCAL_CSS
 # secondary-fallback class), which the shared module now fixes.
 from dashboard_common import STATUS_BADGE as _STATUS_BADGE  # noqa: E402
 
-_MODE_BADGE: dict[str, str] = {
-    "conservative": "badge-secondary",
-    "semi_autonomous": "badge-warning",
-    "full_autonomous": "badge-success",
-}
+# _MODE_BADGE now imported at the top of this module from dashboard_common.
 
 _AUTO_MERGE_DECISION_BADGE: dict[str, str] = {
     "merged": "badge-success",
