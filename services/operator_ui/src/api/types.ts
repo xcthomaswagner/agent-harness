@@ -92,3 +92,51 @@ export interface TraceDetailResponse {
   phases: TracePhase[];
   events: TraceEvent[];
 }
+
+export interface AutonomyTrendPoint {
+  date: string;
+  value: number | null;
+  sample: number;
+}
+
+export interface AutonomyByTypeRow {
+  ticket_type: string;
+  volume: number;
+  fpa: number | null;
+  catch: number | null;
+  escape: number | null;
+  merged: number;
+}
+
+export interface AutonomyEscapedDefect {
+  id: string;
+  ticket_id: string;
+  pr_number: number | null;
+  severity: string;
+  where: string;
+  reported_at: string;
+  note: string;
+}
+
+export interface AutonomyResponse {
+  profile: string;
+  window_days: number;
+  metrics: {
+    fpa: number | null;
+    escape: number | null;
+    catch: number | null;
+    auto_merge: number;
+    sample_size: number;
+    merged_count: number;
+    recommended_mode: string;
+    data_quality_status: string;
+  };
+  trends: {
+    fpa: AutonomyTrendPoint[];
+    escape: AutonomyTrendPoint[];
+    catch: AutonomyTrendPoint[];
+    auto_merge: AutonomyTrendPoint[];
+  };
+  by_type: AutonomyByTypeRow[];
+  escaped: AutonomyEscapedDefect[];
+}

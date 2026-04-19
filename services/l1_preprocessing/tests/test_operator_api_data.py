@@ -611,6 +611,109 @@ def test_trace_detail_marks_failed_phase(
     assert impl["state"] == "fail"
 
 
+# ---------- /api/operator/autonomy/{profile} ----------
+
+
+def test_autonomy_returns_empty_shape_for_unknown_profile(
+    client: TestClient,
+) -> None:
+    r = client.get("/api/operator/autonomy/does-not-exist")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["profile"] == "does-not-exist"
+    assert "metrics" in data
+    assert "trends" in data
+    assert data["by_type"] == []
+    assert data["escaped"] == []
+    # 30 days × 4 trends, empty arrays with all-None values
+    assert len(data["trends"]["fpa"]) == 30
+    assert all(d["value"] is None for d in data["trends"]["fpa"])
+
+
+def test_autonomy_includes_auto_merge_trend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+
+    profiles_dir = tmp_path / "client-profiles"
+    _write_profile(profiles_dir, "alpha")
+    import client_profile as cp_module
+
+    monkeypatch.setattr(cp_module, "PROFILES_DIR", profiles_dir)
+
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+        for i, decision in enumerate(["merged", "blocked"]):
+            record_auto_merge_decision(
+                conn,
+                repo_full_name="acme/widgets",
+                pr_number=i + 1,
+                decision=decision,
+                reason="test",
+                payload={"client_profile": "alpha"},
+            )
+    finally:
+        conn.close()
+
+    c = TestClient(_mk_app())
+    data = c.get("/api/operator/autonomy/alpha").json()
+    trend = data["trends"]["auto_merge"]
+    today_entry = next(d for d in trend if d["sample"] > 0)
+    # 1 merged / 2 eligible
+    assert today_entry["value"] == 0.5
+    assert today_entry["sample"] == 2
+
+
+def test_autonomy_ticket_type_breakdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+
+    profiles_dir = tmp_path / "client-profiles"
+    _write_profile(profiles_dir, "alpha")
+    import client_profile as cp_module
+
+    monkeypatch.setattr(cp_module, "PROFILES_DIR", profiles_dir)
+
+    from datetime import UTC, datetime, timedelta
+
+    recent = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+        for i, tt in enumerate(["bug", "feature", "chore"]):
+            upsert_pr_run(
+                conn,
+                PrRunUpsert(
+                    ticket_id=f"T-{i}",
+                    pr_number=i + 10,
+                    repo_full_name="acme/widgets",
+                    pr_url=f"https://example.test/pr/{i + 10}",
+                    head_sha=f"sha{i}",
+                    client_profile="alpha",
+                    opened_at=recent,
+                    ticket_type=tt,
+                    first_pass_accepted=1,
+                    merged=1,
+                ),
+            )
+    finally:
+        conn.close()
+
+    c = TestClient(_mk_app())
+    data = c.get("/api/operator/autonomy/alpha").json()
+    types = sorted({row["ticket_type"] for row in data["by_type"]})
+    assert types == ["bug", "chore", "feature"]
+
+
 # ---------- /api/operator/lessons/counts ----------
 
 

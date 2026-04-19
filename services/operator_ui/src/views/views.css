@@ -274,3 +274,79 @@
   flex-wrap: wrap;
   margin-bottom: 24px;
 }
+
+/* ============ Autonomy ============ */
+.op-metric-band {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border: var(--rule);
+  background: var(--ink-050);
+  margin-bottom: 32px;
+}
+
+.op-metric-cell {
+  padding: 22px 24px;
+  border-right: var(--rule);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.op-metric-cell:last-child {
+  border-right: none;
+}
+
+.op-metric-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-600);
+}
+
+.op-metric-val {
+  font-family: var(--font-serif);
+  font-size: 38px;
+  line-height: 1;
+  color: var(--ink-950);
+}
+
+.op-metric-sub {
+  font-size: 12px;
+  color: var(--ink-600);
+}
+
+.op-trend-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.op-trend-card {
+  border: var(--rule);
+  padding: 20px 22px;
+  background: var(--ink-050);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.op-trend-card-lbl {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-600);
+}
+
+.op-trend-card-val {
+  font-family: var(--font-serif);
+  font-size: 30px;
+  color: var(--ink-950);
+  line-height: 1;
+}
+
+.op-escape-severe {
+  color: var(--signal-err);
+}

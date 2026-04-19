@@ -20,9 +20,14 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from auth import _require_dashboard_auth
-from autonomy_metrics import compute_profile_metrics
+from autonomy_metrics import (
+    compute_daily_trend,
+    compute_profile_metrics,
+    compute_ticket_type_breakdown,
+)
 from autonomy_store import ensure_schema, open_connection
 from autonomy_store.auto_merge import list_recent_auto_merge_decisions
+from autonomy_store.defects import list_confirmed_escaped_defects
 from autonomy_store.lessons import list_lesson_candidates
 from autonomy_store.pr_runs import list_pr_runs
 from client_profile import list_profiles, load_profile
@@ -258,6 +263,109 @@ def get_traces(
         "offset": offset,
         "limit": capped_limit,
     }
+
+
+# --- Autonomy ------------------------------------------------------------
+
+
+@router.get("/autonomy/{profile}")
+def get_autonomy(profile: str, window_days: int = 30) -> dict[str, Any]:
+    """Per-profile autonomy report.
+
+    Bundles together every metric the Autonomy view renders:
+      * headline numbers (FPA / escape / catch / auto-merge)
+      * daily trends for each of the four metrics
+      * by-ticket-type breakdown
+      * recent escaped defects (30d)
+
+    One endpoint per view, one fetch per page load. The trend arrays
+    reuse compute_daily_trend; auto-merge was added to that function in
+    the same commit as this endpoint.
+    """
+    conn = open_connection(_db_path_from_settings())
+    try:
+        ensure_schema(conn)
+        metrics = compute_profile_metrics(conn, profile, window_days=window_days)
+        auto_merge = _compute_auto_merge_rate(conn, profile, window_days=window_days)
+        by_type = compute_ticket_type_breakdown(
+            conn, profile, window_days=window_days
+        )
+        trend_fpa = compute_daily_trend(conn, profile, window_days, "fpa")
+        trend_escape = compute_daily_trend(
+            conn, profile, window_days, "defect_escape"
+        )
+        trend_catch = compute_daily_trend(
+            conn, profile, window_days, "catch_rate"
+        )
+        trend_auto = compute_daily_trend(
+            conn, profile, window_days, "auto_merge"
+        )
+
+        # Recent escaped defects — list_confirmed_escaped_defects needs a
+        # pr_run_ids list; pull all merged pr_runs in window and feed
+        # them. Caller filters to the top-N most recent for display.
+        pr_rows = list_pr_runs(conn, client_profile=profile)
+        merged_ids = [int(r["id"]) for r in pr_rows if int(r["merged"])]
+        escaped_rows = list_confirmed_escaped_defects(
+            conn, merged_ids, window_days=30
+        )
+        escaped: list[dict[str, Any]] = []
+        for r in escaped_rows[:20]:
+            escaped.append(
+                {
+                    "id": f"D-{r['id']}",
+                    "ticket_id": r["ticket_id"] or "",
+                    "pr_number": int(r["pr_number"]) if r["pr_number"] else None,
+                    "severity": str(r["severity"] or "").lower() or "minor",
+                    "where": str(r["target_id"] or "")[:120],
+                    "reported_at": r["reported_at"] or "",
+                    "note": str(r["note"] or "")[:300],
+                }
+            )
+
+        return {
+            "profile": profile,
+            "window_days": window_days,
+            "metrics": {
+                "fpa": metrics.get("first_pass_acceptance_rate"),
+                "escape": metrics.get("defect_escape_rate"),
+                "catch": metrics.get("self_review_catch_rate"),
+                "auto_merge": auto_merge,
+                "sample_size": metrics.get("sample_size", 0),
+                "merged_count": metrics.get("merged_count", 0),
+                "recommended_mode": metrics.get("recommended_mode", ""),
+                "data_quality_status": metrics.get("data_quality_status", ""),
+            },
+            "trends": {
+                "fpa": _shape_trend(trend_fpa),
+                "escape": _shape_trend(trend_escape),
+                "catch": _shape_trend(trend_catch),
+                "auto_merge": _shape_trend(trend_auto),
+            },
+            "by_type": [
+                {
+                    "ticket_type": row["ticket_type"],
+                    "volume": row["sample_size"],
+                    "fpa": row["first_pass_acceptance_rate"],
+                    "catch": row["self_review_catch_rate"],
+                    "escape": row["defect_escape_rate"],
+                    "merged": row["merged_count"],
+                }
+                for row in by_type
+            ],
+            "escaped": escaped,
+        }
+    finally:
+        conn.close()
+
+
+def _shape_trend(
+    series: list[tuple[str, float | None, int]],
+) -> list[dict[str, Any]]:
+    """Turn compute_daily_trend tuples into JSON-friendly dicts."""
+    return [
+        {"date": d, "value": v, "sample": n} for (d, v, n) in series
+    ]
 
 
 # --- Trace detail --------------------------------------------------------
