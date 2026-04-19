@@ -62,3 +62,33 @@ export interface TracesResponse {
   offset: number;
   limit: number;
 }
+
+export interface TracePhase {
+  key: "planning" | "scaffolding" | "implementing" | "reviewing" | "merging";
+  name: string;
+  state: "done" | "active" | "pending" | "fail";
+  duration_seconds: number;
+  event_count: number;
+}
+
+export interface TraceEvent {
+  t: string;
+  ev: string;
+  phase: string;
+  msg: string;
+}
+
+export interface TraceDetailResponse {
+  id: string;
+  title: string;
+  status: TraceStatus;
+  raw_status: string;
+  pipeline_mode: string;
+  started_at: string;
+  elapsed: string;
+  pr_url: string | null;
+  review_verdict: string;
+  qa_result: string;
+  phases: TracePhase[];
+  events: TraceEvent[];
+}

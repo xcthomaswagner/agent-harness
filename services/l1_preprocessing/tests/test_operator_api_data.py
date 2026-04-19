@@ -468,6 +468,149 @@ def test_traces_limit_caps_at_500(traces_client: TestClient) -> None:
     assert r.json()["limit"] == 500
 
 
+# ---------- /api/operator/traces/{id} (trace detail) ----------
+
+
+def _write_rich_trace(
+    logs_dir: Path,
+    ticket_id: str,
+    phases_events: list[tuple[str, str, str]],
+) -> None:
+    """Write a JSONL trace with agent-phase entries.
+
+    phases_events: list of (phase, event, message). Timestamps
+    auto-incremented by 30s per entry so compute_phase_durations has
+    non-zero deltas.
+    """
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    path = logs_dir / f"{ticket_id}.jsonl"
+    with path.open("w") as f:
+        # A webhook entry to anchor the run start.
+        f.write(
+            json.dumps(
+                {
+                    "ticket_id": ticket_id,
+                    "trace_id": f"t-{ticket_id}",
+                    "phase": "webhook",
+                    "event": "webhook_received",
+                    "timestamp": "2026-04-18T12:00:00+00:00",
+                    "source": "pipeline",
+                }
+            )
+            + "\n"
+        )
+        for i, (phase, ev, msg) in enumerate(phases_events):
+            ts_sec = 30 + i * 30
+            f.write(
+                json.dumps(
+                    {
+                        "ticket_id": ticket_id,
+                        "trace_id": f"t-{ticket_id}",
+                        "phase": phase,
+                        "event": ev,
+                        "message": msg,
+                        "timestamp": f"2026-04-18T12:{ts_sec // 60:02d}:{ts_sec % 60:02d}+00:00",
+                        "source": "agent",
+                    }
+                )
+                + "\n"
+            )
+
+
+def test_trace_detail_404_when_missing(traces_client: TestClient) -> None:
+    r = traces_client.get("/api/operator/traces/HARN-MISSING")
+    assert r.status_code == 404
+
+
+def test_trace_detail_shapes_phases_and_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    logs_dir = tmp_path / "logs"
+    import tracer as tracer_module
+
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    _write_rich_trace(
+        logs_dir,
+        "HARN-777",
+        phases_events=[
+            ("planning", "plan_drafted", "Plan drafted"),
+            ("planning", "plan_approved", "Plan approved"),
+            ("scaffolding", "worktree_ready", "Worktree ready"),
+            ("implementing", "unit_01_spawn", "unit-01 spawned"),
+            ("implementing", "unit_01_done", "unit-01 done"),
+            ("reviewing", "review_complete", "Review complete"),
+        ],
+    )
+
+    c = TestClient(_mk_app())
+    r = c.get("/api/operator/traces/HARN-777")
+    assert r.status_code == 200
+    data = r.json()
+
+    # Core fields present.
+    assert data["id"] == "HARN-777"
+    assert "phases" in data and "events" in data
+    assert len(data["phases"]) == 5
+
+    phase_by_key = {p["key"]: p for p in data["phases"]}
+    # Planning + scaffolding + implementing have events -> not pending.
+    # The current phase (last agent-written) is reviewing -> active.
+    assert phase_by_key["planning"]["state"] in ("done", "active")
+    assert phase_by_key["planning"]["event_count"] >= 2
+    assert phase_by_key["scaffolding"]["state"] in ("done", "active")
+    assert phase_by_key["implementing"]["state"] in ("done", "active")
+    assert phase_by_key["reviewing"]["state"] == "active"
+    assert phase_by_key["merging"]["state"] == "pending"
+
+    # Event stream preserves message text.
+    messages = [e["msg"] for e in data["events"]]
+    assert any("Plan drafted" in m for m in messages)
+    assert any("Review complete" in m for m in messages)
+
+
+def test_trace_detail_marks_failed_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    logs_dir = tmp_path / "logs"
+    import tracer as tracer_module
+
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    _write_rich_trace(
+        logs_dir,
+        "HARN-FAIL",
+        phases_events=[
+            ("planning", "plan_drafted", "Plan drafted"),
+            ("implementing", "unit_01_spawn", "unit-01 spawned"),
+            ("implementing", "unit_01_error", "Unit failed with error"),
+        ],
+    )
+
+    c = TestClient(_mk_app())
+    data = c.get("/api/operator/traces/HARN-FAIL").json()
+    impl = next(p for p in data["phases"] if p["key"] == "implementing")
+    assert impl["state"] == "fail"
+
+
 # ---------- /api/operator/lessons/counts ----------
 
 

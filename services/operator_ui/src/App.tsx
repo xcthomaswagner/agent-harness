@@ -1,7 +1,7 @@
 import { Layout, ViewHead } from "./chrome";
 import { useRoute } from "./router";
 import type { Route } from "./router";
-import { HomeView, TracesView } from "./views";
+import { HomeView, TraceDetailView, TracesView } from "./views";
 
 /**
  * Top-level app. Layout renders the sidebar + topbar; the route decides
@@ -34,13 +34,7 @@ function ViewFor({ route }: { route: Route }) {
     case "traces":
       return <TracesView />;
     case "trace-detail":
-      return (
-        <ViewHead
-          sup={`Traces · ${route.id}`}
-          title={route.id}
-          sub="Phase timeline · session panels · raw events."
-        />
-      );
+      return <TraceDetailView id={route.id} />;
     case "autonomy":
       return (
         <ViewHead

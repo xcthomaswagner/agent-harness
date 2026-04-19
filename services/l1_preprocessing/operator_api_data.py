@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from auth import _require_dashboard_auth
 from autonomy_metrics import compute_profile_metrics
@@ -26,7 +26,14 @@ from autonomy_store.auto_merge import list_recent_auto_merge_decisions
 from autonomy_store.lessons import list_lesson_candidates
 from autonomy_store.pr_runs import list_pr_runs
 from client_profile import list_profiles, load_profile
-from tracer import list_traces as _list_traces
+from tracer import (
+    compute_phase_durations,
+    find_run_start_idx,
+    read_trace,
+)
+from tracer import (
+    list_traces as _list_traces,
+)
 
 router = APIRouter(
     prefix="/api/operator",
@@ -251,6 +258,233 @@ def get_traces(
         "offset": offset,
         "limit": capped_limit,
     }
+
+
+# --- Trace detail --------------------------------------------------------
+
+# Fixed phase sequence the design renders as a 5-dot row. Runtime phase
+# events map into this fixed set; unmapped phases fall into the closest
+# bucket but are still returned in the raw timeline below.
+_CANONICAL_PHASES: tuple[tuple[str, str], ...] = (
+    ("planning", "Planning"),
+    ("scaffolding", "Scaffolding"),
+    ("implementing", "Implementing"),
+    ("reviewing", "Reviewing"),
+    ("merging", "Merging"),
+)
+
+_PHASE_ALIASES: dict[str, str] = {
+    "plan": "planning",
+    "planner": "planning",
+    "worktree": "scaffolding",
+    "spawn": "scaffolding",
+    "develop": "implementing",
+    "developer": "implementing",
+    "implement": "implementing",
+    "review": "reviewing",
+    "reviewer": "reviewing",
+    "judge": "reviewing",
+    "qa": "reviewing",
+    "merge": "merging",
+    "merge_coordinator": "merging",
+    "pr": "merging",
+}
+
+
+def _canonical_phase(phase: str) -> str | None:
+    """Map an agent phase label to one of the 5 canonical buckets, or
+    None when the phase is outside the L2 pipeline (webhook, pipeline,
+    ticket_read — infrastructure phases the design doesn't render).
+    """
+    p = phase.lower()
+    if not p or p in ("webhook", "pipeline", "ticket_read"):
+        return None
+    for canon, _label in _CANONICAL_PHASES:
+        if canon in p:
+            return canon
+    return _PHASE_ALIASES.get(p)
+
+
+def _shape_trace_detail(
+    ticket_id: str, entries: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Reshape a full trace entry list into the operator detail payload.
+
+    Returns:
+      {
+        id, title, status, raw_status, started_at, elapsed, pr_url,
+        phases: [{ key, name, state, duration_seconds, event_count }],
+        events: [{ t, ev, phase, msg }],   (latest 200 entries)
+      }
+    """
+    if not entries:
+        raise HTTPException(status_code=404, detail=f"trace not found: {ticket_id}")
+
+    run_start_idx = find_run_start_idx(entries)
+    run_entries = entries[run_start_idx:]
+    metadata = _extract_trace_metadata_local(entries)
+
+    # Phase durations + event counts, mapped into canonical buckets.
+    durations = compute_phase_durations(entries, run_start_idx=run_start_idx)
+    per_bucket_duration: dict[str, float] = {k: 0.0 for k, _ in _CANONICAL_PHASES}
+    per_bucket_events: dict[str, int] = {k: 0 for k, _ in _CANONICAL_PHASES}
+    for d in durations:
+        canon = _canonical_phase(str(d.get("phase", "")))
+        if canon is None:
+            continue
+        per_bucket_duration[canon] += float(d.get("duration_seconds") or 0.0)
+        per_bucket_events[canon] += 1
+    for e in run_entries:
+        canon = _canonical_phase(str(e.get("phase", "")))
+        if canon:
+            per_bucket_events[canon] += 1
+
+    # Derive per-phase state:
+    #   done    — duration>0 AND a later phase has activity
+    #   active  — currently-emitting phase (last agent-written phase)
+    #   fail    — any error event in that phase
+    #   pending — no activity yet
+    current = _derive_current_phase_local(run_entries)
+    current_canon = _canonical_phase(current) if current else None
+    fail_phases: set[str] = set()
+    for e in run_entries:
+        if "error" in str(e.get("event", "")).lower() or e.get("level") == "error":
+            canon = _canonical_phase(str(e.get("phase", "")))
+            if canon:
+                fail_phases.add(canon)
+
+    # Ordered done detection: a phase is "done" when some later canonical
+    # phase has ≥1 event AND the phase itself has ≥1 event.
+    phase_order = [k for k, _ in _CANONICAL_PHASES]
+    phases_out: list[dict[str, Any]] = []
+    for i, (key, label) in enumerate(_CANONICAL_PHASES):
+        if key in fail_phases:
+            state = "fail"
+        elif key == current_canon:
+            state = "active"
+        elif per_bucket_events[key] > 0:
+            later_active = any(
+                per_bucket_events[phase_order[j]] > 0
+                for j in range(i + 1, len(phase_order))
+            )
+            state = "done" if later_active or (
+                metadata["status"] in ("Complete", "Merged")
+            ) else "active"
+        else:
+            state = "pending"
+        phases_out.append(
+            {
+                "key": key,
+                "name": label,
+                "state": state,
+                "duration_seconds": round(per_bucket_duration[key], 1),
+                "event_count": per_bucket_events[key],
+            }
+        )
+
+    # Raw event stream — last 200 items, agent-filtered, shaped for the
+    # design's 3-column log.
+    event_rows: list[dict[str, Any]] = []
+    for e in run_entries[-200:]:
+        phase = str(e.get("phase", ""))
+        canon = _canonical_phase(phase)
+        event_rows.append(
+            {
+                "t": str(e.get("timestamp", "")),
+                "ev": str(e.get("event", "")),
+                "phase": canon or phase,
+                "msg": _event_message(e),
+            }
+        )
+
+    return {
+        "id": ticket_id,
+        "title": metadata["ticket_title"],
+        "status": _normalize_trace_status(metadata["status"]),
+        "raw_status": metadata["status"],
+        "pipeline_mode": metadata["pipeline_mode"],
+        "started_at": metadata["started_at"],
+        "elapsed": metadata["elapsed"],
+        "pr_url": metadata["pr_url"] or None,
+        "review_verdict": metadata["review_verdict"],
+        "qa_result": metadata["qa_result"],
+        "phases": phases_out,
+        "events": event_rows,
+    }
+
+
+def _extract_trace_metadata_local(
+    entries: list[dict[str, Any]],
+) -> dict[str, str]:
+    """Pull a compact summary off an entries list.
+
+    Uses the same helpers list_traces uses so the detail + summary views
+    agree on status vocabulary.
+    """
+    from tracer import (
+        _compute_run_duration,
+        _extract_trace_metadata,
+        derive_trace_status,
+    )
+
+    meta = _extract_trace_metadata(entries)
+    events = [e.get("event", "") for e in entries]
+    status = derive_trace_status(entries, events, meta.get("pr_url", ""))
+    run_start_idx = find_run_start_idx(entries)
+    run_entries = entries[run_start_idx:]
+    started_at = (
+        run_entries[0].get("timestamp", "") if run_entries else entries[0].get("timestamp", "")
+    )
+    elapsed = _compute_run_duration(run_entries) if run_entries else ""
+    return {
+        "ticket_title": meta.get("ticket_title", "") or "",
+        "pr_url": meta.get("pr_url", "") or "",
+        "review_verdict": meta.get("review_verdict", "") or "",
+        "qa_result": meta.get("qa_result", "") or "",
+        "pipeline_mode": meta.get("pipeline_mode", "") or "",
+        "status": status,
+        "started_at": started_at,
+        "elapsed": elapsed,
+    }
+
+
+def _derive_current_phase_local(run_entries: list[dict[str, Any]]) -> str:
+    """Duplicate of tracer._derive_current_phase walking only run_entries."""
+    for e in reversed(run_entries):
+        if e.get("source") == "agent":
+            phase = str(e.get("phase", ""))
+            if phase and phase != "ticket_read":
+                return phase
+    return ""
+
+
+def _event_message(entry: dict[str, Any]) -> str:
+    """Pull a human-friendly one-line message off a trace entry.
+
+    Falls back through several field names the harness has used over
+    time: ``message``, ``msg``, ``summary``, ``detail``.
+    """
+    for key in ("message", "msg", "summary", "detail"):
+        val = entry.get(key)
+        if val:
+            return str(val)[:300]
+    return ""
+
+
+@router.get("/traces/{ticket_id}")
+def get_trace_detail(ticket_id: str) -> dict[str, Any]:
+    """Full trace timeline for one ticket.
+
+    Reads the per-ticket JSONL via ``tracer.read_trace`` and reshapes
+    into the design's 5-phase timeline + event stream.
+    """
+    entries = read_trace(ticket_id)
+    if not entries:
+        raise HTTPException(
+            status_code=404,
+            detail=f"trace not found: {ticket_id}",
+        )
+    return _shape_trace_detail(ticket_id, entries)
 
 
 @router.get("/lessons/counts")
