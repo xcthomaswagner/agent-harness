@@ -1,26 +1,22 @@
-import { useEffect, useState } from "preact/hooks";
-import { getStoredTheme, setStoredTheme } from "../theme";
+import { useState } from "preact/hooks";
 import type { Route } from "../router";
+import { Settings } from "./Settings";
 
 interface TopbarProps {
   route: Route;
 }
 
 /**
- * Topbar: breadcrumb (derived from route) + live indicator + theme toggle.
+ * Topbar: breadcrumb (derived from route) + live indicator + settings
+ * gear (theme / accent / density).
  *
- * The live indicator currently shows a static "OK" pulse because the SPA
- * doesn't have an aggregate-health SSE stream yet. Commit 11's live log
- * will populate per-ticket status; later work can add a global health
- * channel. Keep the indicator so the visual design lands now and the
- * wiring slots in later.
+ * The live indicator currently shows a static "OK" pulse because the
+ * SPA doesn't have an aggregate-health SSE stream yet. Commit 11's
+ * live log populates per-ticket status; a global health channel is a
+ * followup.
  */
 export function Topbar({ route }: TopbarProps) {
-  const [theme, setTheme] = useState(getStoredTheme());
-
-  useEffect(() => {
-    setStoredTheme(theme);
-  }, [theme]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   return (
     <header class="op-topbar">
@@ -30,12 +26,18 @@ export function Topbar({ route }: TopbarProps) {
         <span class="op-topbar-live-dot" aria-hidden="true" />
         <span>Live</span>
       </div>
-      <button
-        type="button"
-        class="op-theme-toggle"
-        aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
-        onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-      />
+      <div class="op-settings-wrap">
+        <button
+          type="button"
+          class="op-settings-btn"
+          aria-label="Open preferences"
+          aria-expanded={settingsOpen}
+          onClick={() => setSettingsOpen((v) => !v)}
+        >
+          ⚙
+        </button>
+        {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
+      </div>
     </header>
   );
 }

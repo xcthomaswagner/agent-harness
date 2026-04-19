@@ -142,26 +142,52 @@ test.describe("Operator dashboard — chrome renders with real CSS", () => {
     await expect(table.locator("thead th").first()).toBeVisible();
   });
 
-  test("Theme toggle flips data-theme on <html>", async ({ page }) => {
-    // Clear storage first so this test doesn't depend on ordering —
+  test("Settings popover flips theme and accent", async ({ page }) => {
+    // Clear stored prefs so this test doesn't depend on ordering —
     // localStorage persists across tests in the shared context.
     await page.goto(shellUrl("/"));
-    await page.evaluate(() => localStorage.removeItem("operator.theme"));
+    await page.evaluate(() => {
+      localStorage.removeItem("operator.theme");
+      localStorage.removeItem("operator.accent");
+      localStorage.removeItem("operator.density");
+    });
     await page.reload();
 
-    const themeBefore = await page.evaluate(() =>
-      document.documentElement.getAttribute("data-theme"),
-    );
-    // Default is dark (set by applyStoredTheme on mount).
-    expect(themeBefore).toBe("dark");
+    expect(
+      await page.evaluate(() =>
+        document.documentElement.getAttribute("data-theme"),
+      ),
+    ).toBe("dark");
 
-    await page.locator(".op-theme-toggle").click();
-    // Small wait — the click handler is synchronous but Preact's
-    // reconciler flushes next tick.
+    // Open settings.
+    await page.locator(".op-settings-btn").click();
+    await expect(page.locator(".op-settings")).toBeVisible();
+
+    // Flip to Light.
+    await page
+      .locator(".op-settings-pill", { hasText: "Light" })
+      .click();
     await page.waitForFunction(
       () => document.documentElement.getAttribute("data-theme") === "light",
       { timeout: 2000 },
     );
+
+    // Pick the teal accent (second swatch, aria-label="Teal").
+    await page.locator('.op-settings-swatch[aria-label="Teal"]').click();
+    const accentHex = await page.evaluate(() =>
+      document.documentElement.style.getPropertyValue("--accent").trim(),
+    );
+    // Teal-light is #208f7f per ACCENT_PRESETS.
+    expect(accentHex.toLowerCase()).toBe("#208f7f");
+  });
+
+  test("Settings popover dismisses on outside click", async ({ page }) => {
+    await page.goto(shellUrl("/"));
+    await page.locator(".op-settings-btn").click();
+    await expect(page.locator(".op-settings")).toBeVisible();
+    // Click the view title — outside the popover.
+    await page.locator(".op-view-title").click();
+    await expect(page.locator(".op-settings")).not.toBeVisible();
   });
 
   test("Autonomy view loads without erroring", async ({ page }) => {

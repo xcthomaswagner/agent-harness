@@ -1,9 +1,9 @@
 import { render } from "preact";
 import { App } from "./App";
 import { installGlobalLinkInterceptor } from "./router";
-import { applyStoredTheme } from "./theme";
+import { applyStoredPrefs } from "./theme";
 
-applyStoredTheme();
+applyStoredPrefs();
 installGlobalLinkInterceptor();
 
 const mount = document.getElementById("app");
