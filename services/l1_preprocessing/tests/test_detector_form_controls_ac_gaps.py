@@ -20,8 +20,10 @@ Covers:
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -79,7 +81,7 @@ def _write_ticket_json(
     ticket_id: str,
     *,
     authored_ac: list[str] | None = None,
-    generated_ac: list[str] | None = None,
+    generated_ac: list[str] | list[dict[str, Any]] | None = None,
 ) -> None:
     target = archive_root / ticket_id
     target.mkdir(parents=True, exist_ok=True)
@@ -300,3 +302,109 @@ class TestRegistry:
         det = get_detector("form_controls_ac_gaps")
         assert det is not None
         assert det.name == "form_controls_ac_gaps"
+
+
+class TestStructuredAcShape:
+    """Post implicit-requirements migration, ticket.json carries
+    ``generated_acceptance_criteria`` as a list of dicts with ``text``
+    and ``category`` keys. The detector must still fire on those."""
+
+    def test_structured_ac_is_extracted_and_fires_gap(
+        self, conn: sqlite3.Connection, archive_root: Path
+    ) -> None:
+        for i in range(MIN_CLUSTER_SIZE):
+            tid = f"XCSF30-{i + 400}"
+            _seed_pr_run(conn, i + 1, tid)
+            _write_ticket_json(
+                archive_root,
+                tid,
+                generated_ac=[
+                    {
+                        "id": "AC-001",
+                        "category": "implicit",
+                        "text": (
+                            "Invalid start>end date range shows inline "
+                            "validation (cross-field validation)."
+                        ),
+                        "feature_type": "form_controls",
+                    },
+                ],
+            )
+            _seed_ai_issue(
+                conn, pr_run_id=i + 1,
+                category="style", summary="extra whitespace",
+            )
+        out = FormControlsAcGapsDetector().scan(conn, window_days=14)
+        assert len(out) == 1
+        assert "cross_field_validation" in out[0].pattern_key
+
+    def test_extract_ac_list_handles_mixed_shapes(self) -> None:
+        """_extract_ac_list must accept both legacy and structured shape
+        on disk. Unit-test the helper directly — SQLite fixtures are
+        unnecessary overhead for this path."""
+        from learning_miner.detectors.form_controls_ac_gaps import _extract_ac_list
+
+        mixed = {
+            "id": "X-1",
+            "acceptance_criteria": ["legacy string ac"],
+            "generated_acceptance_criteria": [
+                {"id": "AC-001", "category": "ticket", "text": "structured ac"},
+                "surviving legacy string in generated list",
+                {"id": "AC-002", "category": "implicit", "text": ""},
+            ],
+        }
+        extracted = _extract_ac_list(mixed)
+        assert "legacy string ac" in extracted
+        assert "structured ac" in extracted
+        assert "surviving legacy string in generated list" in extracted
+        assert "" not in extracted
+
+    def test_extract_ac_list_handles_non_string_text_values(self) -> None:
+        """Non-string text values in structured AC dicts are coerced to
+        string and stripped; empty results are skipped."""
+        from learning_miner.detectors.form_controls_ac_gaps import _extract_ac_list
+
+        ticket = {
+            "id": "X-2",
+            "acceptance_criteria": [],
+            "generated_acceptance_criteria": [
+                {"id": "AC-001", "category": "ticket", "text": None},
+                {"id": "AC-002", "category": "ticket", "text": 123},
+            ],
+        }
+        extracted = _extract_ac_list(ticket)
+        # None skipped (empty); 123 coerced to "123" (still truthy).
+        assert "123" in extracted
+        assert "None" not in extracted
+
+    def test_detector_does_not_emit_when_ai_review_covers_the_category(
+        self, conn: sqlite3.Connection, archive_root: Path
+    ) -> None:
+        """If the AI reviewer already filed an issue in a matching category
+        for the same run, the detector does not treat the run as a gap.
+        This is the negative backstop guarding against the detector over-firing
+        after implicit ACs tighten the eligibility set."""
+        for i in range(MIN_CLUSTER_SIZE):
+            tid = f"XCSF30-{i + 500}"
+            _seed_pr_run(conn, i + 1, tid)
+            _write_ticket_json(
+                archive_root,
+                tid,
+                generated_ac=[
+                    {
+                        "id": "AC-001",
+                        "category": "implicit",
+                        "text": "Invalid start>end date range shows cross-field validation.",
+                        "feature_type": "form_controls",
+                    },
+                ],
+            )
+            # AI reviewer filed a matching cross-field issue — gap is closed.
+            _seed_ai_issue(
+                conn,
+                pr_run_id=i + 1,
+                category="validation",
+                summary="cross-field date range not enforced",
+            )
+        out = FormControlsAcGapsDetector().scan(conn, window_days=14)
+        assert out == []
