@@ -6,6 +6,7 @@ import { useFeed } from "../hooks/useFeed";
 import { useLiveLog } from "../hooks/useLiveLog";
 import type { LiveLogEntry } from "../hooks/useLiveLog";
 import type {
+  AgentRosterResponse,
   TraceStatus,
   TraceSummary,
   TracesResponse,
@@ -165,6 +166,9 @@ export function TicketsView() {
 
 function TicketRail({ row }: { row: TraceSummary | null }) {
   const log = useLiveLog(row?.id ?? null);
+  const roster = useFeed<AgentRosterResponse>(
+    row ? `/api/operator/tickets/${encodeURIComponent(row.id)}/agents` : null,
+  );
 
   if (!row) {
     return <div class="op-rail-empty">Select a ticket to see its live log</div>;
@@ -197,6 +201,19 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
           </a>
         )}
       </div>
+
+      {roster.data && roster.data.agents.length > 0 && (
+        <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+          {roster.data.agents.map((a) => (
+            <Pill
+              key={a.teammate}
+              tone={a.state === "running" ? "active" : a.state === "idle" ? "cool" : "warn"}
+            >
+              {a.teammate}
+            </Pill>
+          ))}
+        </div>
+      )}
 
       <SectionHeader
         label="Live log"

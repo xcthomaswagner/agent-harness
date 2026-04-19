@@ -3,6 +3,8 @@ import { Button, PhaseDots, Pill, SectionHeader } from "../primitives";
 import type { PhaseState, PillTone } from "../primitives";
 import { useFeed } from "../hooks/useFeed";
 import type {
+  AgentRosterEntry,
+  AgentRosterResponse,
   TraceDetailResponse,
   TracePhase,
   TraceStatus,
@@ -22,6 +24,9 @@ interface Props {
 export function TraceDetailView({ id }: Props) {
   const feed = useFeed<TraceDetailResponse>(
     `/api/operator/traces/${encodeURIComponent(id)}`,
+  );
+  const roster = useFeed<AgentRosterResponse>(
+    `/api/operator/tickets/${encodeURIComponent(id)}/agents`,
   );
 
   if (feed.status === "loading" && !feed.data) {
@@ -99,11 +104,16 @@ export function TraceDetailView({ id }: Props) {
       <section class="op-section">
         <SectionHeader
           label="Session panels"
-          right="Agent roster lands in commit 12"
+          right={
+            roster.data
+              ? `${roster.data.agents.length} teammate${roster.data.agents.length === 1 ? "" : "s"}`
+              : roster.status.toUpperCase()
+          }
         />
-        <div class="op-empty">
-          Per-session agent state ships with the roster endpoint.
-        </div>
+        <AgentRoster
+          state={roster.status}
+          agents={roster.data?.agents}
+        />
       </section>
 
       <section class="op-section">
@@ -186,4 +196,49 @@ function formatTime(iso: string): string {
   // "2026-04-18T12:00:42+00:00" → "12:00:42"
   const match = /T(\d\d:\d\d:\d\d)/.exec(iso);
   return match ? (match[1] ?? iso) : iso;
+}
+
+function AgentRoster({
+  state,
+  agents,
+}: {
+  state: string;
+  agents: readonly AgentRosterEntry[] | undefined;
+}) {
+  if (state === "loading" && !agents) {
+    return <div class="op-loading">Loading roster…</div>;
+  }
+  if (!agents || agents.length === 0) {
+    return <div class="op-empty">No agents spawned for this ticket.</div>;
+  }
+  return (
+    <table class="op-tbl">
+      <thead>
+        <tr>
+          <th style={{ width: "160px" }}>Teammate</th>
+          <th style={{ width: "100px" }}>State</th>
+          <th>Last activity</th>
+        </tr>
+      </thead>
+      <tbody>
+        {agents.map((a) => {
+          const tone: PillTone =
+            a.state === "running"
+              ? "active"
+              : a.state === "idle"
+                ? "cool"
+                : "warn";
+          return (
+            <tr key={a.teammate}>
+              <td class="mono">{a.teammate}</td>
+              <td>
+                <Pill tone={tone}>{a.state}</Pill>
+              </td>
+              <td class="mono">{a.last_at ? formatTime(a.last_at) : "—"}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
 }

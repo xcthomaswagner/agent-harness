@@ -792,6 +792,67 @@ def test_pr_detail_shapes_pr_row_and_issues(
     assert data["ci_checks_available"] is False
 
 
+# ---------- /api/operator/tickets/{id}/agents ----------
+
+
+def test_agents_empty_when_no_worktree(client: TestClient) -> None:
+    r = client.get("/api/operator/tickets/HARN-NONE/agents")
+    assert r.status_code == 200
+    assert r.json() == {"agents": []}
+
+
+def test_agents_lists_teammates_with_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime
+
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    # Build a fake worktree tree with two session-stream.jsonl files:
+    # one recent (running), one old (stale).
+    worktree = tmp_path / "wt" / "HARN-ROSTER"
+    main_stream = worktree / ".harness" / "logs" / "session-stream.jsonl"
+    main_stream.parent.mkdir(parents=True)
+    now = datetime.now(UTC).isoformat()
+    main_stream.write_text(json.dumps({"timestamp": now, "type": "system"}) + "\n")
+
+    sub_stream = (
+        worktree / ".claude" / "worktrees" / "dev-01" / ".harness" / "logs"
+        / "session-stream.jsonl"
+    )
+    sub_stream.parent.mkdir(parents=True)
+    old = "2024-01-01T00:00:00+00:00"
+    sub_stream.write_text(json.dumps({"timestamp": old, "type": "system"}) + "\n")
+
+    import live_stream as ls
+
+    monkeypatch.setattr(
+        ls, "_worktree_root_for_ticket", lambda _tid: worktree
+    )
+    # operator_api_data imports _worktree_root_for_ticket from live_stream
+    # at module load — patch both sites.
+    import operator_api_data as oad
+
+    monkeypatch.setattr(oad, "_worktree_root_for_ticket", lambda _tid: worktree)
+
+    c = TestClient(_mk_app())
+    data = c.get("/api/operator/tickets/HARN-ROSTER/agents").json()
+    agents = data["agents"]
+    assert len(agents) == 2
+    states = {a["teammate"]: a["state"] for a in agents}
+    # At least one running (from recent), one stale (from 2024 timestamp).
+    assert any(v == "running" for v in states.values())
+    assert any(v == "stale" for v in states.values())
+
+
 def test_pr_detail_surfaces_auto_merge_decision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -13,6 +13,7 @@ mutating the contract.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ from autonomy_store.issues import (
 from autonomy_store.lessons import list_lesson_candidates
 from autonomy_store.pr_runs import list_pr_runs
 from client_profile import list_profiles, load_profile
+from live_stream import _find_session_streams, _worktree_root_for_ticket
 from tracer import (
     compute_phase_durations,
     find_run_start_idx,
@@ -84,13 +86,11 @@ def _compute_auto_merge_rate(
     )
     if not rows:
         return 0.0
-    import json as _json
-
     eligible = 0
     merged = 0
     for r in rows:
         try:
-            payload = _json.loads(r["payload_json"]) if r["payload_json"] else {}
+            payload = json.loads(r["payload_json"]) if r["payload_json"] else {}
         except (ValueError, TypeError):
             continue
         decision = str(payload.get("decision", "")).lower()
@@ -609,6 +609,99 @@ def _severity_order(severity: str) -> int:
     return {"critical": 0, "blocker": 1, "major": 2, "minor": 3, "info": 4}.get(s, 5)
 
 
+# --- Agent roster (per-ticket) ------------------------------------------
+
+
+def _last_event_time(path: Path) -> datetime | None:
+    """Tail the last JSONL line and pull its timestamp.
+
+    Efficient enough for the scale we're at (single ticket's file, ~KB
+    to low-MB). Returns None on any parse error — callers treat that
+    as "no recent activity".
+    """
+    try:
+        with path.open("rb") as fh:
+            # Seek near the end and read the last ~4 KB; good enough for
+            # a JSONL file where one line is under 2 KB.
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 4096))
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    lines = [line for line in tail.splitlines() if line.strip()]
+    if not lines:
+        return None
+    try:
+        last = json.loads(lines[-1])
+    except (ValueError, TypeError):
+        return None
+    ts = (
+        last.get("timestamp")
+        or last.get("started_at")
+        or last.get("t")
+    )
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+
+
+def _roster_state(last: datetime | None) -> str:
+    """Derive a human-friendly state from last-event-age.
+
+    <= 60s since last event → running
+    <= 5 min                → idle
+    > 5 min or None         → stale
+    """
+    if last is None:
+        return "stale"
+    age = (datetime.now(UTC) - last).total_seconds()
+    if age <= 60:
+        return "running"
+    if age <= 5 * 60:
+        return "idle"
+    return "stale"
+
+
+@router.get("/tickets/{ticket_id}/agents")
+def get_ticket_agents(ticket_id: str) -> dict[str, Any]:
+    """Agent roster for one ticket.
+
+    Walks the ticket's worktree via live_stream._find_session_streams and
+    classifies each teammate by the freshness of their session-stream.jsonl
+    tail. Returns:
+
+      {
+        "agents": [
+          { "teammate", "state" (running|idle|stale), "last_at" (iso|None) },
+          ...
+        ]
+      }
+
+    When the ticket has no active worktree (pipeline not spawned, or
+    already cleaned up), returns an empty list — the view can render
+    "no agents spawned yet".
+    """
+    worktree = _worktree_root_for_ticket(ticket_id)
+    if worktree is None:
+        return {"agents": []}
+    streams = _find_session_streams(worktree)
+    agents: list[dict[str, Any]] = []
+    for teammate, path in streams:
+        last = _last_event_time(path)
+        agents.append(
+            {
+                "teammate": teammate,
+                "state": _roster_state(last),
+                "last_at": last.isoformat() if last else None,
+            }
+        )
+    return {"agents": agents}
+
+
 @router.get("/pr/{pr_run_id}")
 def get_pr_detail(pr_run_id: int) -> dict[str, Any]:
     """Full PR drilldown.
@@ -673,10 +766,8 @@ def get_pr_detail(pr_run_id: int) -> dict[str, Any]:
         ).fetchall()
         auto_merge: dict[str, Any] | None
         if am_rows:
-            import json as _json
-
             try:
-                payload = _json.loads(am_rows[0]["payload_json"] or "{}")
+                payload = json.loads(am_rows[0]["payload_json"] or "{}")
             except (ValueError, TypeError):
                 payload = {}
             auto_merge = {

@@ -195,6 +195,16 @@ export interface PRAutoMergeDecision {
   gates: Record<string, boolean>;
 }
 
+export interface AgentRosterEntry {
+  teammate: string;
+  state: "running" | "idle" | "stale";
+  last_at: string | null;
+}
+
+export interface AgentRosterResponse {
+  agents: AgentRosterEntry[];
+}
+
 export interface PRDetailResponse {
   pr_run_id: number;
   ticket_id: string;
