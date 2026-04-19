@@ -176,7 +176,7 @@ function RecentRuns({
           key: "id",
           label: "Ticket",
           width: "140px",
-          render: (t) => <span class="mono">{t.id}</span>,
+          render: (t) => <span class="op-mono">{t.id}</span>,
         },
         { key: "title", label: "Title", render: (t) => t.title || "—" },
         {
@@ -191,7 +191,7 @@ function RecentRuns({
           key: "phase",
           label: "Phase",
           width: "130px",
-          render: (t) => <span class="mono">{t.phase || "—"}</span>,
+          render: (t) => <span class="op-mono">{t.phase || "—"}</span>,
         },
         {
           key: "elapsed",

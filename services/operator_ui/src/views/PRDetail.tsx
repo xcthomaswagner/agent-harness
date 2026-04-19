@@ -144,7 +144,7 @@ function IssuesTable({ rows }: { rows: PRReviewIssue[] }) {
           label: "Where",
           render: (r) => (
             <span>
-              <span class="mono">
+              <span class="op-mono">
                 {r.where}
                 {r.line_start ? `:${r.line_start}` : ""}
               </span>
@@ -160,7 +160,7 @@ function IssuesTable({ rows }: { rows: PRReviewIssue[] }) {
           numeric: true,
           render: (r) =>
             r.matched ? (
-              <span class="mono">
+              <span class="op-mono">
                 {Math.round(r.matched.confidence * 100)}%
               </span>
             ) : (
@@ -182,7 +182,7 @@ function MatchesTable({ rows }: { rows: PRLessonMatch[] }) {
         {
           key: "lesson",
           label: "Lesson",
-          render: (m) => <span class="mono">{m.lesson_id}</span>,
+          render: (m) => <span class="op-mono">{m.lesson_id}</span>,
         },
         {
           key: "state",

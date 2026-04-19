@@ -153,11 +153,13 @@ a:hover {
   color: var(--ink-500);
 }
 
-/* Data values — always monospace */
-.mono,
-code,
-kbd,
-time,
+/* Data values — always monospace. Scoped to the .op-mono class and the
+ * op-app shell so we don't accidentally restyle <code>/<time>/<kbd>
+ * elements on neighbouring dashboards that share the origin. */
+.op-mono,
+.op-app code,
+.op-app kbd,
+.op-app time,
 [data-mono] {
   font-family: var(--font-mono);
   font-feature-settings: "tnum" 1, "zero" 1;

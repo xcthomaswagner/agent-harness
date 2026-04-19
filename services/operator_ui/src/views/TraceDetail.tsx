@@ -230,11 +230,11 @@ function AgentRoster({
                 : "warn";
           return (
             <tr key={a.teammate}>
-              <td class="mono">{a.teammate}</td>
+              <td class="op-mono">{a.teammate}</td>
               <td>
                 <Pill tone={tone}>{a.state}</Pill>
               </td>
-              <td class="mono">{a.last_at ? formatTime(a.last_at) : "—"}</td>
+              <td class="op-mono">{a.last_at ? formatTime(a.last_at) : "—"}</td>
             </tr>
           );
         })}

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "preact/hooks";
+import { useEffect, useMemo, useState } from "preact/hooks";
 import { ViewHead } from "../chrome";
 import { Button, Chip, Pill, SectionHeader, Table } from "../primitives";
 import type { PillTone } from "../primitives";
@@ -62,10 +62,13 @@ export function TicketsView() {
   );
 
   // Auto-select first in-flight row so the rail renders live data on load.
-  if (!selected && feed.data) {
+  // MUST be in an effect, not a render-body setState call (that triggers a
+  // Preact "cannot update during render" warning and re-render loop).
+  useEffect(() => {
+    if (selected || !feed.data) return;
     const firstLive = feed.data.traces.find((t) => t.status === "in-flight");
     if (firstLive) setSelected(firstLive.id);
-  }
+  }, [feed.data, selected]);
 
   return (
     <>
@@ -111,7 +114,7 @@ export function TicketsView() {
                   width: "120px",
                   render: (t) => (
                     <span
-                      class="mono"
+                      class="op-mono"
                       style={{
                         color:
                           t.id === selected
@@ -141,7 +144,7 @@ export function TicketsView() {
                   label: "Phase",
                   width: "120px",
                   render: (t) => (
-                    <span class="mono">{t.phase || "—"}</span>
+                    <span class="op-mono">{t.phase || "—"}</span>
                   ),
                 },
                 {

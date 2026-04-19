@@ -63,17 +63,33 @@ def _db_path_from_settings() -> Path:
     return Path(main.settings.autonomy_db_path)
 
 
+# Decisions that signal "auto-merge was eligible" (i.e., count in the
+# denominator of the adoption rate). ``skipped`` / ``not_eligible``
+# / unset values are excluded — they mean the run never qualified
+# for auto-merge in the first place.
+_AUTO_MERGE_ELIGIBLE_DECISIONS: frozenset[str] = frozenset(
+    {"merged", "auto_merged", "merge", "blocked", "hold"}
+)
+_AUTO_MERGE_SUCCEEDED_DECISIONS: frozenset[str] = frozenset(
+    {"merged", "auto_merged", "merge"}
+)
+
+
 def _compute_auto_merge_rate(
     conn: Any, profile: str, window_days: int
 ) -> float:
-    """Auto-merge adoption rate = merged decisions / eligible decisions.
+    """Auto-merge adoption rate = succeeded / eligible decisions.
 
     Reads ``manual_overrides`` where ``override_type =
-    'auto_merge_decision'``. Each row's payload carries a ``decision``
-    field written by ``record_auto_merge_decision`` with values like
-    ``merged`` / ``blocked`` / ``skipped`` / ``hold``. Rate = merged /
-    (merged + blocked + hold); skipped rows are excluded because they
-    mean the run wasn't eligible for auto-merge in the first place.
+    'auto_merge_decision'``. The payload's ``decision`` field is
+    written by ``record_auto_merge_decision``. Only decisions in
+    ``_AUTO_MERGE_ELIGIBLE_DECISIONS`` (merged/auto_merged/merge/
+    blocked/hold) count toward the denominator; anything else
+    (including future decision values we haven't seen yet) is
+    treated as non-eligible and excluded. Keeping this as an
+    allow-list rather than a block-list prevents the rate from
+    silently absorbing new decision types into the denominator
+    and understating adoption.
 
     Returns 0.0 when there are no eligible decisions in the window.
     """
@@ -94,10 +110,10 @@ def _compute_auto_merge_rate(
         except (ValueError, TypeError):
             continue
         decision = str(payload.get("decision", "")).lower()
-        if decision in ("", "skipped", "not_eligible"):
+        if decision not in _AUTO_MERGE_ELIGIBLE_DECISIONS:
             continue
         eligible += 1
-        if decision in ("merged", "auto_merged", "merge"):
+        if decision in _AUTO_MERGE_SUCCEEDED_DECISIONS:
             merged += 1
     if eligible == 0:
         return 0.0
@@ -561,7 +577,13 @@ def _extract_trace_metadata_local(
 
 
 def _derive_current_phase_local(run_entries: list[dict[str, Any]]) -> str:
-    """Duplicate of tracer._derive_current_phase walking only run_entries."""
+    """Duplicate of tracer._derive_current_phase walking only run_entries.
+
+    Keep in sync with tracer._derive_current_phase if that function grows
+    new "non-agent phase to skip" cases (currently only ``ticket_read``).
+    The fork exists because this variant takes an already-sliced
+    ``run_entries`` list rather than recomputing the run start.
+    """
     for e in reversed(run_entries):
         if e.get("source") == "agent":
             phase = str(e.get("phase", ""))

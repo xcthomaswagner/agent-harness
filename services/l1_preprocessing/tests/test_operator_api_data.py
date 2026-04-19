@@ -292,6 +292,49 @@ def test_profiles_auto_merge_rate_computed_from_decisions(
     assert p["auto_merge"] == pytest.approx(0.75, abs=1e-3)
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/operator/profiles",
+        "/api/operator/traces",
+        "/api/operator/traces/HARN-1",
+        "/api/operator/autonomy/xcsf30",
+        "/api/operator/lessons/counts",
+        "/api/operator/tickets/HARN-1/agents",
+        "/api/operator/pr/1",
+    ],
+)
+def test_all_operator_endpoints_require_auth_when_key_set(
+    path: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Router-level Depends(_require_dashboard_auth) covers every route."""
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "secret")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", False)
+
+    profiles_dir = tmp_path / "client-profiles"
+    profiles_dir.mkdir()
+    import client_profile as cp_module
+
+    monkeypatch.setattr(cp_module, "PROFILES_DIR", profiles_dir)
+
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    c = TestClient(_mk_app())
+    # Missing key → 401.
+    assert c.get(path).status_code == 401
+    # Correct key → not 401 (may be 200/404 depending on fixture state).
+    r = c.get(path, headers={"X-API-Key": "secret"})
+    assert r.status_code != 401
+
+
 def test_profiles_requires_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -625,7 +668,7 @@ def test_autonomy_returns_empty_shape_for_unknown_profile(
     assert "trends" in data
     assert data["by_type"] == []
     assert data["escaped"] == []
-    # 30 days × 4 trends, empty arrays with all-None values
+    # 30 days x 4 trends, empty arrays with all-None values
     assert len(data["trends"]["fpa"]) == 30
     assert all(d["value"] is None for d in data["trends"]["fpa"])
 

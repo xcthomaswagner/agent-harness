@@ -514,9 +514,15 @@ def compute_daily_trend(
 
     if metric == "auto_merge":
         # Daily auto-merge adoption from manual_overrides decision stream.
-        # Iterate the recent decision rows once, bucket by day, count
-        # merged vs eligible denominator (skipped excluded).
+        # Uses the same allow-list as ``operator_api_data._compute_auto_merge_rate``
+        # so the daily trend and the point-in-time rate on the Home card agree
+        # on which decision values count toward the denominator.
         from autonomy_store.auto_merge import list_recent_auto_merge_decisions
+
+        eligible_decisions = frozenset(
+            {"merged", "auto_merged", "merge", "blocked", "hold"}
+        )
+        succeeded_decisions = frozenset({"merged", "auto_merged", "merge"})
 
         decisions = list_recent_auto_merge_decisions(
             conn,
@@ -535,11 +541,11 @@ def compute_daily_trend(
             except (ValueError, TypeError):
                 continue
             decision = str(payload.get("decision", "")).lower()
-            if decision in ("", "skipped", "not_eligible"):
+            if decision not in eligible_decisions:
                 continue
             merged_now, eligible_now = by_day_counts.get(day, (0, 0))
             eligible_now += 1
-            if decision in ("merged", "auto_merged", "merge"):
+            if decision in succeeded_decisions:
                 merged_now += 1
             by_day_counts[day] = (merged_now, eligible_now)
 

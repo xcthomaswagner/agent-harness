@@ -101,7 +101,7 @@ export function TracesView() {
               key: "id",
               label: "Ticket",
               width: "140px",
-              render: (t) => <span class="mono">{t.id}</span>,
+              render: (t) => <span class="op-mono">{t.id}</span>,
             },
             {
               key: "title",
@@ -124,7 +124,7 @@ export function TracesView() {
               key: "phase",
               label: "Phase",
               width: "140px",
-              render: (t) => <span class="mono">{t.phase || "—"}</span>,
+              render: (t) => <span class="op-mono">{t.phase || "—"}</span>,
             },
             {
               key: "elapsed",
@@ -139,11 +139,11 @@ export function TracesView() {
               width: "80px",
               render: (t) =>
                 t.pr_url ? (
-                  <a href={t.pr_url} target="_blank" rel="noopener noreferrer" class="mono">
+                  <a href={t.pr_url} target="_blank" rel="noopener noreferrer" class="op-mono">
                     ↗
                   </a>
                 ) : (
-                  <span class="mono" style={{ color: "var(--ink-500)" }}>—</span>
+                  <span class="op-mono" style={{ color: "var(--ink-500)" }}>—</span>
                 ),
             },
           ]}

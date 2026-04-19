@@ -208,7 +208,7 @@ function ByTypeTable({ rows }: { rows: AutonomyByTypeRow[] }) {
         {
           key: "type",
           label: "Type",
-          render: (r) => <span class="mono">{r.ticket_type}</span>,
+          render: (r) => <span class="op-mono">{r.ticket_type}</span>,
         },
         {
           key: "volume",
@@ -260,7 +260,7 @@ function EscapedDefectsTable({
           key: "id",
           label: "Defect",
           width: "120px",
-          render: (r) => <span class="mono">{r.id}</span>,
+          render: (r) => <span class="op-mono">{r.id}</span>,
         },
         {
           key: "ticket",
@@ -269,7 +269,7 @@ function EscapedDefectsTable({
           render: (r) =>
             r.ticket_id ? (
               <a href={href({ name: "trace-detail", id: r.ticket_id })}>
-                <span class="mono">{r.ticket_id}</span>
+                <span class="op-mono">{r.ticket_id}</span>
               </a>
             ) : (
               "—"
@@ -279,12 +279,12 @@ function EscapedDefectsTable({
           key: "severity",
           label: "Severity",
           width: "90px",
-          render: (r) => <span class="mono">{r.severity}</span>,
+          render: (r) => <span class="op-mono">{r.severity}</span>,
         },
         {
           key: "where",
           label: "Where",
-          render: (r) => <span class="mono">{r.where || "—"}</span>,
+          render: (r) => <span class="op-mono">{r.where || "—"}</span>,
         },
         {
           key: "note",

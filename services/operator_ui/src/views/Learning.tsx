@@ -10,7 +10,13 @@ import type {
 } from "../api/types";
 import { fetchHeaders } from "../api/key";
 
-type StatusFilter = LessonStatus | "all";
+// Filter chips cover the 6 operator-relevant states the design shows.
+// ``reverted`` and ``stale`` are lifecycle-only — they get a pill tone
+// below so they render correctly when they appear, but aren't first-class
+// filter targets. If an operator needs to find them, the "all" filter
+// still surfaces them.
+type FilterableStatus = Exclude<LessonStatus, "reverted" | "stale">;
+type StatusFilter = FilterableStatus | "all";
 
 const FILTERS: readonly { label: string; value: StatusFilter }[] = [
   { label: "All", value: "all" },
@@ -48,13 +54,13 @@ export function LearningView() {
       applied: 0,
       snoozed: 0,
       rejected: 0,
-      reverted: 0,
-      stale: 0,
     };
     if (feed.data) {
       base.all = feed.data.candidates.length;
       for (const c of feed.data.candidates) {
-        if (c.status in base) base[c.status] += 1;
+        // Only count filterable statuses; reverted/stale fall through
+        // to the "All" tally only.
+        if (c.status in base) base[c.status as StatusFilter] += 1;
       }
     }
     return base;
@@ -131,14 +137,14 @@ export function LearningView() {
               key: "id",
               label: "Lesson",
               width: "120px",
-              render: (c) => <span class="mono">{c.lesson_id}</span>,
+              render: (c) => <span class="op-mono">{c.lesson_id}</span>,
             },
             {
               key: "pattern",
               label: "Pattern",
               render: (c) => (
                 <span>
-                  <span class="mono" style={{ color: "var(--ink-600)" }}>
+                  <span class="op-mono" style={{ color: "var(--ink-600)" }}>
                     {c.detector_name}
                   </span>
                   <br />
@@ -153,7 +159,7 @@ export function LearningView() {
               label: "Profile",
               width: "140px",
               render: (c) => (
-                <span class="mono">{c.client_profile || "—"}</span>
+                <span class="op-mono">{c.client_profile || "—"}</span>
               ),
             },
             {
