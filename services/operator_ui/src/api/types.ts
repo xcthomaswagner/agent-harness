@@ -154,6 +154,66 @@ export interface LessonCandidatesResponse {
   count: number;
 }
 
+// PR drilldown — matches operator_api_data.get_pr_detail
+export interface PRCommit {
+  sha: string;
+  message: string;
+  author: string;
+  authored_at: string;
+}
+
+export interface PRIssueMatch {
+  ai_issue_id: number;
+  confidence: number;
+  matched_by: string;
+}
+
+export interface PRReviewIssue {
+  id: number;
+  source: string;
+  severity: string;
+  category: string;
+  summary: string;
+  where: string;
+  line_start: number | null;
+  matched: PRIssueMatch | null;
+}
+
+export interface PRLessonMatch {
+  lesson_id: string;
+  status: string;
+  applied: boolean;
+  source_ref: string;
+  snippet: string;
+}
+
+export interface PRAutoMergeDecision {
+  decision: string;
+  reason: string;
+  confidence: number | null;
+  created_at: string;
+  gates: Record<string, boolean>;
+}
+
+export interface PRDetailResponse {
+  pr_run_id: number;
+  ticket_id: string;
+  pr_number: number;
+  repo_full_name: string;
+  pr_url: string;
+  head_sha: string;
+  client_profile: string;
+  opened_at: string;
+  merged: boolean;
+  merged_at: string;
+  first_pass_accepted: boolean;
+  commits: PRCommit[];
+  issues: PRReviewIssue[];
+  matches: PRLessonMatch[];
+  auto_merge: PRAutoMergeDecision | null;
+  ci_checks_available: boolean;
+}
+
 export interface AutonomyResponse {
   profile: string;
   window_days: number;

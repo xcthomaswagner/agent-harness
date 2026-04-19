@@ -28,6 +28,10 @@ from autonomy_metrics import (
 from autonomy_store import ensure_schema, open_connection
 from autonomy_store.auto_merge import list_recent_auto_merge_decisions
 from autonomy_store.defects import list_confirmed_escaped_defects
+from autonomy_store.issues import (
+    list_pr_commits,
+    list_review_issues_by_pr_run,
+)
 from autonomy_store.lessons import list_lesson_candidates
 from autonomy_store.pr_runs import list_pr_runs
 from client_profile import list_profiles, load_profile
@@ -593,6 +597,167 @@ def get_trace_detail(ticket_id: str) -> dict[str, Any]:
             detail=f"trace not found: {ticket_id}",
         )
     return _shape_trace_detail(ticket_id, entries)
+
+
+# --- PR drilldown --------------------------------------------------------
+
+
+def _severity_order(severity: str) -> int:
+    """Sort severities in descending importance for the design's
+    "most serious first" list."""
+    s = severity.lower()
+    return {"critical": 0, "blocker": 1, "major": 2, "minor": 3, "info": 4}.get(s, 5)
+
+
+@router.get("/pr/{pr_run_id}")
+def get_pr_detail(pr_run_id: int) -> dict[str, Any]:
+    """Full PR drilldown.
+
+    Returns:
+      {
+        pr_run_id, ticket_id, pr_number, repo, pr_url, head_sha, branch,
+        author, client_profile, opened_at, merged, merged_at,
+        commits: [{ sha, message, author_name, authored_at }],
+        checks: [],                                  # ← placeholder; see below
+        issues: [{ id, source, severity, category, summary, where,
+                   line_start, matched_lesson_id, matched_confidence }],
+        matches: [{ lesson_id, confidence, applied }],
+        auto_merge: {
+          decision, reason, confidence, payload  — most recent
+        } | null,
+      }
+
+    CI check list is not persisted today (plan-review gap #7). We
+    return [] so the frontend renders a "CI checks not ingested"
+    banner rather than fake rows.
+    """
+    conn = open_connection(_db_path_from_settings())
+    try:
+        ensure_schema(conn)
+        pr_row = conn.execute(
+            "SELECT * FROM pr_runs WHERE id = ?", (pr_run_id,)
+        ).fetchone()
+        if pr_row is None:
+            raise HTTPException(status_code=404, detail=f"pr_run {pr_run_id} not found")
+
+        commits = list_pr_commits(conn, pr_run_id)
+        issues = list_review_issues_by_pr_run(conn, pr_run_id)
+        # Issue-to-issue matches inside this PR (ai_review ↔ human_review
+        # pairings), used to render the "reviewer caught it" column.
+        issue_match_rows = conn.execute(
+            "SELECT im.* FROM issue_matches im "
+            "JOIN review_issues ri ON ri.id = im.human_issue_id "
+            "WHERE ri.pr_run_id = ?",
+            (pr_run_id,),
+        ).fetchall()
+        # Lesson matches come from lesson_evidence rows keyed by pr_run_id —
+        # each row ties a lesson_candidate to this PR with a source_ref
+        # that describes the hit.
+        lesson_match_rows = conn.execute(
+            "SELECT le.lesson_id, le.source_ref, le.snippet, "
+            "       lc.status as lesson_status "
+            "FROM lesson_evidence le "
+            "LEFT JOIN lesson_candidates lc "
+            "       ON lc.lesson_id = le.lesson_id "
+            "WHERE le.pr_run_id = ?",
+            (pr_run_id,),
+        ).fetchall()
+
+        # Most recent auto-merge decision for this PR (latest row).
+        am_rows = conn.execute(
+            "SELECT * FROM manual_overrides "
+            "WHERE override_type = 'auto_merge_decision' "
+            "AND target_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (f"{pr_row['repo_full_name']}#{int(pr_row['pr_number'])}",),
+        ).fetchall()
+        auto_merge: dict[str, Any] | None
+        if am_rows:
+            import json as _json
+
+            try:
+                payload = _json.loads(am_rows[0]["payload_json"] or "{}")
+            except (ValueError, TypeError):
+                payload = {}
+            auto_merge = {
+                "decision": str(payload.get("decision") or ""),
+                "reason": str(payload.get("reason") or ""),
+                "confidence": payload.get("confidence"),
+                "created_at": am_rows[0]["created_at"],
+                "gates": payload.get("gates") or {},
+            }
+        else:
+            auto_merge = None
+
+        match_by_issue: dict[int, dict[str, Any]] = {}
+        for m in issue_match_rows:
+            match_by_issue[int(m["human_issue_id"])] = {
+                "ai_issue_id": int(m["ai_issue_id"]),
+                "confidence": float(m["confidence"]),
+                "matched_by": str(m["matched_by"] or ""),
+            }
+
+        issues_shaped = [
+            {
+                "id": int(issue["id"]),
+                "source": str(issue["source"] or ""),
+                "severity": str(issue["severity"] or "minor").lower(),
+                "category": str(issue["category"] or ""),
+                "summary": str(issue["summary"] or "")[:300],
+                "where": str(issue["file_path"] or ""),
+                "line_start": issue["line_start"],
+                "matched": match_by_issue.get(int(issue["id"])),
+            }
+            for issue in issues
+        ]
+        issues_shaped.sort(
+            key=lambda i: (_severity_order(i["severity"]), -int(i["id"]))
+        )
+
+        # Collapse multiple lesson_evidence rows for the same lesson into one
+        # "lesson match" row — the design shows one per lesson, not per hit.
+        seen_lessons: dict[str, dict[str, Any]] = {}
+        for m in lesson_match_rows:
+            lid = str(m["lesson_id"])
+            if lid in seen_lessons:
+                continue
+            seen_lessons[lid] = {
+                "lesson_id": lid,
+                "status": str(m["lesson_status"] or ""),
+                "applied": str(m["lesson_status"] or "") == "applied",
+                "source_ref": str(m["source_ref"] or ""),
+                "snippet": str(m["snippet"] or "")[:200],
+            }
+        matches_shaped = list(seen_lessons.values())
+
+        return {
+            "pr_run_id": pr_run_id,
+            "ticket_id": pr_row["ticket_id"] or "",
+            "pr_number": int(pr_row["pr_number"]),
+            "repo_full_name": pr_row["repo_full_name"] or "",
+            "pr_url": pr_row["pr_url"] or "",
+            "head_sha": pr_row["head_sha"] or "",
+            "client_profile": pr_row["client_profile"] or "",
+            "opened_at": pr_row["opened_at"] or "",
+            "merged": bool(int(pr_row["merged"] or 0)),
+            "merged_at": pr_row["merged_at"] or "",
+            "first_pass_accepted": bool(int(pr_row["first_pass_accepted"] or 0)),
+            "commits": [
+                {
+                    "sha": c["commit_sha"],
+                    "message": str(c["commit_message"] or "")[:200],
+                    "author": c["commit_author"] or "",
+                    "authored_at": c["authored_at"] or "",
+                }
+                for c in commits
+            ],
+            "issues": issues_shaped,
+            "matches": matches_shaped,
+            "auto_merge": auto_merge,
+            "ci_checks_available": False,
+        }
+    finally:
+        conn.close()
 
 
 @router.get("/lessons/counts")

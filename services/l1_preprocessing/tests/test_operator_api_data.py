@@ -714,6 +714,141 @@ def test_autonomy_ticket_type_breakdown(
     assert types == ["bug", "chore", "feature"]
 
 
+# ---------- /api/operator/pr/{pr_run_id} ----------
+
+
+def test_pr_detail_404_when_missing(client: TestClient) -> None:
+    r = client.get("/api/operator/pr/999999")
+    assert r.status_code == 404
+
+
+def test_pr_detail_shapes_pr_row_and_issues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from autonomy_store import insert_review_issue
+
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+
+    profiles_dir = tmp_path / "client-profiles"
+    _write_profile(profiles_dir, "alpha")
+    import client_profile as cp_module
+
+    monkeypatch.setattr(cp_module, "PROFILES_DIR", profiles_dir)
+
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+        pr_run_id = upsert_pr_run(
+            conn,
+            PrRunUpsert(
+                ticket_id="T-42",
+                pr_number=100,
+                repo_full_name="acme/widgets",
+                pr_url="https://example.test/pr/100",
+                head_sha="sha100",
+                client_profile="alpha",
+                opened_at="2026-04-18T12:00:00+00:00",
+                first_pass_accepted=0,
+                merged=0,
+            ),
+        )
+        insert_review_issue(
+            conn,
+            pr_run_id=pr_run_id,
+            source="ai_review",
+            file_path="src/foo.py",
+            line_start=10,
+            category="correctness",
+            severity="major",
+            summary="Unbounded loop risk",
+            is_valid=1,
+        )
+        insert_review_issue(
+            conn,
+            pr_run_id=pr_run_id,
+            source="ai_review",
+            file_path="src/bar.py",
+            category="style",
+            severity="minor",
+            summary="Missing trailing newline",
+            is_valid=1,
+        )
+    finally:
+        conn.close()
+
+    c = TestClient(_mk_app())
+    r = c.get(f"/api/operator/pr/{pr_run_id}")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["pr_run_id"] == pr_run_id
+    assert data["ticket_id"] == "T-42"
+    assert data["pr_number"] == 100
+    # Issues sorted with major before minor.
+    assert [i["severity"] for i in data["issues"]] == ["major", "minor"]
+    assert data["issues"][0]["summary"] == "Unbounded loop risk"
+    assert data["ci_checks_available"] is False
+
+
+def test_pr_detail_surfaces_auto_merge_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+
+    profiles_dir = tmp_path / "client-profiles"
+    _write_profile(profiles_dir, "alpha")
+    import client_profile as cp_module
+
+    monkeypatch.setattr(cp_module, "PROFILES_DIR", profiles_dir)
+
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+        pr_run_id = upsert_pr_run(
+            conn,
+            PrRunUpsert(
+                ticket_id="T-1",
+                pr_number=7,
+                repo_full_name="acme/widgets",
+                pr_url="https://example.test/pr/7",
+                head_sha="sha7",
+                client_profile="alpha",
+                opened_at="2026-04-18T12:00:00+00:00",
+            ),
+        )
+        record_auto_merge_decision(
+            conn,
+            repo_full_name="acme/widgets",
+            pr_number=7,
+            decision="hold",
+            reason="pending playwright smoke",
+            payload={
+                "client_profile": "alpha",
+                "confidence": 0.43,
+                "gates": {
+                    "ci_passed": False,
+                    "review_clean": True,
+                    "is_mergeable": True,
+                },
+            },
+        )
+    finally:
+        conn.close()
+
+    c = TestClient(_mk_app())
+    data = c.get(f"/api/operator/pr/{pr_run_id}").json()
+    am = data["auto_merge"]
+    assert am["decision"] == "hold"
+    assert am["reason"] == "pending playwright smoke"
+    assert am["confidence"] == 0.43
+    assert am["gates"]["ci_passed"] is False
+
+
 # ---------- /api/operator/lessons/counts ----------
 
 

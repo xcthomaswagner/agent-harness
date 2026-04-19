@@ -5,6 +5,7 @@ import {
   AutonomyView,
   HomeView,
   LearningView,
+  PRDetailView,
   TraceDetailView,
   TracesView,
 } from "./views";
@@ -46,13 +47,7 @@ function ViewFor({ route }: { route: Route }) {
     case "learning":
       return <LearningView />;
     case "pr-detail":
-      return (
-        <ViewHead
-          sup={`PR · ${route.id}`}
-          title={route.id}
-          sub="Checks · issues · lesson matches · auto-merge decision."
-        />
-      );
+      return <PRDetailView id={route.id} />;
     default:
       return (
         <ViewHead

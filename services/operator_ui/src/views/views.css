@@ -350,3 +350,59 @@
 .op-escape-severe {
   color: var(--signal-err);
 }
+
+/* ============ PR drilldown ============ */
+.op-pr-two-col {
+  display: grid;
+  grid-template-columns: 1.6fr 1fr;
+  gap: 24px;
+  margin-bottom: 32px;
+}
+
+.op-auto-merge-card {
+  border: var(--rule);
+  padding: 22px 24px;
+  background: var(--ink-050);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.op-auto-merge-decision {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.op-auto-merge-decision.is-merged {
+  color: var(--signal-ok);
+}
+.op-auto-merge-decision.is-blocked {
+  color: var(--signal-err);
+}
+.op-auto-merge-decision.is-hold {
+  color: var(--signal-warn);
+}
+
+.op-auto-merge-conf {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-700);
+}
+
+.op-auto-merge-reasons {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.op-auto-merge-reasons li {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-700);
+}
