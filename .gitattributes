@@ -1,0 +1,7 @@
+# Operator dashboard build output is committed for zero-Node CI,
+# but marked generated so PR diffs collapse. Regenerate via
+# `npm run build` from services/operator_ui/ before committing.
+services/l1_preprocessing/operator_static/operator.js linguist-generated=true -diff
+services/l1_preprocessing/operator_static/operator.js.map linguist-generated=true -diff
+services/l1_preprocessing/operator_static/build.json linguist-generated=true -diff
+services/operator_ui/package-lock.json linguist-generated=true -diff

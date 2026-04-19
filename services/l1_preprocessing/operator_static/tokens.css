@@ -1,0 +1,19 @@
+/* Placeholder token sheet. Commit 2 replaces this with the full design-system port. */
+:root {
+  --ink-000: #0b0b0a;
+  --ink-900: #ece9dc;
+  --signal-active: #ff7a1a;
+  --font-serif: "Instrument Serif", serif;
+  --font-sans: "IBM Plex Sans", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+}
+
+html[data-theme="dark"], html:not([data-theme]) {
+  background: var(--ink-000);
+  color: var(--ink-900);
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+}
