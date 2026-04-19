@@ -1,14 +1,25 @@
 import { ViewHead } from "../chrome";
-import { Pill, SectionHeader } from "../primitives";
+import { Pill, SectionHeader, Table } from "../primitives";
+import type { PillTone } from "../primitives";
 import { useFeed } from "../hooks/useFeed";
 import type {
   LessonCountsResponse,
   ProfileSummary,
   ProfilesResponse,
+  TraceStatus,
+  TraceSummary,
+  TracesResponse,
 } from "../api/types";
-import { href } from "../router";
+import { href, navigate } from "../router";
 import { intOrDash, pct } from "./format";
 import "./views.css";
+
+const STATUS_TONE: Record<TraceStatus, PillTone> = {
+  "in-flight": "active",
+  stuck: "warn",
+  queued: "cool",
+  done: "ok",
+};
 
 /**
  * Home view: profile cards + lessons strip + recent-runs summary.
@@ -21,6 +32,7 @@ import "./views.css";
 export function HomeView() {
   const profiles = useFeed<ProfilesResponse>("/api/operator/profiles");
   const lessons = useFeed<LessonCountsResponse>("/api/operator/lessons/counts");
+  const traces = useFeed<TracesResponse>("/api/operator/traces?limit=6");
 
   const totalInFlight = profiles.data
     ? profiles.data.profiles.reduce((acc, p) => acc + p.in_flight, 0)
@@ -61,7 +73,7 @@ export function HomeView() {
           label="Recent runs"
           right={<a href={href({ name: "traces" })}>All traces →</a>}
         />
-        <div class="op-empty">Recent-runs table lands in commit 6.</div>
+        <RecentRuns state={traces.status} rows={traces.data?.traces} />
       </section>
     </>
   );
@@ -138,6 +150,58 @@ function ProfileMetric({
         {pct(value)}
       </span>
     </div>
+  );
+}
+
+function RecentRuns({
+  state,
+  rows,
+}: {
+  state: string;
+  rows: readonly TraceSummary[] | undefined;
+}) {
+  if (state === "loading") return <div class="op-loading">Loading runs…</div>;
+  if (state === "error") return <div class="op-error">Failed to load runs</div>;
+  if (!rows || rows.length === 0) {
+    return <div class="op-empty">No runs in the last window.</div>;
+  }
+  return (
+    <Table<TraceSummary>
+      rowKey={(t) => t.id}
+      rows={rows.slice(0, 6)}
+      isLive={(t) => t.status === "in-flight"}
+      onRowClick={(t) => navigate(`/traces/${encodeURIComponent(t.id)}`)}
+      columns={[
+        {
+          key: "id",
+          label: "Ticket",
+          width: "140px",
+          render: (t) => <span class="mono">{t.id}</span>,
+        },
+        { key: "title", label: "Title", render: (t) => t.title || "—" },
+        {
+          key: "status",
+          label: "Status",
+          width: "130px",
+          render: (t) => (
+            <Pill tone={STATUS_TONE[t.status]}>{t.raw_status}</Pill>
+          ),
+        },
+        {
+          key: "phase",
+          label: "Phase",
+          width: "130px",
+          render: (t) => <span class="mono">{t.phase || "—"}</span>,
+        },
+        {
+          key: "elapsed",
+          label: "Elapsed",
+          width: "90px",
+          numeric: true,
+          render: (t) => t.elapsed || "—",
+        },
+      ]}
+    />
   );
 }
 

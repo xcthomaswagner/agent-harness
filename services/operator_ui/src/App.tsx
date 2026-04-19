@@ -1,7 +1,7 @@
 import { Layout, ViewHead } from "./chrome";
 import { useRoute } from "./router";
 import type { Route } from "./router";
-import { HomeView } from "./views";
+import { HomeView, TracesView } from "./views";
 
 /**
  * Top-level app. Layout renders the sidebar + topbar; the route decides
@@ -32,13 +32,7 @@ function ViewFor({ route }: { route: Route }) {
         />
       );
     case "traces":
-      return (
-        <ViewHead
-          sup="Pipeline · traces"
-          title="Traces"
-          sub="Every run across every profile."
-        />
-      );
+      return <TracesView />;
     case "trace-detail":
       return (
         <ViewHead

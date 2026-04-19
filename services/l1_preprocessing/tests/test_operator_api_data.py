@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -317,6 +318,154 @@ def test_profiles_requires_auth(
         "/api/operator/profiles", headers={"X-API-Key": "secret-key"}
     )
     assert ok.status_code == 200
+
+
+# ---------- /api/operator/lessons/counts ----------
+
+
+# ---------- /api/operator/traces ----------
+
+
+def _write_trace(
+    logs_dir: Path,
+    ticket_id: str,
+    *,
+    events: list[tuple[str, str]],
+    title: str = "",
+) -> None:
+    """Seed a JSONL trace file the tracer reads.
+
+    events: list of (phase, event) pairs. Timestamps auto-generated.
+    """
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    path = logs_dir / f"{ticket_id}.jsonl"
+    with path.open("w") as f:
+        for i, (phase, ev) in enumerate(events):
+            entry = {
+                "ticket_id": ticket_id,
+                "trace_id": f"t-{ticket_id}",
+                "phase": phase,
+                "event": ev,
+                "timestamp": f"2026-04-18T12:00:{i:02d}+00:00",
+                "source": "agent",
+            }
+            if i == 0 and title:
+                entry["ticket_title"] = title
+            f.write(json.dumps(entry) + "\n")
+
+
+@pytest.fixture
+def traces_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> TestClient:
+    """Test client with isolated data/logs and autonomy.db."""
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+
+    logs_dir = tmp_path / "logs"
+    import tracer as tracer_module
+
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    return TestClient(_mk_app())
+
+
+def test_traces_empty(traces_client: TestClient) -> None:
+    r = traces_client.get("/api/operator/traces")
+    assert r.status_code == 200
+    data = r.json()
+    assert data == {"traces": [], "count": 0, "offset": 0, "limit": 100}
+
+
+def test_traces_returns_shaped_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    logs_dir = tmp_path / "logs"
+    import tracer as tracer_module
+
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    _write_trace(
+        logs_dir,
+        "HARN-100",
+        events=[
+            ("webhook", "webhook_received"),
+            ("pipeline", "processing_completed"),
+            ("pipeline", "Pipeline complete"),
+        ],
+        title="Ship the thing",
+    )
+
+    c = TestClient(_mk_app())
+    rows = c.get("/api/operator/traces").json()["traces"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["id"] == "HARN-100"
+    assert row["status"] == "done"
+    assert row["raw_status"] == "Complete"
+    assert "elapsed" in row
+
+
+def test_traces_status_filter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    logs_dir = tmp_path / "logs"
+    import tracer as tracer_module
+
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    # One "done" trace, one "queued" trace.
+    _write_trace(
+        logs_dir,
+        "HARN-DONE",
+        events=[
+            ("webhook", "webhook_received"),
+            ("pipeline", "Pipeline complete"),
+        ],
+    )
+    _write_trace(
+        logs_dir,
+        "HARN-Q",
+        events=[("webhook", "webhook_received")],
+    )
+
+    c = TestClient(_mk_app())
+    done = c.get("/api/operator/traces?status=done").json()["traces"]
+    queued = c.get("/api/operator/traces?status=queued").json()["traces"]
+    assert [r["id"] for r in done] == ["HARN-DONE"]
+    assert [r["id"] for r in queued] == ["HARN-Q"]
+
+
+def test_traces_limit_caps_at_500(traces_client: TestClient) -> None:
+    r = traces_client.get("/api/operator/traces?limit=9999")
+    assert r.status_code == 200
+    assert r.json()["limit"] == 500
 
 
 # ---------- /api/operator/lessons/counts ----------

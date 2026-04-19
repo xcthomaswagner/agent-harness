@@ -26,6 +26,7 @@ from autonomy_store.auto_merge import list_recent_auto_merge_decisions
 from autonomy_store.lessons import list_lesson_candidates
 from autonomy_store.pr_runs import list_pr_runs
 from client_profile import list_profiles, load_profile
+from tracer import list_traces as _list_traces
 
 router = APIRouter(
     prefix="/api/operator",
@@ -164,6 +165,92 @@ def get_profiles() -> dict[str, Any]:
         return {"profiles": out}
     finally:
         conn.close()
+
+
+# --- Traces ---------------------------------------------------------------
+
+# The tracer exposes a free-form status vocabulary ("Processing", "PR
+# Created", "CI Fix", "Enriched", etc.). The operator dashboard wants a
+# much coarser in-flight / stuck / queued / done partition so filter
+# chips work. This table is the single source of truth; update it here
+# when tracer adds a new status.
+_STATUS_TO_BUCKET: dict[str, str] = {
+    # Terminal successes + terminal failures both fall in "done" so the
+    # board clears them out of the operator's immediate attention.
+    "Complete": "done",
+    "Merged": "done",
+    "Failed": "done",
+    "Timed Out": "done",
+    # Stuck — the pipeline is alive but can't progress without help.
+    "CI Fix": "stuck",
+    "Agent Done (no PR)": "stuck",
+    # Queued — before anything started.
+    "Received": "queued",
+    "Enriched": "queued",
+    # Everything else is in-flight.
+    "Processing": "in-flight",
+    "Dispatched": "in-flight",
+    "Planned": "in-flight",
+    "Implementing": "in-flight",
+    "Review Done": "in-flight",
+    "QA Done": "in-flight",
+    "PR Created": "in-flight",
+}
+
+
+def _normalize_trace_status(status: str) -> str:
+    """Map tracer status → operator-bucket (in-flight/stuck/queued/done)."""
+    return _STATUS_TO_BUCKET.get(status, "in-flight")
+
+
+def _shape_trace_row(t: dict[str, Any]) -> dict[str, Any]:
+    """Reshape a tracer.list_traces row to the operator dashboard contract."""
+    return {
+        "id": t["ticket_id"],
+        "title": t.get("ticket_title") or "",
+        "status": _normalize_trace_status(t.get("status", "")),
+        "raw_status": t.get("status", ""),
+        "phase": t.get("current_phase", ""),
+        "elapsed": t.get("duration", ""),
+        "started_at": t.get("run_started_at") or t.get("started_at", ""),
+        "pr_url": t.get("pr_url") or None,
+        "pipeline_mode": t.get("pipeline_mode", ""),
+        "review_verdict": t.get("review_verdict", ""),
+        "qa_result": t.get("qa_result", ""),
+    }
+
+
+@router.get("/traces")
+def get_traces(
+    status: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Recent pipeline traces, newest first.
+
+    Query params:
+      * ``status`` — optional bucket filter (``in-flight`` | ``stuck`` |
+        ``queued`` | ``done``). Unknown values yield zero rows.
+      * ``limit`` — default 100, cap 500.
+      * ``offset`` — for pagination.
+
+    The source is tracer.list_traces (scans every JSONL under data/logs/).
+    At scale this becomes expensive; mtime-sorted + limit provides
+    adequate short-term pagination. A cache layer lands when list size
+    exceeds ~2,500 runs (current scale: low hundreds).
+    """
+    capped_limit = max(1, min(500, int(limit)))
+    offset = max(0, int(offset))
+    raw = _list_traces(offset=offset, limit=capped_limit)
+    shaped = [_shape_trace_row(t) for t in raw]
+    if status is not None:
+        shaped = [t for t in shaped if t["status"] == status]
+    return {
+        "traces": shaped,
+        "count": len(shaped),
+        "offset": offset,
+        "limit": capped_limit,
+    }
 
 
 @router.get("/lessons/counts")

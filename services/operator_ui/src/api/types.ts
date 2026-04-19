@@ -39,3 +39,26 @@ export type LessonCounts = Record<LessonState, number>;
 export interface LessonCountsResponse {
   counts: LessonCounts;
 }
+
+export type TraceStatus = "in-flight" | "stuck" | "queued" | "done";
+
+export interface TraceSummary {
+  id: string;
+  title: string;
+  status: TraceStatus;
+  raw_status: string;
+  phase: string;
+  elapsed: string;
+  started_at: string;
+  pr_url: string | null;
+  pipeline_mode: string;
+  review_verdict: string;
+  qa_result: string;
+}
+
+export interface TracesResponse {
+  traces: TraceSummary[];
+  count: number;
+  offset: number;
+  limit: number;
+}
