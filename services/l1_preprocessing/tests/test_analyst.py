@@ -103,6 +103,29 @@ class TestBuildSystemPrompt:
         prompt = analyst._build_system_prompt(TicketType.TASK)
         assert "Task Completeness" in prompt
 
+    def test_loads_implicit_requirements_checklist(
+        self, analyst: TicketAnalyst
+    ) -> None:
+        """Prompt must carry IMPLICIT_REQUIREMENTS.md inline.
+
+        The Opus API call is not agentic — cross-file references in SKILL.md
+        cannot be resolved at generation time. If the checklist content is
+        not stapled into the system prompt string, Step-5 classification has
+        nothing to classify against.
+        """
+        prompt = analyst._build_system_prompt(TicketType.STORY)
+        assert "Implicit Requirements by Feature Type" in prompt
+        for feature_type in (
+            "form_controls",
+            "list_view",
+            "crud_mutation",
+            "api_endpoint",
+            "auth_flow",
+        ):
+            assert f"Feature type: {feature_type}" in prompt, (
+                f"IMPLICIT_REQUIREMENTS.md must declare {feature_type}"
+            )
+
 
 # --- User prompt construction ---
 
@@ -188,7 +211,7 @@ class TestRouteOutput:
         result = analyst._route_output(sample_ticket, parsed, MagicMock())
         assert isinstance(result, EnrichedTicket)
         assert result.id == "TEST-42"
-        assert result.generated_acceptance_criteria == ["New AC 1"]
+        assert [ac.text for ac in result.generated_acceptance_criteria] == ["New AC 1"]
         assert len(result.test_scenarios) == 1
         assert result.test_scenarios[0].test_type == TestType.E2E
         assert result.size_assessment is not None
@@ -253,6 +276,70 @@ class TestRouteOutput:
         result = analyst._route_output(sample_ticket, parsed, MagicMock())
         assert isinstance(result, EnrichedTicket)
 
+    def test_routes_enriched_with_implicit_acs_and_classification(
+        self, analyst: TicketAnalyst, sample_ticket: TicketPayload
+    ) -> None:
+        """Analyst routes implicit ACs + feature-type classification through."""
+        parsed = {
+            "output_type": "enriched",
+            "generated_acceptance_criteria": [
+                {"id": "AC-001", "category": "ticket", "text": "Filter results by date range"},
+                {
+                    "id": "AC-002",
+                    "category": "implicit",
+                    "text": "Invalid start>end date shows inline validation, form does not submit",
+                    "feature_type": "form_controls",
+                    "verifiable_by": "integration_test",
+                },
+            ],
+            "detected_feature_types": ["form_controls"],
+            "classification_reasoning": "Ticket mentions date picker and filters.",
+            "test_scenarios": [],
+            "edge_cases": [],
+            "size_assessment": {
+                "classification": "small",
+                "estimated_units": 1,
+                "recommended_dev_count": 1,
+                "decomposition_needed": False,
+                "rationale": "x",
+            },
+        }
+        result = analyst._route_output(sample_ticket, parsed, MagicMock())
+        assert isinstance(result, EnrichedTicket)
+        assert result.detected_feature_types == ["form_controls"]
+        assert result.classification_reasoning.startswith("Ticket mentions")
+        categories = [ac.category for ac in result.generated_acceptance_criteria]
+        assert categories == ["ticket", "implicit"]
+        assert result.generated_acceptance_criteria[1].feature_type == "form_controls"
+
+    def test_routes_enriched_with_no_feature_types(
+        self, analyst: TicketAnalyst, sample_ticket: TicketPayload
+    ) -> None:
+        """Typo-fix-style tickets produce zero implicit ACs and empty detected list."""
+        parsed = {
+            "output_type": "enriched",
+            "generated_acceptance_criteria": [
+                {"id": "AC-001", "category": "ticket", "text": "Typo corrected in README"},
+            ],
+            "detected_feature_types": [],
+            "classification_reasoning": "Doc-only change; no feature type applies.",
+            "test_scenarios": [],
+            "edge_cases": [],
+            "size_assessment": {
+                "classification": "small",
+                "estimated_units": 1,
+                "recommended_dev_count": 1,
+                "decomposition_needed": False,
+                "rationale": "x",
+            },
+        }
+        result = analyst._route_output(sample_ticket, parsed, MagicMock())
+        assert isinstance(result, EnrichedTicket)
+        assert result.detected_feature_types == []
+        assert all(
+            ac.category == "ticket" for ac in result.generated_acceptance_criteria
+        )
+
 
 # --- Full analyze flow (mocked API) ---
 
@@ -287,7 +374,9 @@ class TestAnalyze:
 
         result = await analyst.analyze(sample_ticket)
         assert isinstance(result, EnrichedTicket)
-        assert result.generated_acceptance_criteria == ["Profile updates persist after refresh"]
+        assert [ac.text for ac in result.generated_acceptance_criteria] == [
+            "Profile updates persist after refresh"
+        ]
         assert result.enriched_at is not None
 
         # Verify API was called with correct model

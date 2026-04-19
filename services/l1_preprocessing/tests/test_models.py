@@ -119,7 +119,10 @@ class TestEnrichedTicket:
         )
         json_str = enriched.model_dump_json()
         restored = EnrichedTicket.model_validate_json(json_str)
-        assert restored.generated_acceptance_criteria == ["Auth module uses new token format"]
+        assert [ac.text for ac in restored.generated_acceptance_criteria] == [
+            "Auth module uses new token format"
+        ]
+        assert all(ac.category == "ticket" for ac in restored.generated_acceptance_criteria)
         assert restored.test_scenarios[0].test_type == TestType.INTEGRATION
         assert restored.size_assessment is not None
         assert restored.size_assessment.recommended_dev_count == 2
@@ -143,6 +146,213 @@ class TestEnrichedTicket:
         assert restored.figma_design_spec is not None
         assert len(restored.figma_design_spec.components) == 3
         assert restored.platform_profile == "sitecore"
+
+
+# --- AcceptanceCriterion migration ---
+
+
+class TestAcceptanceCriterionMigration:
+    def test_legacy_list_str_migrates_to_structured(self) -> None:
+        """Legacy ``list[str]`` on disk wraps as ``category=ticket`` ACs."""
+        data = {
+            "source": "jira",
+            "id": "LEG-1",
+            "ticket_type": "story",
+            "title": "Legacy ticket",
+            "generated_acceptance_criteria": ["first ac", "second ac"],
+        }
+        ticket = EnrichedTicket.model_validate(data)
+        assert len(ticket.generated_acceptance_criteria) == 2
+        assert ticket.generated_acceptance_criteria[0].id == "AC-001"
+        assert ticket.generated_acceptance_criteria[0].category == "ticket"
+        assert ticket.generated_acceptance_criteria[0].text == "first ac"
+        assert ticket.generated_acceptance_criteria[1].id == "AC-002"
+        assert ticket.generated_acceptance_criteria[1].feature_type is None
+
+    def test_structured_ac_roundtrip(self) -> None:
+        """New shape round-trips through JSON without loss."""
+        enriched = EnrichedTicket(
+            source=TicketSource.JIRA,
+            id="NEW-1",
+            ticket_type=TicketType.STORY,
+            title="New-shape ticket",
+            generated_acceptance_criteria=[
+                {"id": "AC-001", "category": "ticket", "text": "foo"},
+                {
+                    "id": "AC-002",
+                    "category": "implicit",
+                    "text": "bar",
+                    "feature_type": "form_controls",
+                    "verifiable_by": "integration_test",
+                },
+            ],
+            detected_feature_types=["form_controls"],
+            classification_reasoning="matched on 'filters'",
+        )
+        restored = EnrichedTicket.model_validate_json(enriched.model_dump_json())
+        assert len(restored.generated_acceptance_criteria) == 2
+        assert restored.generated_acceptance_criteria[1].category == "implicit"
+        assert restored.generated_acceptance_criteria[1].feature_type == "form_controls"
+        assert restored.generated_acceptance_criteria[1].verifiable_by == "integration_test"
+        assert restored.detected_feature_types == ["form_controls"]
+        assert restored.classification_reasoning == "matched on 'filters'"
+
+    def test_empty_list_stays_empty(self) -> None:
+        ticket = EnrichedTicket.model_validate(
+            {
+                "source": "jira",
+                "id": "E-1",
+                "ticket_type": "story",
+                "title": "empty",
+                "generated_acceptance_criteria": [],
+            }
+        )
+        assert ticket.generated_acceptance_criteria == []
+
+    def test_none_normalizes_to_empty(self) -> None:
+        ticket = EnrichedTicket.model_validate(
+            {
+                "source": "jira",
+                "id": "N-1",
+                "ticket_type": "story",
+                "title": "none",
+                "generated_acceptance_criteria": None,
+            }
+        )
+        assert ticket.generated_acceptance_criteria == []
+
+    def test_structured_missing_required_field_raises(self) -> None:
+        """Dict without ``id`` is invalid structured input."""
+        with pytest.raises(ValidationError):
+            EnrichedTicket.model_validate(
+                {
+                    "source": "jira",
+                    "id": "BAD-1",
+                    "ticket_type": "story",
+                    "title": "bad",
+                    "generated_acceptance_criteria": [
+                        {"category": "ticket", "text": "missing id"}
+                    ],
+                }
+            )
+
+    def test_legacy_empty_strings_are_skipped(self) -> None:
+        """Empty-string entries in legacy lists don't produce meaningless ACs."""
+        ticket = EnrichedTicket.model_validate(
+            {
+                "source": "jira",
+                "id": "EMPTY-1",
+                "ticket_type": "story",
+                "title": "empty strings",
+                "generated_acceptance_criteria": ["", "  ", "real ac"],
+            }
+        )
+        assert len(ticket.generated_acceptance_criteria) == 1
+        assert ticket.generated_acceptance_criteria[0].text == "real ac"
+        assert ticket.generated_acceptance_criteria[0].id == "AC-001"
+
+    def test_mixed_legacy_and_structured_rejected(self) -> None:
+        """Mixed list (strings + dicts) fails strict validation.
+
+        The ``isinstance(v[0], str)`` check in the migration validator
+        only triggers on a fully-legacy list. A mixed list falls
+        through to strict validation; dicts lacking ``id``/``category``
+        raise. Pinning this behavior so future refactors don't quietly
+        relax it.
+        """
+        with pytest.raises(ValidationError):
+            EnrichedTicket.model_validate(
+                {
+                    "source": "jira",
+                    "id": "MIX-1",
+                    "ticket_type": "story",
+                    "title": "mixed",
+                    "generated_acceptance_criteria": [
+                        {"id": "AC-001", "category": "ticket", "text": "ok"},
+                        "raw string",
+                    ],
+                }
+            )
+
+    def test_analyst_emitted_list_str_silently_migrates_to_ticket_category(
+        self,
+    ) -> None:
+        """Documents the permissive migration behavior for in-process construction.
+
+        If the analyst LLM regresses and emits legacy ``list[str]``, those
+        entries are silently reclassified as ``category="ticket"`` — the
+        Pydantic ``mode="before"`` validator fires on in-process
+        construction too. No fail-fast guard. Regression test so any
+        future strict-validation change requires an explicit decision.
+        """
+        ticket = EnrichedTicket(
+            source=TicketSource.JIRA,
+            id="DRIFT-1",
+            ticket_type=TicketType.STORY,
+            title="drift",
+            generated_acceptance_criteria=["analyst regression emitted raw string"],
+        )
+        assert all(
+            ac.category == "ticket" for ac in ticket.generated_acceptance_criteria
+        )
+        assert ticket.generated_acceptance_criteria[0].text.startswith(
+            "analyst regression"
+        )
+
+    def test_ac_ids_are_sequential_ticket_first_implicit_second(self) -> None:
+        """Documents the per-run AC id-ordering contract.
+
+        IDs are positional and NOT stable across re-runs — downstream
+        artifacts must not persist joins by ID. This test pins the
+        intra-run order so that if the analyst produces both ticket and
+        implicit ACs in a single call, ticket ACs come first. No code
+        currently enforces order; this test documents the convention.
+        """
+        ticket = EnrichedTicket(
+            source=TicketSource.JIRA,
+            id="ORDER-1",
+            ticket_type=TicketType.STORY,
+            title="order",
+            generated_acceptance_criteria=[
+                {"id": "AC-001", "category": "ticket", "text": "ticket a"},
+                {"id": "AC-002", "category": "ticket", "text": "ticket b"},
+                {
+                    "id": "AC-003",
+                    "category": "implicit",
+                    "text": "implicit a",
+                    "feature_type": "form_controls",
+                },
+            ],
+        )
+        categories = [ac.category for ac in ticket.generated_acceptance_criteria]
+        # Ticket-category entries precede implicit-category entries.
+        first_implicit = next(
+            i for i, c in enumerate(categories) if c == "implicit"
+        )
+        assert all(c == "ticket" for c in categories[:first_implicit])
+
+    def test_legacy_fixture_file_migrates(self) -> None:
+        """Repo-committed fixtures with ``list[str]`` shape migrate cleanly.
+
+        Guards against future tests inventing their own legacy shape
+        while the real backwards-compat surface is the tests/fixtures/
+        files that the harness ships with.
+        """
+        import json
+        from pathlib import Path
+
+        fixture_root = Path(__file__).resolve().parents[3] / "tests" / "fixtures"
+        for name in ("sample-ticket-story.json", "sample-ticket-bug.json"):
+            data = json.loads((fixture_root / name).read_text())
+            if not data.get("generated_acceptance_criteria"):
+                continue
+            ticket = EnrichedTicket.model_validate(data)
+            assert ticket.generated_acceptance_criteria, (
+                f"expected {name} to produce ACs after migration"
+            )
+            assert all(
+                ac.category == "ticket" for ac in ticket.generated_acceptance_criteria
+            )
 
 
 # --- InfoRequest ---
