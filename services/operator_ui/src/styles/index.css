@@ -1,0 +1,15 @@
+/*
+ * Operator dashboard — combined stylesheet.
+ *
+ * esbuild resolves these @imports at build time and emits one
+ * concatenated operator.css. Order matters:
+ *   1. tokens.css   — CSS custom properties, reset, base elements.
+ *   2. primitives   — Pill/Chip/Button/KPITile/Table/…
+ *   3. chrome       — Sidebar/Topbar/Layout/ViewHead
+ *   4. views        — page-specific layouts
+ */
+
+@import "./tokens.css";
+@import "../primitives/primitives.css";
+@import "../chrome/chrome.css";
+@import "../views/views.css";

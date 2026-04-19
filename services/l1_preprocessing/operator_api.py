@@ -105,11 +105,26 @@ def _operator_js() -> FileResponse:
 
 
 @router.get(
+    "/operator/operator.css",
+    response_class=FileResponse,
+    include_in_schema=False,
+)
+def _operator_bundled_css() -> FileResponse:
+    path = OPERATOR_STATIC_DIR / "operator.css"
+    if not path.is_file():
+        return FileResponse(path, status_code=404)
+    return FileResponse(path, media_type=_CSS_MIME)
+
+
+@router.get(
     "/operator/tokens.css",
     response_class=FileResponse,
     include_in_schema=False,
 )
-def _operator_css() -> FileResponse:
+def _operator_tokens_css() -> FileResponse:
+    # Tokens-only sheet kept for potential standalone consumers; the
+    # real dashboard uses operator.css (which @imports tokens + every
+    # component sheet).
     path = OPERATOR_STATIC_DIR / "tokens.css"
     if not path.is_file():
         return FileResponse(path, status_code=404)

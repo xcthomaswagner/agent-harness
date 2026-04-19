@@ -2,9 +2,16 @@
 // Output lands in ../l1_preprocessing/operator_static/ so FastAPI can serve
 // it directly as StaticFiles. CI does not run this — the committed output
 // is the source of truth for the Python service.
+//
+// CSS handling: esbuild's default CSS handling injects styles via a
+// runtime fetch from the JS bundle, which doesn't match our
+// file-served-static deployment. We instead use esbuild's standalone
+// CSS bundler on a single entry (src/index.css) that imports every
+// component CSS via plain CSS @import statements. The result is one
+// operator.css file that operator.html <link>s directly.
 
 import * as esbuild from "esbuild";
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,7 +22,7 @@ mkdirSync(OUT_DIR, { recursive: true });
 
 const watch = process.argv.includes("--watch");
 
-const buildOptions = {
+const jsBuild = {
   entryPoints: [resolve(__dirname, "src/main.tsx")],
   bundle: true,
   outfile: resolve(OUT_DIR, "operator.js"),
@@ -23,7 +30,11 @@ const buildOptions = {
   target: ["es2020"],
   jsx: "automatic",
   jsxImportSource: "preact",
-  loader: { ".css": "text" },
+  // Component TS files that do ``import "./whatever.css"`` need the CSS
+  // to be a no-op at JS-bundle time (we bundle CSS separately below).
+  // ``empty`` loader turns the CSS import into nothing, so the JS
+  // bundle stays pure JS.
+  loader: { ".css": "empty" },
   minify: !watch,
   sourcemap: watch ? "inline" : false,
   logLevel: "info",
@@ -32,18 +43,30 @@ const buildOptions = {
   },
 };
 
+// Single CSS entry that @imports every component's stylesheet in the
+// order they must cascade. esbuild resolves the @imports and emits one
+// concatenated file.
+const cssBuild = {
+  entryPoints: [resolve(__dirname, "src/styles/index.css")],
+  bundle: true,
+  outfile: resolve(OUT_DIR, "operator.css"),
+  minify: !watch,
+  sourcemap: watch ? "inline" : false,
+  logLevel: "info",
+};
+
 function copyStatics() {
-  // index.html is a template — the FastAPI route inlines DASHBOARD_API_KEY
-  // at request time. We still copy a build-time copy for sanity checking.
   copyFileSync(
     resolve(__dirname, "src/index.html"),
     resolve(OUT_DIR, "index.html"),
   );
+  // tokens.css is kept as a standalone file in the output too, in case
+  // someone wants to consume just the tokens (e.g., a future embed of a
+  // single primitive on another page). Not referenced by index.html.
   copyFileSync(
     resolve(__dirname, "src/styles/tokens.css"),
     resolve(OUT_DIR, "tokens.css"),
   );
-  // Emit a build marker so operators can verify which commit is live.
   const rev = process.env.GIT_SHA || "dev";
   writeFileSync(
     resolve(OUT_DIR, "build.json"),
@@ -53,12 +76,14 @@ function copyStatics() {
 }
 
 if (watch) {
-  const ctx = await esbuild.context(buildOptions);
-  await ctx.watch();
+  const jsCtx = await esbuild.context(jsBuild);
+  const cssCtx = await esbuild.context(cssBuild);
+  await jsCtx.watch();
+  await cssCtx.watch();
   copyStatics();
   console.log("[operator-ui] watch mode — rebuilds on src changes");
 } else {
-  await esbuild.build(buildOptions);
+  await Promise.all([esbuild.build(jsBuild), esbuild.build(cssBuild)]);
   copyStatics();
   console.log(`[operator-ui] build complete → ${OUT_DIR}`);
 }

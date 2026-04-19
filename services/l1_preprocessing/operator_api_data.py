@@ -35,6 +35,7 @@ from autonomy_store.issues import (
 )
 from autonomy_store.lessons import list_lesson_candidates
 from autonomy_store.pr_runs import list_pr_runs
+from autonomy_store.schema import resolve_db_path
 from client_profile import list_profiles, load_profile
 from live_stream import _find_session_streams, _worktree_root_for_ticket
 from tracer import (
@@ -54,13 +55,16 @@ router = APIRouter(
 
 
 def _db_path_from_settings() -> Path:
-    """Resolve ``settings.autonomy_db_path`` at call time so tests'
-    monkey-patched settings take effect per-request. Returns a Path
-    because ``open_connection`` needs ``.parent`` for mkdir.
+    """Resolve ``settings.autonomy_db_path`` to a Path.
+
+    Empty settings value falls back to ``<repo>/data/autonomy.db`` via
+    ``resolve_db_path`` — same helper every other module in the service
+    uses. Resolved at call time so tests' monkey-patched settings take
+    effect per-request.
     """
     import main
 
-    return Path(main.settings.autonomy_db_path)
+    return resolve_db_path(main.settings.autonomy_db_path)
 
 
 # Decisions that signal "auto-merge was eligible" (i.e., count in the

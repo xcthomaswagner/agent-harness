@@ -79,33 +79,39 @@ export function useRoute(): Route {
   useEffect(() => {
     const onPop = () => setRoute(parseRoute(window.location.pathname));
     window.addEventListener("popstate", onPop);
-
-    // Intercept in-app link clicks so same-origin /operator links don't
-    // trigger a full reload. External links + new-tab clicks (meta/ctrl)
-    // still navigate normally.
-    const onClick = (e: MouseEvent) => {
-      if (e.defaultPrevented) return;
-      if (e.button !== 0) return;
-      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-      const target = (e.target as HTMLElement | null)?.closest("a");
-      if (!target || target.target === "_blank") return;
-      const href = target.getAttribute("href") ?? "";
-      if (!href) return;
-      if (href.startsWith(BASE)) {
-        e.preventDefault();
-        window.history.pushState({}, "", href);
-        onPop();
-      }
-    };
-    document.addEventListener("click", onClick);
-
-    return () => {
-      window.removeEventListener("popstate", onPop);
-      document.removeEventListener("click", onClick);
-    };
+    return () => window.removeEventListener("popstate", onPop);
   }, []);
 
   return route;
+}
+
+/**
+ * Global click interceptor: every same-origin /operator link click
+ * turns into history.pushState + a popstate event so every useRoute()
+ * hook re-reads.
+ *
+ * Installed ONCE at app boot (see main.tsx). Doing this inside
+ * useRoute caused subtle bugs: only the instance that handled the
+ * click dispatched a popstate, so sibling components (App vs.
+ * Sidebar) disagreed about which route was active after a click.
+ */
+export function installGlobalLinkInterceptor(): () => void {
+  if (typeof window === "undefined") return () => {};
+  const onClick = (e: MouseEvent) => {
+    if (e.defaultPrevented) return;
+    if (e.button !== 0) return;
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const target = (e.target as HTMLElement | null)?.closest("a");
+    if (!target || target.target === "_blank") return;
+    const href = target.getAttribute("href") ?? "";
+    if (!href.startsWith(BASE)) return;
+    e.preventDefault();
+    if (window.location.pathname === href) return;
+    window.history.pushState({}, "", href);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  };
+  document.addEventListener("click", onClick);
+  return () => document.removeEventListener("click", onClick);
 }
 
 /**

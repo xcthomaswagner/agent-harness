@@ -20,5 +20,6 @@ export default defineConfig({
     globals: true,
     css: false,
     include: ["src/**/__tests__/**/*.test.ts?(x)"],
+    exclude: ["node_modules", "e2e/**"],
   },
 });
