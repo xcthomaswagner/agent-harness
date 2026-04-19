@@ -79,6 +79,8 @@ from learning_api import router as learning_api_router
 from learning_dashboard import router as learning_dashboard_router
 from live_stream import router as live_stream_router
 from models import TicketPayload
+from operator_api import router as operator_router
+from operator_api_data import router as operator_data_router
 from pipeline import Pipeline
 from trace_bundle import _ARTIFACT_DOWNLOAD_MAP as _ARTIFACT_DOWNLOAD_MAP
 from trace_bundle import _BUNDLE_README as _BUNDLE_README
@@ -99,8 +101,6 @@ from tracer import (
     append_trace,
     generate_trace_id,
 )
-from operator_api import router as operator_router
-from operator_api_data import router as operator_data_router
 from unified_dashboard import router as unified_router
 from webhooks import _dispatch_ticket as _dispatch_ticket
 from webhooks import _enqueue_or_background as _enqueue_or_background
