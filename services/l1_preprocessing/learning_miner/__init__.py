@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from learning_miner.detectors.base import CandidateProposal, Detector
+from learning_miner.retrospective_ingest import ingest_retrospectives
 from learning_miner.runner import MinerRunResult, run_miner
 
 
@@ -32,9 +33,33 @@ def _build_mcp_drift() -> Detector:
     return build()
 
 
+def _build_form_controls_ac_gaps() -> Detector:
+    from learning_miner.detectors.form_controls_ac_gaps import build
+    return build()
+
+
+def _build_cross_unit_object_pivot() -> Detector:
+    from learning_miner.detectors.cross_unit_object_pivot import build
+    return build()
+
+
+def _build_simplify_no_sidecar() -> Detector:
+    from learning_miner.detectors.simplify_no_sidecar import build
+    return build()
+
+
+def _build_reviewer_judge_rejection_rate() -> Detector:
+    from learning_miner.detectors.reviewer_judge_rejection_rate import build
+    return build()
+
+
 _DETECTOR_BUILDERS: dict[str, Callable[[], Detector]] = {
     "human_issue_cluster": _build_human_issue_cluster,
     "mcp_drift": _build_mcp_drift,
+    "form_controls_ac_gaps": _build_form_controls_ac_gaps,
+    "cross_unit_object_pivot": _build_cross_unit_object_pivot,
+    "simplify_no_sidecar": _build_simplify_no_sidecar,
+    "reviewer_judge_rejection_rate": _build_reviewer_judge_rejection_rate,
 }
 
 
@@ -44,10 +69,23 @@ def get_detector(name: str) -> Detector | None:
     return builder() if builder else None
 
 
+def all_production_detectors() -> list[Detector]:
+    """Return a fresh instance of every registered detector.
+
+    Single source of truth for the set of detectors the nightly miner
+    and backfill script run. Callers must not cache the list — each
+    call returns freshly-built detectors so per-run caches don't leak
+    between invocations.
+    """
+    return [builder() for builder in _DETECTOR_BUILDERS.values()]
+
+
 __all__ = [
     "CandidateProposal",
     "Detector",
     "MinerRunResult",
+    "all_production_detectors",
     "get_detector",
+    "ingest_retrospectives",
     "run_miner",
 ]

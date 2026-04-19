@@ -30,7 +30,7 @@ from learning_miner.detectors.human_issue_cluster import (
     _resolve_platform_profile,
 )
 from tool_index import _canonical_server
-from tracer import ARTIFACT_TOOL_INDEX, latest_artifacts, read_trace
+from tracer import ARTIFACT_TOOL_INDEX, latest_artifacts, safe_read_trace
 
 logger = structlog.get_logger()
 
@@ -215,7 +215,7 @@ class McpDriftDetector:
             platform = _resolve_platform_profile(pr["client_profile"])
             if platform is None:
                 continue
-            entries = _safe_read_trace(pr["ticket_id"])
+            entries = safe_read_trace(pr["ticket_id"])
             if not entries:
                 continue
             idx = _find_tool_index(entries)
@@ -333,23 +333,6 @@ class McpDriftDetector:
                 )
             )
         return out
-
-
-def _safe_read_trace(ticket_id: str) -> list[dict[str, Any]]:
-    """``read_trace`` with a try/except; detector isolation contract.
-
-    A malformed or missing trace file can't kill a scan over hundreds
-    of runs — log + skip.
-    """
-    try:
-        return read_trace(ticket_id)
-    except Exception as exc:
-        logger.debug(
-            "mcp_drift_trace_read_failed",
-            ticket_id=ticket_id,
-            error=f"{type(exc).__name__}: {exc}",
-        )
-        return []
 
 
 def build() -> McpDriftDetector:

@@ -132,6 +132,15 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
             )
         version = 5
         logger.info("autonomy_schema_migrated", version=version)
+    if version < 6:
+        with conn:
+            _migrate_to_v6(conn)
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (6, _now_iso()),
+            )
+        version = 6
+        logger.info("autonomy_schema_migrated", version=version)
     return version
 
 
@@ -445,6 +454,44 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX idx_lesson_outcomes_lesson_id "
         "ON lesson_outcomes (lesson_id)"
+    )
+
+
+def _migrate_to_v6(conn: sqlite3.Connection) -> None:
+    """v6: pipeline_metrics table — per-run scalar observations.
+
+    One row per (trace_id, metric_name) tuple. Populated by the
+    learning miner's reviewer_judge_rejection_rate detector when it
+    scans worktree artifacts (code-review.json + judge-verdict.json)
+    to compute rejection rates. Kept generic so future detectors can
+    reuse it for rolling-window trends.
+
+    The UNIQUE (trace_id, metric_name) constraint supports idempotent
+    upserts: a repeat scan of the same trace replaces rather than
+    accumulates. ``observed_at`` is the timestamp of the underlying
+    observation (typically the pr_run open_at or the artifact mtime),
+    not the time the metric row was inserted.
+    """
+    conn.execute(
+        """
+        CREATE TABLE pipeline_metrics (
+            id INTEGER PRIMARY KEY,
+            ticket_id TEXT NOT NULL,
+            trace_id TEXT NOT NULL,
+            metric_name TEXT NOT NULL,
+            metric_value REAL NOT NULL,
+            observed_at TEXT NOT NULL,
+            UNIQUE (trace_id, metric_name)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX idx_pipeline_metrics_name_observed_at "
+        "ON pipeline_metrics (metric_name, observed_at DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX idx_pipeline_metrics_ticket_id "
+        "ON pipeline_metrics (ticket_id)"
     )
 
 

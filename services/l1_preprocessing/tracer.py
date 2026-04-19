@@ -256,6 +256,30 @@ def read_trace(ticket_id: str) -> list[dict[str, Any]]:
     return entries
 
 
+def safe_read_trace(ticket_id: str) -> list[dict[str, Any]]:
+    """``read_trace`` with a try/except — detector isolation contract.
+
+    Multiple learning detectors walk hundreds of trace files per scan;
+    a malformed or missing file on one ticket must not crash the whole
+    scan. Log at debug (so dashboards stay clean) and return an empty
+    list so the caller's next-ticket logic proceeds unchanged.
+
+    Previously each detector that needed this carried its own nearly-
+    identical copy under a private name with a detector-specific log
+    event. Centralizing here keeps the failure-isolation contract
+    consistent across the suite.
+    """
+    try:
+        return read_trace(ticket_id)
+    except Exception as exc:
+        logger.debug(
+            "tracer_safe_read_trace_failed",
+            ticket_id=ticket_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return []
+
+
 def count_traces() -> int:
     """Count total number of trace files."""
     if not LOGS_DIR.exists():

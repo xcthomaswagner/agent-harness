@@ -100,7 +100,11 @@ Spawn QA (see QA Validation section below).
 
 Run /simplify (see Code Simplification section below).
 
-### Step 6: Push + PR
+### Step 6: Run Reflection
+
+Run Run Reflection (see Run Reflection section below).
+
+### Step 7: Push + PR
 
 Push and open PR (see PR Creation section below).
 
@@ -282,7 +286,11 @@ Spawn QA (see QA Validation section below). Validates the **merged** branch.
 
 Run /simplify (see Code Simplification section below).
 
-### Step 9: Push + PR
+### Step 9: Run Reflection
+
+Run Run Reflection (see Run Reflection section below).
+
+### Step 10: Push + PR
 
 Push and open PR (see PR Creation section below).
 
@@ -438,6 +446,42 @@ Agent(
 
 Log: `{"phase": "simplify", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Simplification complete", "changes_made": true|false}`
 
+## Run Reflection (shared by both pipelines)
+
+After simplify and before PR creation, spawn the Run Reflector to capture what happened on this run. The reflector reads the full set of `.harness/logs/*.md` + `.harness/logs/*.json` + `.harness/logs/pipeline.jsonl` artifacts and emits `.harness/logs/retrospective.md` + `.harness/logs/retrospective.json`. The learning miner ingests these later to propose lessons.
+
+**Reflection MUST NOT fail the pipeline.** If the reflector returns any non-success status, proceed to PR creation anyway. The retrospective.json schema includes a `status` field so the miner can skip failed runs.
+
+Log start: `{"phase": "reflection", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "phase_started"}`
+
+Spawn the reflector:
+
+```
+Agent(
+  prompt="Follow the /run-reflection skill at .claude/skills/run-reflection/SKILL.md.
+         Read the ticket at .harness/ticket.json, the pipeline log at
+         .harness/logs/pipeline.jsonl, and every artifact file under
+         .harness/logs/*.md and .harness/logs/*.json.
+         Write the human-readable summary to .harness/logs/retrospective.md.
+         Write the machine-readable candidates to .harness/logs/retrospective.json,
+         matching the canonical schema in the skill.
+         If anything fails, still write retrospective.json with status='failed'
+         and an empty lesson_candidates list. Do not raise.",
+  description="Reflect <ticket-id>",
+  mode="bypassPermissions"
+)
+```
+
+After the reflector returns, regardless of whether `retrospective.json` reports `status: "ok"` or `status: "failed"`, log:
+
+```json
+{"phase": "reflection", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Reflection complete", "status": "ok|failed", "candidates": N}
+```
+
+Where `N` is the length of `lesson_candidates` on success, or `0` on failure. If the file does not exist or cannot be parsed, treat this as `status=failed, candidates=0` and still log the event — the learning miner's ingest will simply skip the run.
+
+The reflector output is NOT included in the PR body. It is read later by the learning miner over the trace archive.
+
 ## Final Screenshot
 
 After QA passes (and before PR creation), if the implementation has a visual UI component:
@@ -542,6 +586,9 @@ The harness uses a two-tier observability model inspired by OpenTelemetry:
 | `plan-review.md` | Plan Reviewer | `plan_review` |
 | `blocked-units.md` | Team Lead | `implementation` |
 | `escalation.md` | Team Lead | escalation events |
+| `simplify.md` | Simplify agent | `simplify` |
+| `retrospective.md` | Run Reflector | `reflection` |
+| `retrospective.json` | Run Reflector | `reflection` |
 
 **Rule: Sub-agents NEVER write to `pipeline.jsonl`.** They write their own detail files. The Team Lead reads those files and logs the phase summary to `pipeline.jsonl`.
 

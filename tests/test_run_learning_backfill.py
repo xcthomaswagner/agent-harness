@@ -75,6 +75,48 @@ def live_db(tmp_path: Path) -> Path:
     return path
 
 
+class TestDetectorRegistration:
+    """Backfill script must load every registered production detector.
+
+    Prior versions hard-coded a single detector — a silent regression
+    every time a new detector shipped. Tying the backfill to
+    ``all_production_detectors`` guards against drift.
+    """
+
+    def test_all_production_detectors_are_loaded(self) -> None:
+        import importlib.util
+
+        from learning_miner import all_production_detectors
+
+        # Load the backfill script as a module without colliding with
+        # the ``scripts`` package inside services/l1_preprocessing/.
+        spec = importlib.util.spec_from_file_location(
+            "run_learning_backfill_under_test", str(SCRIPT)
+        )
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        loaded = mod._load_detectors()
+        loaded_names = {d.name for d in loaded}
+        expected_names = {d.name for d in all_production_detectors()}
+        assert loaded_names == expected_names
+
+    def test_expected_detector_count(self) -> None:
+        """Count check so adding a detector forces a test update."""
+        from learning_miner import all_production_detectors
+
+        names = {d.name for d in all_production_detectors()}
+        assert names == {
+            "human_issue_cluster",
+            "mcp_drift",
+            "form_controls_ac_gaps",
+            "cross_unit_object_pivot",
+            "simplify_no_sidecar",
+            "reviewer_judge_rejection_rate",
+        }
+
+
 class TestDryRunPersistence:
     def test_dry_run_does_not_write_to_live_db(self, live_db: Path) -> None:
         from autonomy_store import (
