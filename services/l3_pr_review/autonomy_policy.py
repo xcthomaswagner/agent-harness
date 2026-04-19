@@ -5,10 +5,12 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
 import structlog
+
+_T = TypeVar("_T")
 
 logger = structlog.get_logger()
 
@@ -72,14 +74,14 @@ async def _cached_l1_get(
     cache_key: str,
     url: str,
     *,
-    fail_closed: Any,
-    parse: Callable[[dict[str, Any]], Any],
+    fail_closed: _T,
+    parse: Callable[[dict[str, Any]], _T],
     params: dict[str, str] | None = None,
     headers: dict[str, str] | None = None,
     log_event: str | None = None,
     log_context: dict[str, Any] | None = None,
     client: httpx.AsyncClient | None = None,
-) -> Any:
+) -> _T:
     """Shared GET-with-cache for the three ``fetch_*`` helpers.
 
     Each caller used to duplicate ~25 lines of cache check → owns_client
@@ -96,7 +98,7 @@ async def _cached_l1_get(
     """
     cached = _cache_get(cache_key)
     if cached is not None:
-        return cached
+        return cached  # type: ignore[no-any-return]
 
     owns_client = client is None
     c = client or httpx.AsyncClient(timeout=5.0)

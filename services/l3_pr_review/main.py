@@ -1390,7 +1390,7 @@ def _ado_org_url_from_payload(payload: dict[str, Any]) -> str:
     """Extract the ADO org URL from the webhook payload's resourceContainers."""
     containers = payload.get("resourceContainers", {})
     collection = containers.get("collection", {})
-    base_url = collection.get("baseUrl", "")
+    base_url = str(collection.get("baseUrl", ""))
     if base_url:
         return base_url.rstrip("/")
     # Fallback: use ADO_ORG_URL env var
