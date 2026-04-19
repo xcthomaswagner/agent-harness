@@ -11,17 +11,19 @@ Implementation note: phrase-match heuristic, not structured taxonomy
 -------------------------------------------------------------------
 The original plan (self-learning-plan §4.4) called for classifying
 each acceptance criterion against an "AC taxonomy" emitted by the
-analyst. The analyst does not yet emit a structured ``category`` field
-on ``generated_acceptance_criteria`` items — the AC list is still
-flat strings. As a deliberate interim implementation, this detector
+analyst. As of the implicit-requirements rollout, the AC model carries
+a ``category`` field (``ticket`` vs ``implicit``) and a
+``feature_type`` on implicit entries, but that is NOT the same as a
+concern-level taxonomy ("race_safety", "cross_field_validation",
+etc.). As a deliberate interim implementation, this detector
 substring-matches against the ``_TAXONOMY`` phrase table below. That
 is defensible in practice (the phrases are narrow and case-folded)
 but it is intentionally NOT the spec — false positives are possible
 on AC text that happens to contain a keyword without the underlying
 concern.
 
-Planned evolution: when ``generated_acceptance_criteria`` items gain a
-``category`` field (e.g., ``{"text": "...", "category": "race_safety"}``),
+Planned evolution: when acceptance criteria gain a concern-level
+``category`` field (e.g., ``{"text": "...", "concern": "race_safety"}``),
 replace ``_categorize`` with a direct lookup against the new field
 and keep ``_TAXONOMY`` only as a fallback for legacy records. The
 rest of the detector (cluster gating, emission, delta) stays the same.
@@ -160,7 +162,14 @@ def _load_ticket_json(path: Path) -> dict[str, Any] | None:
 
 
 def _extract_ac_list(ticket: dict[str, Any]) -> list[str]:
-    """Return the combined authored + generated AC list (best-effort)."""
+    """Return the combined authored + generated AC list (best-effort).
+
+    Accepts both legacy ``list[str]`` and structured
+    ``list[{id, category, text, ...}]`` shapes on disk. The
+    ``generated_acceptance_criteria`` field migrated from the former to
+    the latter in the implicit-requirements rollout; older archived
+    tickets still carry the legacy shape. Both are included.
+    """
     out: list[str] = []
     for key in ("acceptance_criteria", "generated_acceptance_criteria"):
         raw = ticket.get(key) or []
@@ -169,6 +178,10 @@ def _extract_ac_list(ticket: dict[str, Any]) -> list[str]:
         for item in raw:
             if isinstance(item, str) and item.strip():
                 out.append(item)
+            elif isinstance(item, dict):
+                text = str(item.get("text") or "").strip()
+                if text:
+                    out.append(text)
     return out
 
 

@@ -39,7 +39,7 @@ Every phase has a max retry count. After exhaustion, the pipeline escalates — 
 | Merge | Conflict resolution attempts | 2 | Squash fallback + `needs-human-merge` label | `harness-CLAUDE.md:224-226` |
 | Any phase | Sub-agent crash | 1 retry | Escalate | `harness-CLAUDE.md:446` |
 
-**Circuit breaker detail:** Only original acceptance criteria (`acceptance_criteria` + `generated_acceptance_criteria`) count toward the 50% threshold. Edge cases and design compliance checks do NOT count. This prevents non-critical failures from triggering a full escalation.
+**Circuit breaker detail:** Only original acceptance criteria count toward the 50% threshold. "Original" means every string in `acceptance_criteria` (ticket-author-written) plus every entry in `generated_acceptance_criteria` with `category == "ticket"` (analyst-extracted from ticket text). Implicit ACs (`category == "implicit"`, added by the analyst from feature-type checklists), edge cases, and design compliance checks do NOT count toward this threshold — they route back individually, even in bulk, and do not escalate on their own. This prevents non-critical failures (and analyst-added edge-case coverage) from triggering a full escalation.
 
 ---
 
