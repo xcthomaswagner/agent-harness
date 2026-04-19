@@ -1,0 +1,30 @@
+golden_id: auth_flow_mfa
+notes: |
+  MFA enforcement. Hits auth_flow. Should produce implicit ACs for
+  credential revocation, session expiry, rate limit, and enrollment
+  edge cases.
+ticket:
+  id: GOLDEN-MFA-1
+  source: jira
+  ticket_type: story
+  title: "Enforce MFA for admin users with 30-day grace"
+  description: |
+    Security wants MFA enforced for all users with an "admin" role.
+
+    Requirements:
+    - Users flagged for MFA see an enrollment prompt on next login
+    - Users have a 30-day grace period from the flag-set date to enroll
+    - After grace expires, non-enrolled users are blocked until enrolled
+    - Admins can reset a user's MFA enrollment (revoke + re-enroll)
+  acceptance_criteria:
+    - "Admin users are prompted to enroll in MFA on next login"
+    - "Users have a 30-day grace period to enroll"
+    - "After grace expires, unenrolled admins cannot access protected pages"
+    - "A platform admin can reset a user's MFA enrollment"
+expected_feature_types: ["auth_flow"]
+expected_implicit_acs:
+  - "session"             # session expiry behavior
+  - "revocation"          # credential revocation on active session
+  - "rate"                # rate limit on enrollment attempts
+expected_min_ticket_acs: 3
+expected_max_implicit_acs: 10

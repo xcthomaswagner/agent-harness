@@ -1,0 +1,21 @@
+golden_id: simple_typo_fix
+notes: |
+  Negative test. The checklist must not fire on tickets that touch no
+  feature. If this golden produces any implicit ACs, the classifier is
+  over-firing.
+ticket:
+  id: GOLDEN-TYPO-1
+  source: jira
+  ticket_type: task
+  title: "Fix typo in onboarding email template"
+  description: |
+    The onboarding email currently says "Wellcome to our service".
+    Change it to "Welcome to our service".
+
+    The template lives at emails/onboarding.html line 12.
+  acceptance_criteria:
+    - "The email template says 'Welcome' not 'Wellcome'"
+expected_feature_types: []
+expected_implicit_acs: []
+expected_min_ticket_acs: 1
+expected_max_implicit_acs: 0
