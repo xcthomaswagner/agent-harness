@@ -406,3 +406,102 @@
   font-size: 11px;
   color: var(--ink-700);
 }
+
+/* ============ Tickets view ============ */
+.op-tickets-grid {
+  display: grid;
+  grid-template-columns: 1fr 360px;
+  gap: 0;
+  min-height: 500px;
+}
+
+.op-tickets-list {
+  border-right: var(--rule);
+}
+
+.op-tickets-rail {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+.op-rail-empty {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-500);
+  text-align: center;
+  padding: 40px 0;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.op-rail-ticket-id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-600);
+  letter-spacing: 0.08em;
+}
+
+.op-rail-ticket-title {
+  font-family: var(--font-serif);
+  font-size: 20px;
+  color: var(--ink-950);
+}
+
+.op-rail-live-log {
+  flex: 1;
+  max-height: 420px;
+  overflow-y: auto;
+  border: var(--rule);
+  background: var(--ink-050);
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column-reverse; /* Newest on top */
+  gap: 4px;
+}
+
+.op-rail-log-line {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-800);
+  display: grid;
+  grid-template-columns: 60px 90px 1fr;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: var(--rule-dim);
+  animation: operator-log-in 180ms ease-out;
+}
+
+.op-rail-log-line:last-child {
+  border-bottom: none;
+}
+
+.op-rail-log-time {
+  color: var(--ink-500);
+}
+
+.op-rail-log-team {
+  color: var(--signal-active);
+}
+
+.op-rail-log-msg {
+  color: var(--ink-900);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.op-rail-log-conn {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-500);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 6px 0;
+}
+
+.op-rail-log-conn.is-err {
+  color: var(--signal-err);
+}

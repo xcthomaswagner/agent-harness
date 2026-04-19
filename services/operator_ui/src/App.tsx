@@ -6,6 +6,7 @@ import {
   HomeView,
   LearningView,
   PRDetailView,
+  TicketsView,
   TraceDetailView,
   TracesView,
 } from "./views";
@@ -31,13 +32,7 @@ function ViewFor({ route }: { route: Route }) {
     case "home":
       return <HomeView />;
     case "tickets":
-      return (
-        <ViewHead
-          sup="Pipeline · tickets"
-          title="Tickets"
-          sub="Live pipeline board."
-        />
-      );
+      return <TicketsView />;
     case "traces":
       return <TracesView />;
     case "trace-detail":
