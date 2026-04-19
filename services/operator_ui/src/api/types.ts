@@ -118,6 +118,42 @@ export interface AutonomyEscapedDefect {
   note: string;
 }
 
+// Learning candidates — schema matches learning_api._candidate_to_dict.
+export type LessonStatus =
+  | "proposed"
+  | "draft_ready"
+  | "approved"
+  | "applied"
+  | "snoozed"
+  | "rejected"
+  | "reverted"
+  | "stale";
+
+export interface LessonCandidate {
+  lesson_id: string;
+  detector_name: string;
+  pattern_key: string;
+  scope_key: string;
+  client_profile: string;
+  platform_profile: string;
+  status: LessonStatus;
+  status_reason: string;
+  severity: string;
+  frequency: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  updated_at: string;
+  pr_url: string | null;
+  merged_commit_sha: string | null;
+  proposed_delta_json: string;
+  next_review_at: string | null;
+}
+
+export interface LessonCandidatesResponse {
+  candidates: LessonCandidate[];
+  count: number;
+}
+
 export interface AutonomyResponse {
   profile: string;
   window_days: number;

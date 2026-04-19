@@ -1,7 +1,13 @@
 import { Layout, ViewHead } from "./chrome";
 import { useRoute } from "./router";
 import type { Route } from "./router";
-import { AutonomyView, HomeView, TraceDetailView, TracesView } from "./views";
+import {
+  AutonomyView,
+  HomeView,
+  LearningView,
+  TraceDetailView,
+  TracesView,
+} from "./views";
 
 /**
  * Top-level app. Layout renders the sidebar + topbar; the route decides
@@ -38,13 +44,7 @@ function ViewFor({ route }: { route: Route }) {
     case "autonomy":
       return <AutonomyView profile={route.profile} />;
     case "learning":
-      return (
-        <ViewHead
-          sup="Ops · learning"
-          title="Lessons"
-          sub="Proposed → applied triage queue."
-        />
-      );
+      return <LearningView />;
     case "pr-detail":
       return (
         <ViewHead
