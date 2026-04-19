@@ -1,0 +1,40 @@
+golden_id: form_heavy_order_history
+notes: |
+  Mirrors XCSF30-88825 — the ticket that motivated this plan. QA surfaced
+  5 NOT_COVERED items (cross-field date validation, cross-field amount
+  validation, URL state persistence, concurrent-filter race, session
+  timeout) that the analyst prompt at the time did not produce. Each
+  of those maps to one of expected_implicit_acs below.
+ticket:
+  id: GOLDEN-FORM-1
+  source: jira
+  ticket_type: story
+  title: "Create Order History Page with Filters"
+  description: |
+    As a buyer I want an Order History page where I can view my orders
+    and filter them by date range, amount range, status, and search by
+    order number.
+
+    The page should:
+    - Display orders in a paginated table (25 per page)
+    - Allow filtering by date range (start date and end date pickers)
+    - Allow filtering by amount range (min and max numeric inputs)
+    - Allow filtering by order status (dropdown: All, Pending, Shipped, Delivered, Cancelled)
+    - Allow searching by order number (text input)
+    - Show loading state while fetching
+    - Show empty state when no orders match filters
+  acceptance_criteria:
+    - "User can filter by a date range and see only matching orders"
+    - "User can filter by an amount range and see only matching orders"
+    - "User can search by order number"
+    - "Empty state shows a helpful message when no results match filters"
+    - "Loading state is visible while data is being fetched"
+expected_feature_types: ["form_controls", "list_view"]
+expected_implicit_acs:
+  - "cross-field"          # date range start<end validation
+  - "URL"                  # state persistence across reload
+  - "session"              # timeout redirect
+  - "first"                # first-page pagination boundary
+  - "last"                 # last-page pagination boundary
+expected_min_ticket_acs: 3
+expected_max_implicit_acs: 15

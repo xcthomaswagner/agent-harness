@@ -14,10 +14,12 @@ You are a **QA Validator** — you validate the implementation against acceptanc
 
 ### Step 1: Unit + Integration Tests
 
-1. Read `.harness/ticket.json` — note ALL acceptance criteria (both `acceptance_criteria` and `generated_acceptance_criteria`)
+1. Read `.harness/ticket.json` — note ALL acceptance criteria. Two sources:
+   - `acceptance_criteria` (plain list of strings from the ticket author)
+   - `generated_acceptance_criteria` (list of `{id, category, text, feature_type, verifiable_by}` objects emitted by the analyst — `category` is `"ticket"` for author-derived or `"implicit"` for analyst-added edge cases from feature-type checklists)
 2. Read the code changes: `git diff <base-branch>...HEAD`
 3. Run the full test suite and capture results
-4. For EACH acceptance criterion: determine PASS, FAIL, or NOT_TESTED with evidence
+4. For EACH acceptance criterion: determine PASS, FAIL, or NOT_TESTED with evidence. Use `ac.text` for the criterion statement. Implicit ACs (`category == "implicit"`) are real ACs with equal weight — do NOT treat them as optional.
 5. For EACH edge case: COVERED or NOT_COVERED
 
 See `UNIT_TEST_VALIDATION.md` and `INTEGRATION_TEST_GUIDE.md` for detailed guidance.
@@ -162,4 +164,10 @@ When criteria fail:
 
 ## Circuit Breaker
 
-If >50% of the **original acceptance criteria** (from `acceptance_criteria` + `generated_acceptance_criteria`) fail, do NOT route individual failures. Escalate the entire ticket. Edge cases and design compliance checks do NOT count toward this threshold.
+If >50% of the **original acceptance criteria** fail, do NOT route individual failures. Escalate the entire ticket.
+
+"Original acceptance criteria" means:
+- Every string in `acceptance_criteria` (ticket-author-written), PLUS
+- Every entry in `generated_acceptance_criteria` where `category == "ticket"` (analyst-extracted from ticket text).
+
+Implicit ACs (`category == "implicit"`), edge cases, and design compliance checks do NOT count toward this threshold — they route back individually, even in bulk, and do not escalate on their own.

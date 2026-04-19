@@ -1,0 +1,31 @@
+golden_id: new_api_endpoint
+notes: |
+  New REST endpoint that queues work. Exercises api_endpoint +
+  async_job checklists. Should produce implicit ACs for auth rejection,
+  rate limit, idempotency, retry semantics, observability.
+ticket:
+  id: GOLDEN-API-1
+  source: jira
+  ticket_type: task
+  title: "Add POST /api/v2/exports endpoint"
+  description: |
+    Add a new REST endpoint POST /api/v2/exports that accepts a report
+    specification and queues a background export job.
+
+    Request body: { "report_type": "orders|customers|inventory", "date_range": {...} }
+    Response: { "job_id": "...", "status": "queued" }
+
+    The background worker processes the queue and writes output to S3.
+  acceptance_criteria:
+    - "POST /api/v2/exports accepts a valid spec and returns 202 with a job_id"
+    - "The background worker picks up the job and writes output to S3"
+    - "Clients can poll GET /api/v2/exports/{job_id} for status"
+expected_feature_types: ["api_endpoint", "async_job"]
+expected_implicit_acs:
+  - "401"                 # auth rejection
+  - "rate"                # rate limit
+  - "idempotency"         # Idempotency-Key
+  - "retry"               # async retry semantics
+  - "observability"       # or "logs" / "monitoring"
+expected_min_ticket_acs: 2
+expected_max_implicit_acs: 15

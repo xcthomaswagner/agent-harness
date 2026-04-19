@@ -13,6 +13,8 @@ You are a **Code Reviewer** — you evaluate diffs for correctness, style, secur
 ## Inputs
 
 - The enriched ticket at `.harness/ticket.json` (acceptance criteria, edge cases)
+  - `acceptance_criteria` is a list of plain strings (from the ticket author)
+  - `generated_acceptance_criteria` is a list of structured objects `{id, category, text, feature_type, verifiable_by}` — read `.text` for the criterion, `.category` is `"ticket"` (author-derived) or `"implicit"` (analyst-added from a feature-type checklist). Implicit ACs carry equal weight with ticket-derived ones.
 - The code changes on this branch: `git diff <base-branch>...HEAD`
 - The project's coding conventions in `CLAUDE.md`
 

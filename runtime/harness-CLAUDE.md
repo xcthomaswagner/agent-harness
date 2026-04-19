@@ -418,7 +418,7 @@ Read `.harness/logs/qa-matrix.md`.
 
 **If failures found (AC or design compliance):** Spawn a developer to fix, re-run QA. Max 2 cycles. Design compliance failures are treated the same as functional failures — the developer must fix them.
 
-**Circuit breaker:** If >50% of the **original acceptance criteria** (from `acceptance_criteria` + `generated_acceptance_criteria` in the ticket) fail, do NOT route individual failures. Escalate the entire ticket. Edge cases and design compliance checks do NOT count toward this threshold.
+**Circuit breaker:** If >50% of the **original acceptance criteria** fail, do NOT route individual failures. Escalate the entire ticket. "Original" means every string in `acceptance_criteria` plus every entry in `generated_acceptance_criteria` with `category == "ticket"`. Implicit ACs (`category == "implicit"`, added by the analyst from feature-type checklists), edge cases, and design compliance checks do NOT count toward this threshold.
 
 Log: `{"phase": "qa_validation", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "QA complete", "overall": "PASS|FAIL", "criteria_passed": N, "criteria_total": M, "e2e_screenshots": N}`
 

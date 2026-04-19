@@ -1,0 +1,31 @@
+golden_id: crud_buyer_account
+notes: |
+  Admin panel CRUD. Classic crud_mutation triggers: create, edit,
+  delete. Should produce implicit ACs for concurrent modification,
+  audit trail, authorization.
+ticket:
+  id: GOLDEN-CRUD-1
+  source: jira
+  ticket_type: story
+  title: "Add Create/Edit/Delete actions for Buyer Accounts"
+  description: |
+    Admin users need to manage buyer accounts on the admin panel.
+
+    Requirements:
+    - Create a new buyer account (name, email, company, status)
+    - Edit existing buyer account fields
+    - Delete buyer account (soft delete, preserves audit trail)
+    - List all buyer accounts in a sortable table
+  acceptance_criteria:
+    - "Admin can create a buyer account"
+    - "Admin can edit buyer account fields"
+    - "Admin can soft-delete a buyer account"
+    - "Buyer accounts appear in a sortable table"
+expected_feature_types: ["crud_mutation", "list_view"]
+expected_implicit_acs:
+  - "concurrent"          # concurrent modification / optimistic lock
+  - "audit"               # audit trail entry
+  - "permission"          # authorization check
+  - "sort"                # list_view sort stability
+expected_min_ticket_acs: 3
+expected_max_implicit_acs: 12

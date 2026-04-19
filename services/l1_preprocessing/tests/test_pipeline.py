@@ -749,7 +749,10 @@ class TestWriteTicketJson:
             content = path.read_text()
             parsed = json.loads(content)
             assert parsed["id"] == "PIPE-10"
-            assert parsed["generated_acceptance_criteria"] == ["AC1"]
+            assert [ac["text"] for ac in parsed["generated_acceptance_criteria"]] == ["AC1"]
+            assert all(
+                ac["category"] == "ticket" for ac in parsed["generated_acceptance_criteria"]
+            )
         finally:
             path.unlink()
 

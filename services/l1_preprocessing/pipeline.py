@@ -531,7 +531,7 @@ class Pipeline:
         if enriched.callback and (enriched.generated_acceptance_criteria or enriched.edge_cases):
             parts = []
             if enriched.generated_acceptance_criteria:
-                ac_text = "\n".join(f"- {ac}" for ac in enriched.generated_acceptance_criteria)
+                ac_text = "\n".join(f"- {ac.text}" for ac in enriched.generated_acceptance_criteria)
                 parts.append(f"*AI Analyst — Generated Acceptance Criteria:*\n\n{ac_text}")
             if enriched.edge_cases:
                 ec_text = "\n".join(f"- {ec}" for ec in enriched.edge_cases)
