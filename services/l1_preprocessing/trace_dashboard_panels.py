@@ -85,7 +85,7 @@ def _tool_color(tool_name: str) -> str:
 # shared across every panel in this module.
 
 
-def _ticket_id_from_entries(entries: list[dict]) -> str:
+def _ticket_id_from_entries(entries: list[dict[str, Any]]) -> str:
     """Best-effort ticket_id extraction for URL interpolation."""
     for entry in entries:
         tid = entry.get("ticket_id")
@@ -283,7 +283,7 @@ _INPUT_TRUNCATE = 200
 _RESULT_TRUNCATE = 500
 
 
-def _extract_tool_event(event: dict) -> dict | None:
+def _extract_tool_event(event: dict[str, Any]) -> dict[str, Any] | None:
     """Extract tool_use / tool_result info from a stream event.
 
     Returns a normalized dict with keys: kind, tool, input, result, ts.
@@ -333,9 +333,9 @@ def _extract_tool_event(event: dict) -> dict | None:
     return None
 
 
-def _read_stream_events(path: Path, limit: int) -> tuple[list[dict], int]:
+def _read_stream_events(path: Path, limit: int) -> tuple[list[dict[str, Any]], int]:
     """Read up to ``limit`` tool events from an NDJSON file. Returns (events, total_lines)."""
-    events: list[dict] = []
+    events: list[dict[str, Any]] = []
     total_lines = 0
     try:
         with path.open("r", encoding="utf-8", errors="replace") as f:
@@ -362,7 +362,7 @@ def _read_stream_events(path: Path, limit: int) -> tuple[list[dict], int]:
     return events, total_lines
 
 
-def _render_timeline_row(event: dict) -> str:
+def _render_timeline_row(event: dict[str, Any]) -> str:
     """Render a single timeline row with a <details> show-full toggle."""
     tool = event.get("tool", "")
     line = event.get("line", "?")
@@ -732,7 +732,7 @@ def _has_any_session_artifact(
 
 
 def _render_raw_downloads_panel(
-    entries: list[dict], artifacts: dict[str, dict[str, Any]]
+    entries: list[dict[str, Any]], artifacts: dict[str, dict[str, Any]]
 ) -> str:
     """Render the raw downloads panel with an un-redacted warning."""
     if not _has_any_session_artifact(artifacts):
@@ -762,7 +762,7 @@ def _render_raw_downloads_panel(
 # --- Public entry point ---
 
 
-def render_session_panels(entries: list[dict]) -> str:
+def render_session_panels(entries: list[dict[str, Any]]) -> str:
     """Render the session observability panels for a trace detail page.
 
     Reads the four artifact types produced by commit 1 (session.log,
@@ -791,7 +791,7 @@ def render_session_panels(entries: list[dict]) -> str:
     return "".join(p for p in parts if p)
 
 
-def render_tool_usage_panel(entries: list[dict]) -> str:
+def render_tool_usage_panel(entries: list[dict[str, Any]]) -> str:
     """Render just the Tool Usage panel. Separated so the caller can
     place it independently from the other session panels."""
     if not entries:

@@ -63,7 +63,6 @@ from claim_store import _webhook_counters as _webhook_counters
 from claim_store import _webhook_counters_lock as _webhook_counters_lock
 from client_profile import find_profile_by_ado_project as find_profile_by_ado_project
 from completion import _BRANCH_PATTERN as _BRANCH_PATTERN
-from completion import _is_safe_branch as _is_safe_branch
 from completion import _TICKET_ID_PATTERN as _TICKET_ID_PATTERN
 from completion import _VALID_PHASES as _VALID_PHASES
 from completion import CompletionPayload as CompletionPayload
@@ -71,6 +70,7 @@ from completion import FailedUnit as FailedUnit
 from completion import RetestPayload as RetestPayload
 from completion import _derive_head_sha as _derive_head_sha
 from completion import _derive_repo_full_name as _derive_repo_full_name
+from completion import _is_safe_branch as _is_safe_branch
 from completion import _resolve_worktree_dir as _resolve_worktree_dir
 from completion import _validate_ticket_id as _validate_ticket_id
 from completion import router as completion_router

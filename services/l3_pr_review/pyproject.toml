@@ -43,6 +43,13 @@ line-length = 100
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
 ignore = ["N999"]
 
+[tool.ruff.lint.per-file-ignores]
+# autonomy_policy._cached_l1_get uses a legacy TypeVar because mypy 1.20.1
+# does not yet infer the generic return type through PEP 695 `[T]` syntax
+# at call sites — the no-any-return warnings then leak to callers.
+# Revisit when mypy catches up.
+"autonomy_policy.py" = ["UP047"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true

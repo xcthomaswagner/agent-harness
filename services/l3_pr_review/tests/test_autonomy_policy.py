@@ -304,7 +304,9 @@ async def test_fetch_auto_merge_enabled_happy() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_recommended_mode_sends_autonomy_admin_token(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_fetch_recommended_mode_sends_autonomy_admin_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """When AUTONOMY_ADMIN_TOKEN is set, L3 forwards it on /api/autonomy GETs."""
     monkeypatch.setenv("AUTONOMY_ADMIN_TOKEN", "admin-secret")
     client = _mock_httpx_client(
@@ -317,7 +319,9 @@ async def test_fetch_recommended_mode_sends_autonomy_admin_token(monkeypatch: py
 
 
 @pytest.mark.asyncio
-async def test_fetch_recommended_mode_omits_header_when_no_token(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_fetch_recommended_mode_omits_header_when_no_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """When no token configured, header is omitted (not sent as empty string)."""
     monkeypatch.delenv("AUTONOMY_ADMIN_TOKEN", raising=False)
     client = _mock_httpx_client(
@@ -330,7 +334,9 @@ async def test_fetch_recommended_mode_omits_header_when_no_token(monkeypatch: py
 
 
 @pytest.mark.asyncio
-async def test_fetch_auto_merge_enabled_sends_autonomy_admin_token(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_fetch_auto_merge_enabled_sends_autonomy_admin_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """auto-merge-toggle GET also forwards the token."""
     monkeypatch.setenv("AUTONOMY_ADMIN_TOKEN", "admin-secret")
     client = _mock_httpx_client(200, {"enabled": True})

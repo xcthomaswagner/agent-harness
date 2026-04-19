@@ -32,6 +32,15 @@ dev = [
 requires = ["setuptools>=75.0"]
 build-backend = "setuptools.build_meta"
 
+# Explicit package declaration — auto-discovery fails with 3+ top-level
+# packages (adapters, learning_miner, autonomy_store) plus ~35 top-level
+# modules. Tests run via `pythonpath = ["."]` so nothing needs to be
+# importable as an installed package; declaring an empty package set
+# keeps `pip install -e ".[dev]"` happy without forcing a src-layout.
+[tool.setuptools]
+packages = []
+py-modules = []
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

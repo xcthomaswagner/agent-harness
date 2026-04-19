@@ -81,9 +81,7 @@ def _is_safe_branch(name: str) -> bool:
         return False
     if name.startswith("/") or name.endswith("/"):
         return False
-    if name.endswith(".lock"):
-        return False
-    return True
+    return not name.endswith(".lock")
 
 
 _VALID_PHASES = {"qa", "e2e", "review"}

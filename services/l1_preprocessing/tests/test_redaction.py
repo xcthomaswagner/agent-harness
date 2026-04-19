@@ -115,7 +115,7 @@ def test_salesforce_session_negative() -> None:
 
 def test_bearer_header_redacted() -> None:
     text = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345"
-    out, n = redact(text)
+    out, _n = redact(text)
     assert "Bearer [REDACTED]" in out
     assert "abcdefghijklmnopqrstuvwxyz012345" not in out
 
@@ -140,7 +140,7 @@ def test_bearer_all_caps_redacted() -> None:
 
 def test_git_url_basic_auth_redacted() -> None:
     text = "origin https://alice:supersecret@github.com/foo/bar.git"
-    out, n = redact(text)
+    out, _n = redact(text)
     assert "https://[REDACTED]@github.com/foo/bar.git" in out
     assert "alice" not in out
     assert "supersecret" not in out
@@ -155,7 +155,7 @@ def test_git_url_without_credentials_negative() -> None:
 
 def test_json_access_token_redacted() -> None:
     text = '{"access_token": "very-long-opaque-token-value"}'
-    out, n = redact(text)
+    out, _n = redact(text)
     assert '"access_token":"[REDACTED]"' in out
     assert "very-long-opaque-token-value" not in out
 
@@ -181,14 +181,14 @@ def test_json_access_token_pascalcase_redacted() -> None:
 
 def test_json_password_redacted() -> None:
     text = '{"password": "hunter2"}'
-    out, n = redact(text)
+    out, _n = redact(text)
     assert '"password":"[REDACTED]"' in out
     assert "hunter2" not in out
 
 
 def test_json_password_negative() -> None:
     text = '{"password_reset_link": "https://example.com/reset"}'
-    out, n = redact(text)
+    out, _n = redact(text)
     # The link itself may or may not match, but the field name alone
     # should not trigger the password-field replacement.
     assert '"password":"[REDACTED]"' not in out
@@ -206,7 +206,7 @@ def test_json_password_all_caps_redacted() -> None:
 
 def test_json_api_key_redacted() -> None:
     text = '{"api_key": "service-account-abc-123"}'
-    out, n = redact(text)
+    out, _n = redact(text)
     assert '"api_key":"[REDACTED]"' in out
     assert "service-account-abc-123" not in out
 
@@ -230,7 +230,7 @@ def test_json_api_key_pascalcase_redacted() -> None:
 
 def test_google_api_key_redacted() -> None:
     text = "key=AIzaSyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-    out, n = redact(text)
+    out, _n = redact(text)
     assert "[GOOGLE_API_KEY_REDACTED]" in out
     assert "AAAAAAAAAAAAAAAAAAAAAAAAA" not in out
 
@@ -268,7 +268,7 @@ def test_openssh_private_key_block_redacted() -> None:
         "b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAG\n"
         "-----END OPENSSH PRIVATE KEY-----"
     )
-    out, n = redact(text)
+    out, _n = redact(text)
     assert "[PRIVATE_KEY_REDACTED]" in out
     assert "b3BlbnNzaC1rZXk" not in out
 
@@ -279,14 +279,14 @@ def test_jwt_redacted() -> None:
         "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
         "abcdefghijklmnopqrstuvwxyz012345"
     )
-    out, n = redact(text)
+    out, _n = redact(text)
     assert "[JWT_REDACTED]" in out
     assert "eyJhbGciOiJIUzI1NiJ9" not in out
 
 
 def test_aws_access_key_id_redacted() -> None:
     text = "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE"
-    out, n = redact(text)
+    out, _n = redact(text)
     assert "[AWS_KEY_REDACTED]" in out
     assert "AKIAIOSFODNN7EXAMPLE" not in out
 
@@ -317,7 +317,7 @@ def test_gcp_service_account_block_redacted() -> None:
         '"private_key_id": "abc123", '
         '"private_key": "-----BEGIN PRIVATE KEY-----\\nMIIE...\\n-----END PRIVATE KEY-----\\n"}'
     )
-    out, n = redact(text)
+    out, _n = redact(text)
     assert "[GCP_SERVICE_ACCOUNT_REDACTED]" in out
     assert "my-project" not in out
 
@@ -374,7 +374,7 @@ def test_entropy_skips_lines_with_existing_redaction_placeholder() -> None:
     # substring that contains ``REDACTED`` is skipped, so the placeholder
     # survives idempotent rerun.)
     text = "token=sk-ant-" + "A" * 35 + " trailing"
-    first, first_n = redact(text)
+    first, _first_n = redact(text)
     second, second_n = redact(first)
     assert first == second
     assert second_n == 0

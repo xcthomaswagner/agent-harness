@@ -119,7 +119,8 @@ def _extract_ticket_payload(
         )
         try:
             if candidate.exists():
-                return json.loads(candidate.read_text())
+                loaded: dict[str, Any] = json.loads(candidate.read_text())
+                return loaded
         except (OSError, json.JSONDecodeError):
             pass
 
