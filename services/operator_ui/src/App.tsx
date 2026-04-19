@@ -1,6 +1,7 @@
 import { Layout, ViewHead } from "./chrome";
 import { useRoute } from "./router";
 import type { Route } from "./router";
+import { HomeView } from "./views";
 
 /**
  * Top-level app. Layout renders the sidebar + topbar; the route decides
@@ -21,15 +22,7 @@ export function App() {
 function ViewFor({ route }: { route: Route }) {
   switch (route.name) {
     case "home":
-      return (
-        <ViewHead
-          sup="Overview · home"
-          title="Mission control"
-          sub="Harness activity across all client profiles."
-          rnum="—"
-          rlabel="Runs · 24h"
-        />
-      );
+      return <HomeView />;
     case "tickets":
       return (
         <ViewHead

@@ -1,0 +1,160 @@
+/* ============ Shared view scaffolding ============ */
+
+.op-section {
+  margin-bottom: 44px;
+}
+
+/* ============ Home — profile cards ============ */
+.op-profiles-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0;
+  border-top: var(--rule);
+  border-left: var(--rule);
+}
+
+.op-profile-card {
+  border-right: var(--rule);
+  border-bottom: var(--rule);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--ink-050);
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    transform 0.15s ease;
+  text-decoration: none;
+  color: inherit;
+}
+
+.op-profile-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+  text-decoration: none;
+}
+
+.op-profile-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.op-profile-name {
+  font-family: var(--font-serif);
+  font-size: 22px;
+  color: var(--ink-950);
+}
+
+.op-profile-sample {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-500);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.op-profile-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border: var(--rule);
+  background: var(--ink-000);
+}
+
+.op-profile-metric {
+  padding: 10px 12px;
+  border-right: var(--rule);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.op-profile-metric:last-child {
+  border-right: none;
+}
+
+.op-profile-metric-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--ink-500);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.op-profile-metric-val {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  color: var(--ink-900);
+}
+
+.op-profile-metric-val.is-missing {
+  color: var(--ink-500);
+}
+
+.op-profile-footer {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ============ Lessons strip ============ */
+.op-lessons-strip {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  border: var(--rule);
+}
+
+.op-lessons-cell {
+  padding: 18px 16px;
+  border-right: var(--rule);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--ink-050);
+  cursor: pointer;
+  transition: background 0.12s ease;
+  color: inherit;
+  text-decoration: none;
+}
+
+.op-lessons-cell:hover {
+  background: var(--ink-100);
+  text-decoration: none;
+}
+
+.op-lessons-cell:last-child {
+  border-right: none;
+}
+
+.op-lessons-cell-n {
+  font-family: var(--font-serif);
+  font-size: 32px;
+  line-height: 1;
+  color: var(--ink-950);
+}
+
+.op-lessons-cell-lbl {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-600);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+/* ============ Data-state banners ============ */
+.op-loading,
+.op-error,
+.op-empty {
+  padding: 40px 24px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-500);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.op-error {
+  color: var(--signal-err);
+}

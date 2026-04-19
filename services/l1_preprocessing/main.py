@@ -100,6 +100,7 @@ from tracer import (
     generate_trace_id,
 )
 from operator_api import router as operator_router
+from operator_api_data import router as operator_data_router
 from unified_dashboard import router as unified_router
 from webhooks import _dispatch_ticket as _dispatch_ticket
 from webhooks import _enqueue_or_background as _enqueue_or_background
@@ -151,11 +152,14 @@ app.include_router(completion_router)
 # global dashboard-auth dependency to keep both routes on the same
 # permission surface.
 app.include_router(live_stream_router)
+# operator_api_data serves /api/operator/* JSON endpoints. Mount BEFORE
+# operator_router so the SPA catch-all route (/operator/{path:path})
+# doesn't swallow requests intended for /api/operator/*.
+app.include_router(operator_data_router)
 # operator_api serves the /operator Preact SPA. Auth is applied
 # per-route inside the module (query-param-or-header on HTML shell,
 # none on static assets). Mount LAST so the SPA catch-all route
-# doesn't shadow /api/operator/* JSON endpoints landing in later
-# commits.
+# doesn't shadow any other app route.
 app.include_router(operator_router)
 
 
