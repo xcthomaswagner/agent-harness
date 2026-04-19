@@ -1,9 +1,13 @@
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  esbuild: {
-    jsx: "automatic",
-    jsxImportSource: "preact",
+  // Vitest 4 ships with oxc by default; configure JSX there rather than on
+  // esbuild so both code paths don't fire during transform.
+  oxc: {
+    jsx: {
+      runtime: "automatic",
+      importSource: "preact",
+    },
   },
   resolve: {
     alias: {
