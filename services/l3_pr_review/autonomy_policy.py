@@ -10,7 +10,10 @@ from typing import Any, TypeVar
 import httpx
 import structlog
 
-_T = TypeVar("_T")
+# Kept as legacy TypeVar rather than PEP 695 [T] syntax: mypy 1.20.1 doesn't
+# yet infer the generic return type through _cached_l1_get with PEP 695,
+# so the no-any-return warnings leak into the caller sites.
+T = TypeVar("T")
 
 logger = structlog.get_logger()
 
@@ -74,14 +77,14 @@ async def _cached_l1_get(
     cache_key: str,
     url: str,
     *,
-    fail_closed: _T,
-    parse: Callable[[dict[str, Any]], _T],
+    fail_closed: T,
+    parse: Callable[[dict[str, Any]], T],
     params: dict[str, str] | None = None,
     headers: dict[str, str] | None = None,
     log_event: str | None = None,
     log_context: dict[str, Any] | None = None,
     client: httpx.AsyncClient | None = None,
-) -> _T:
+) -> T:
     """Shared GET-with-cache for the three ``fetch_*`` helpers.
 
     Each caller used to duplicate ~25 lines of cache check → owns_client
