@@ -165,17 +165,32 @@ class TicketAnalyst:
         return path.read_text()
 
     def _build_system_prompt(self, ticket_type: TicketType) -> str:
-        """Compose the system prompt from skill files + rubric for the ticket type."""
+        """Compose the system prompt from skill files + rubric for the ticket type.
+
+        ``IMPLICIT_REQUIREMENTS.md`` is loaded unconditionally because the
+        analyst is a single Opus API call — it cannot follow cross-file
+        references at generation time. The feature-type checklists must be
+        inline in the prompt string or the Step-5 classification instructions
+        in SKILL.md have no content to draw from.
+        """
         skill_md = self._load_skill_file("SKILL.md")
         rubric_file = _RUBRIC_FILES.get(ticket_type, "RUBRIC_TASK.md")
         rubric_md = self._load_skill_file(rubric_file)
+        implicit_requirements_md = self._load_skill_file("IMPLICIT_REQUIREMENTS.md")
         ac_template = self._load_skill_file("TEMPLATES/acceptance_criteria.md")
         test_template = self._load_skill_file("TEMPLATES/test_scenarios.md")
         info_template = self._load_skill_file("TEMPLATES/info_request.md")
 
         return "\n\n---\n\n".join(
             part
-            for part in [skill_md, rubric_md, ac_template, test_template, info_template]
+            for part in [
+                skill_md,
+                rubric_md,
+                implicit_requirements_md,
+                ac_template,
+                test_template,
+                info_template,
+            ]
             if part
         )
 
@@ -492,12 +507,23 @@ class TicketAnalyst:
             if isinstance(ts, dict)
         ]
 
-        # Build enriched ticket from original + analyst additions
+        # Build enriched ticket from original + analyst additions.
+        # The analyst emits structured `AcceptanceCriterion` dicts post
+        # implicit-requirements rollout; the Pydantic ``mode="before"``
+        # validator on ``EnrichedTicket`` tolerates legacy ``list[str]``
+        # payloads from older analyst versions by wrapping them as
+        # ``category=ticket`` entries.
         enriched_data = ticket.model_dump()
         enriched_data.update(
             generated_acceptance_criteria=_safe_list(
                 parsed.get("generated_acceptance_criteria")
             ),
+            detected_feature_types=[
+                str(ft)
+                for ft in _safe_list(parsed.get("detected_feature_types"))
+                if isinstance(ft, str)
+            ],
+            classification_reasoning=parsed.get("classification_reasoning") or "",
             test_scenarios=test_scenarios,
             edge_cases=_safe_list(parsed.get("edge_cases")),
             size_assessment=size_assessment,
