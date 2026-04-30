@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from auth import _require_dashboard_auth
 from autonomy_metrics import (
@@ -65,6 +66,192 @@ def _db_path_from_settings() -> Path:
     import main
 
     return resolve_db_path(main.settings.autonomy_db_path)
+
+
+_MODEL_POLICY_PATH = Path(__file__).resolve().parents[2] / "data" / "operator_model_policy.json"
+_MODEL_OPTIONS: tuple[str, ...] = (
+    "default",
+    "opus",
+    "sonnet",
+    "claude-opus-4-20250514",
+    "claude-sonnet-4-20250514",
+)
+_REASONING_OPTIONS: tuple[str, ...] = ("default", "low", "standard", "high")
+_MODEL_POLICY_ROLES: tuple[dict[str, str], ...] = (
+    {
+        "role": "analyst",
+        "label": "Analyst",
+        "model": "claude-opus-4-20250514",
+        "reasoning": "high",
+    },
+    {"role": "team_lead", "label": "Team Lead", "model": "opus", "reasoning": "high"},
+    {"role": "planner", "label": "Planner", "model": "opus", "reasoning": "high"},
+    {
+        "role": "developer",
+        "label": "Developer",
+        "model": "opus",
+        "reasoning": "high",
+    },
+    {
+        "role": "code_reviewer",
+        "label": "Code Reviewer",
+        "model": "opus",
+        "reasoning": "high",
+    },
+    {"role": "judge", "label": "Judge", "model": "sonnet", "reasoning": "standard"},
+    {"role": "qa", "label": "QA", "model": "sonnet", "reasoning": "standard"},
+    {
+        "role": "merge_coordinator",
+        "label": "Merge Coordinator",
+        "model": "sonnet",
+        "reasoning": "standard",
+    },
+    {
+        "role": "run_reflector",
+        "label": "Run Reflector",
+        "model": "opus",
+        "reasoning": "high",
+    },
+    {
+        "role": "l3_pr_review",
+        "label": "L3 PR Review",
+        "model": "opus",
+        "reasoning": "high",
+    },
+    {
+        "role": "l3_ci_fix",
+        "label": "L3 CI Fix",
+        "model": "sonnet",
+        "reasoning": "standard",
+    },
+    {
+        "role": "l3_comment_response",
+        "label": "L3 Comment Response",
+        "model": "sonnet",
+        "reasoning": "standard",
+    },
+)
+
+
+class ModelRoleSelection(BaseModel):
+    role: str = Field(min_length=1, max_length=64)
+    model: str = Field(min_length=1, max_length=128)
+    reasoning: str = Field(min_length=1, max_length=32)
+
+
+class ModelPolicyUpdate(BaseModel):
+    roles: list[ModelRoleSelection]
+
+
+def _default_model_policy() -> dict[str, Any]:
+    return {
+        "version": 1,
+        "source": "default",
+        "model_options": list(_MODEL_OPTIONS),
+        "reasoning_options": list(_REASONING_OPTIONS),
+        "roles": [dict(r) for r in _MODEL_POLICY_ROLES],
+    }
+
+
+def _read_model_policy_file() -> dict[str, Any]:
+    if not _MODEL_POLICY_PATH.is_file():
+        return _default_model_policy()
+    try:
+        raw = json.loads(_MODEL_POLICY_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return _default_model_policy()
+    if not isinstance(raw, dict):
+        return _default_model_policy()
+    defaults = _default_model_policy()
+    role_defaults = {r["role"]: r for r in defaults["roles"]}
+    configured = raw.get("roles")
+    if not isinstance(configured, list):
+        configured = []
+    configured_by_role: dict[str, dict[str, str]] = {}
+    valid_roles = set(role_defaults)
+    for row in configured:
+        if not isinstance(row, dict):
+            continue
+        role = str(row.get("role") or "")
+        if role not in valid_roles:
+            continue
+        model = str(row.get("model") or role_defaults[role]["model"])
+        reasoning = str(row.get("reasoning") or role_defaults[role]["reasoning"])
+        configured_by_role[role] = {
+            "role": role,
+            "label": role_defaults[role]["label"],
+            "model": model if model in _MODEL_OPTIONS else role_defaults[role]["model"],
+            "reasoning": (
+                reasoning
+                if reasoning in _REASONING_OPTIONS
+                else role_defaults[role]["reasoning"]
+            ),
+        }
+    roles = [
+        configured_by_role.get(r["role"], dict(r))
+        for r in defaults["roles"]
+    ]
+    return {
+        **defaults,
+        "source": "local",
+        "updated_at": str(raw.get("updated_at") or ""),
+        "roles": roles,
+    }
+
+
+def _write_model_policy_file(update: ModelPolicyUpdate) -> dict[str, Any]:
+    defaults = _default_model_policy()
+    default_by_role = {r["role"]: r for r in defaults["roles"]}
+    next_by_role = {r["role"]: dict(r) for r in defaults["roles"]}
+    for row in update.roles:
+        if row.role not in default_by_role:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown model policy role: {row.role}",
+            )
+        if row.model not in _MODEL_OPTIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unsupported model for {row.role}: {row.model}",
+            )
+        if row.reasoning not in _REASONING_OPTIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unsupported reasoning for {row.role}: {row.reasoning}",
+            )
+        next_by_role[row.role] = {
+            "role": row.role,
+            "label": default_by_role[row.role]["label"],
+            "model": row.model,
+            "reasoning": row.reasoning,
+        }
+    payload = {
+        "version": 1,
+        "updated_at": datetime.now(UTC).isoformat(),
+        "roles": [next_by_role[r["role"]] for r in defaults["roles"]],
+    }
+    _MODEL_POLICY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _MODEL_POLICY_PATH.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return _read_model_policy_file()
+
+
+@router.get("/model-policy")
+def get_model_policy() -> dict[str, Any]:
+    """Return the operator-local model selection policy.
+
+    The dashboard owns this file for now; the runtime model resolver can
+    consume the same JSON later without adding multi-user configuration.
+    """
+    return _read_model_policy_file()
+
+
+@router.put("/model-policy")
+def put_model_policy(update: ModelPolicyUpdate) -> dict[str, Any]:
+    """Persist operator-selected model/reasoning choices."""
+    return _write_model_policy_file(update)
 
 
 # Decisions that signal "auto-merge was eligible" (i.e., count in the

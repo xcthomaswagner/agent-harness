@@ -349,6 +349,7 @@ def test_profiles_auto_merge_rate_computed_from_decisions(
         "/api/operator/traces/HARN-1",
         "/api/operator/autonomy/xcsf30",
         "/api/operator/lessons/counts",
+        "/api/operator/model-policy",
         "/api/operator/tickets/HARN-1/agents",
         "/api/operator/pr/1",
     ],
@@ -413,6 +414,69 @@ def test_profiles_requires_auth(
 
 
 # ---------- /api/operator/lessons/counts ----------
+
+
+# ---------- /api/operator/model-policy ----------
+
+
+def test_model_policy_returns_defaults(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import operator_api_data as oad
+
+    monkeypatch.setattr(oad, "_MODEL_POLICY_PATH", tmp_path / "policy.json")
+    r = client.get("/api/operator/model-policy")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["source"] == "default"
+    roles = {row["role"]: row for row in data["roles"]}
+    assert roles["analyst"]["model"] == "claude-opus-4-20250514"
+    assert roles["team_lead"]["reasoning"] == "high"
+    assert roles["developer"]["model"] == "opus"
+    assert roles["run_reflector"]["model"] == "opus"
+    assert "sonnet" in data["model_options"]
+
+
+def test_model_policy_put_persists_operator_choices(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import operator_api_data as oad
+
+    policy_path = tmp_path / "policy.json"
+    monkeypatch.setattr(oad, "_MODEL_POLICY_PATH", policy_path)
+    current = client.get("/api/operator/model-policy").json()
+    roles = current["roles"]
+    for row in roles:
+        if row["role"] == "developer":
+            row["model"] = "sonnet"
+            row["reasoning"] = "standard"
+
+    r = client.put("/api/operator/model-policy", json={"roles": roles})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["source"] == "local"
+    saved = {row["role"]: row for row in data["roles"]}
+    assert saved["developer"]["model"] == "sonnet"
+    assert saved["developer"]["reasoning"] == "standard"
+    assert policy_path.is_file()
+
+    round_trip = client.get("/api/operator/model-policy").json()
+    assert {
+        row["role"]: row for row in round_trip["roles"]
+    }["developer"]["model"] == "sonnet"
+
+
+def test_model_policy_rejects_unknown_role(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import operator_api_data as oad
+
+    monkeypatch.setattr(oad, "_MODEL_POLICY_PATH", tmp_path / "policy.json")
+    r = client.put(
+        "/api/operator/model-policy",
+        json={"roles": [{"role": "other_user", "model": "opus", "reasoning": "high"}]},
+    )
+    assert r.status_code == 400
 
 
 # ---------- /api/operator/traces ----------

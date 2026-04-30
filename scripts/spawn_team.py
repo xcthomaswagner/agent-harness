@@ -30,9 +30,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR.parent / "services"))
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from worktree_safety import safe_remove_worktree  # noqa: E402
-
 from shared.env_sanitize import sanitized_env  # noqa: E402
+from shared.model_policy import resolve_model  # noqa: E402
+from worktree_safety import safe_remove_worktree  # noqa: E402
 
 
 def run_git(client_repo: str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -41,6 +41,62 @@ def run_git(client_repo: str, *args: str, check: bool = True) -> subprocess.Comp
         ["git", "-C", client_repo, *args],
         capture_output=True, text=True, check=check,
     )
+
+
+_AGENT_ROLE_BY_FILE: dict[str, str] = {
+    "code-reviewer.md": "code_reviewer",
+    "developer.md": "developer",
+    "judge.md": "judge",
+    "merge-coordinator.md": "merge_coordinator",
+    "plan-reviewer.md": "plan_reviewer",
+    "planner.md": "planner",
+    "qa.md": "qa",
+    "run-reflector.md": "run_reflector",
+    "team-lead.md": "team_lead",
+}
+
+
+def _rewrite_agent_model(frontmatter_text: str, model: str) -> str:
+    """Replace the first YAML-frontmatter ``model:`` line."""
+    return re.sub(
+        r"(?m)^model:\s*\S+\s*$",
+        f"model: {model}",
+        frontmatter_text,
+        count=1,
+    )
+
+
+def apply_model_policy_to_agents(worktree_dir: Path) -> None:
+    """Apply operator-selected models to injected Claude agent definitions.
+
+    The dashboard persists a local model policy. Agent Teams read model
+    defaults from each ``.claude/agents/*.md`` frontmatter file, so update
+    those injected copies after runtime injection. The source runtime files
+    stay unchanged and rollback is just removing the branch or deleting the
+    local policy file.
+    """
+    agents_dir = worktree_dir / ".claude" / "agents"
+    if not agents_dir.is_dir():
+        return
+    for filename, role in _AGENT_ROLE_BY_FILE.items():
+        path = agents_dir / filename
+        if not path.is_file():
+            continue
+        selection = resolve_model(role)
+        model = selection.claude_code_model
+        if model == "default":
+            continue
+        try:
+            current = path.read_text(encoding="utf-8")
+            updated = _rewrite_agent_model(current, model)
+            if updated != current:
+                path.write_text(updated, encoding="utf-8")
+                print(
+                    f"[spawn] Agent model: {filename} -> {model} "
+                    f"(reasoning={selection.reasoning})"
+                )
+        except OSError as exc:
+            print(f"[spawn] WARNING: Failed to apply model policy to {filename}: {exc}")
 
 
 def _trace_watcher(
@@ -275,6 +331,7 @@ def main() -> None:
         inject_args.extend(["--platform-profile", args.platform_profile])
 
     subprocess.run(inject_args, check=True)
+    apply_model_policy_to_agents(worktree_dir)
 
     # Verify injection created CLAUDE.md (critical for agent operation)
     claude_md = worktree_dir / "CLAUDE.md"
@@ -442,6 +499,12 @@ def main() -> None:
     print(f"[spawn] Worktree: {worktree_dir}")
     print(f"[spawn] Branch: {branch_name}")
     print(f"[spawn] Mode: {pipeline_mode}")
+    model_selection = resolve_model("team_lead")
+    print(
+        "[spawn] Model: "
+        f"{model_selection.claude_code_model} "
+        f"(reasoning={model_selection.reasoning})"
+    )
 
     if pipeline_mode == "quick":
         # Read quick-mode instructions from the shared file (single source of truth)
@@ -509,13 +572,16 @@ def main() -> None:
     try:
         with session_stream.open("w") as stream_file:
             try:
+                claude_cmd = [
+                    "claude", "-p", prompt,
+                    "--dangerously-skip-permissions",
+                    "--output-format", "stream-json",
+                    "--verbose",  # required by Claude Code headless when output-format=stream-json
+                ]
+                if model_selection.claude_code_model == "sonnet":
+                    claude_cmd.extend(["--model", model_selection.claude_code_model])
                 proc = subprocess.run(
-                    [
-                        "claude", "-p", prompt,
-                        "--dangerously-skip-permissions",
-                        "--output-format", "stream-json",
-                        "--verbose",  # required by Claude Code headless when output-format=stream-json
-                    ],
+                    claude_cmd,
                     cwd=str(worktree_dir),
                     env=env,
                     stdout=stream_file,

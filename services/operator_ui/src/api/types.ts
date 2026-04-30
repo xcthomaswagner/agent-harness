@@ -40,6 +40,22 @@ export interface LessonCountsResponse {
   counts: LessonCounts;
 }
 
+export interface ModelPolicyRole {
+  role: string;
+  label: string;
+  model: string;
+  reasoning: string;
+}
+
+export interface ModelPolicyResponse {
+  version: number;
+  source: "default" | "local";
+  updated_at?: string;
+  model_options: string[];
+  reasoning_options: string[];
+  roles: ModelPolicyRole[];
+}
+
 export type TraceStatus = "in-flight" | "stuck" | "queued" | "done";
 
 export interface TraceSummary {
