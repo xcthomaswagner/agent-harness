@@ -10,6 +10,7 @@
  */
 
 import { useEffect, useState } from "preact/hooks";
+import { apiKey } from "./api/key";
 
 const BASE = "/operator";
 
@@ -34,6 +35,13 @@ function stripBase(pathname: string): string {
 function joinBase(path: string): string {
   if (path === "/") return BASE + "/";
   return BASE + (path.startsWith("/") ? path : "/" + path);
+}
+
+function withApiKey(path: string): string {
+  const key = apiKey();
+  if (!key) return path;
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}api_key=${encodeURIComponent(key)}`;
 }
 
 export function parseRoute(path: string): Route {
@@ -65,10 +73,11 @@ export function parseRoute(path: string): Route {
 }
 
 export function navigate(path: string): void {
-  const full = joinBase(path);
   if (typeof window === "undefined") return;
-  if (window.location.pathname === full) return;
-  window.history.pushState({}, "", full);
+  const full = joinBase(path);
+  const href = withApiKey(full);
+  if (window.location.pathname + window.location.search === href) return;
+  window.history.pushState({}, "", href);
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
@@ -106,7 +115,7 @@ export function installGlobalLinkInterceptor(): () => void {
     const href = target.getAttribute("href") ?? "";
     if (!href.startsWith(BASE)) return;
     e.preventDefault();
-    if (window.location.pathname === href) return;
+    if (window.location.pathname + window.location.search === href) return;
     window.history.pushState({}, "", href);
     window.dispatchEvent(new PopStateEvent("popstate"));
   };
@@ -121,26 +130,35 @@ export function installGlobalLinkInterceptor(): () => void {
  * adding a route.
  */
 export function href(route: Route): string {
+  let path: string;
   switch (route.name) {
     case "home":
-      return joinBase("/");
+      path = joinBase("/");
+      break;
     case "tickets":
-      return joinBase("/tickets");
+      path = joinBase("/tickets");
+      break;
     case "traces":
-      return joinBase("/traces");
+      path = joinBase("/traces");
+      break;
     case "trace-detail":
-      return joinBase(`/traces/${encodeURIComponent(route.id)}`);
+      path = joinBase(`/traces/${encodeURIComponent(route.id)}`);
+      break;
     case "autonomy":
-      return joinBase(
+      path = joinBase(
         route.profile
           ? `/autonomy/${encodeURIComponent(route.profile)}`
           : "/autonomy",
       );
+      break;
     case "learning":
-      return joinBase("/learning");
+      path = joinBase("/learning");
+      break;
     case "pr-detail":
-      return joinBase(`/pr/${encodeURIComponent(route.id)}`);
+      path = joinBase(`/pr/${encodeURIComponent(route.id)}`);
+      break;
     default:
-      return joinBase("/");
+      path = joinBase("/");
   }
+  return withApiKey(path);
 }

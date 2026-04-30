@@ -1,0 +1,38 @@
+assertion_pattern: genaiplanner_to_genaiplannerbundle_v64_cutover
+category: sfdx_deployment
+priority: 3
+confidence: Verified (Primary)
+required_clouds: ["agentforce"]
+# Gate: fire only when the ticket actually touches Agentforce metadata (Bot,
+# BotVersion, GenAiFunction, GenAiPlugin, GenAiPlanner, GenAiPlannerBundle,
+# GenAiPromptTemplate, AiAuthoringBundle). A B2B Commerce ticket with a stale
+# sourceApiVersion but NO Agentforce work is covered by a different detector
+# (sourceapiversion_drift_blocks_new_metadata — not required_cloud-scoped).
+xcsf30_relevance: "Not yet hit; relevant for all Agentforce work going forward."
+trigger_conditions:
+  - cloud_match: detected_clouds must include "agentforce" (gate)
+  - ticket involves Agentforce, Bot, AI Agent, GenAI Agent deployment
+  - OR source tree contains `.genAiPlanner-meta.xml` OR `.genAiPlannerBundle-meta.xml` files
+detection_signals:
+  - sfdx-project.json `sourceApiVersion` < 60.0 with Agentforce metadata → blocks Agentforce entirely
+  - sfdx-project.json `sourceApiVersion` ≥ 64.0 but source tree has `.genAiPlanner-meta.xml` (v60-63 type) → will fail "Not available for deploy for this API version"
+  - sfdx-project.json `sourceApiVersion` 60.0-63.0 but source tree has `.genAiPlannerBundle-meta.xml` (v64+ type) → will fail
+  - dependency chain missing on target org: Bot / BotVersion / GenAiPromptTemplate / GenAiFunction / GenAiPlugin absent before Planner/Bundle deploy
+expected_agent_behavior:
+  - check sourceApiVersion as first step before any Agentforce deploy
+  - verify metadata type matches API version: v60-63 → GenAiPlanner, v64+ → GenAiPlannerBundle
+  - verify dependency chain exists on target before deploying Planner/Bundle
+  - flag version mismatch to user with specific fix (bump sourceApiVersion or switch metadata type)
+must_not_do:
+  - attempt deploy without version check
+  - rely on `--apiversion` CLI flag override (does not reliably override serialization layer)
+citations:
+  - https://developer.salesforce.com/docs/atlas.en-us.api_meta.meta/api_meta/meta_genaiplannerbundle.htm
+  - https://docs.gearset.com/en/articles/11728020-resolving-validation-errors-not-available-for-deploy-for-this-api-version-on-genaiplanner-metadata-type
+  - https://github.com/forcedotcom/cli/issues/3309
+  - https://docs.gearset.com/en/articles/12550109-agentforce-changes-in-the-winter-26-release
+frequency_in_community: high (every Agentforce project hits this at some point)
+verified_numeric_facts:
+  - GenAiPlanner supported on API v60.0 - v63.0
+  - GenAiPlannerBundle required on API v64.0 and later
+  - AiAuthoringBundle (Agent Scripts) requires v65+

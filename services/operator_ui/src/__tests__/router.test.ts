@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { href, parseRoute } from "../router";
 
 describe("parseRoute", () => {
@@ -73,5 +73,18 @@ describe("href", () => {
     expect(href({ name: "trace-detail", id: "a/b" })).toBe(
       "/operator/traces/a%2Fb",
     );
+  });
+
+  it("preserves bootstrapped api key in operator links", async () => {
+    vi.resetModules();
+    document.head.innerHTML = '<meta name="operator-api-key" content="sekret">';
+    const freshRouter = await import("../router");
+    expect(freshRouter.href({ name: "traces" })).toBe(
+      "/operator/traces?api_key=sekret",
+    );
+    expect(freshRouter.href({ name: "trace-detail", id: "HARN-1" })).toBe(
+      "/operator/traces/HARN-1?api_key=sekret",
+    );
+    document.head.innerHTML = "";
   });
 });

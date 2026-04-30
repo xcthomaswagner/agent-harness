@@ -133,9 +133,20 @@ def _count_pr_runs_in_window(
     completed = pr_runs merged in the last ``hours``.
     """
     since = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
-    recent = list_pr_runs(conn, client_profile=profile, since_iso=since)
-    in_flight = sum(1 for r in recent if not int(r["merged"]))
-    completed = sum(1 for r in recent if int(r["merged"]))
+    in_flight = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM pr_runs "
+            "WHERE client_profile = ? AND merged = 0",
+            (profile,),
+        ).fetchone()[0]
+    )
+    completed = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM pr_runs "
+            "WHERE client_profile = ? AND merged = 1 AND merged_at >= ?",
+            (profile, since),
+        ).fetchone()[0]
+    )
     return in_flight, completed
 
 
@@ -417,6 +428,9 @@ _PHASE_ALIASES: dict[str, str] = {
     "reviewer": "reviewing",
     "judge": "reviewing",
     "qa": "reviewing",
+    "pr_review_spawned": "reviewing",
+    "l3_review": "reviewing",
+    "l3_approval": "reviewing",
     "merge": "merging",
     "merge_coordinator": "merging",
     "pr": "merging",

@@ -1,0 +1,33 @@
+assertion_pattern: promotion_50_plus_50_cap
+category: cart_checkout_pricing
+priority: 5
+confidence: Verified (Primary)
+required_clouds: ["commerce_b2b", "commerce_b2c"]
+# Gate: the Promotion sObject + its 50/50 cap are Commerce-specific. Revenue
+# Cloud / CPQ has its own pricing rules (ProductRule, PriceRule, SBQQ__*) with
+# different constraints. Marketing Cloud Growth has "promotions" as campaign
+# concepts. Without the gate, a CPQ pricing ticket would falsely match on the
+# word "promotion".
+xcsf30_relevance: "Not yet hit; relevant for any promotions-heavy B2B store."
+trigger_conditions:
+  - cloud_match: detected_clouds must include "commerce_b2b" or "commerce_b2c" (gate)
+  - ticket involves: promotions, coupons, discounts, price adjustments, Price Cart, Pricing and Promotions API
+  - OR org has large promotion catalog (seasonal + loyalty + account-specific stacks)
+detection_signals:
+  - SOQL confirms: (SELECT COUNT() FROM Promotion WHERE IsActive=true AND PromotionTriggerType='Manual') > 50
+  - OR (SELECT COUNT() FROM Promotion WHERE IsActive=true AND PromotionTriggerType='Automatic') > 50
+  - AND complaint: "specific promotion never applies despite qualifying"
+expected_agent_behavior:
+  - clarify: "How many active promotions by type? The Evaluate API caps at 50 manual + 50 automatic by priority. Beyond that, silent exclusion."
+  - audit promotion priority ordering so business-critical promotions are in the top 50
+  - flag that Salesforce provides NO UI warning on this cap
+  - ALSO check: is the checkout flow missing the "Price Cart" action after the Evaluate API call? Evaluate computes but does not persist.
+must_not_do:
+  - recommend changing promotion configuration without confirming count
+  - assume promotion logic bug before checking the 50-cap
+citations:
+  - https://developer.salesforce.com/docs/commerce/salesforce-commerce/guide/b2b-d2c-comm-pricing-promotions-apis.html
+  - https://help.salesforce.com/s/articleView?id=commerce.comm_promotions_get_to_know.htm
+verified_numeric_facts:
+  - "50 active manual + 50 active automatic promotions (by priority)"
+verbatim_quote: "This API evaluates only the first 50 active manual promotions and first 50 active automatic promotions, based on priority."

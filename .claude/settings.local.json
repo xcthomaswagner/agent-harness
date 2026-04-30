@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p /Users/thomaswagner/.claude/skills/tw-code/evals/eval-0-fixtures /Users/thomaswagner/.claude/skills/tw-code/evals/eval-3-fixtures)",
+      "Bash(cat)"
+    ]
+  }
+}

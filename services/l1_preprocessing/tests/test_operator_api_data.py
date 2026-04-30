@@ -62,6 +62,7 @@ def _seed_pr_run(
     merged: int = 0,
     first_pass_accepted: int = 0,
     opened_at: str = "2026-04-18T12:00:00+00:00",
+    merged_at: str | None = None,
 ) -> int:
     conn = open_connection(db_path)
     try:
@@ -76,6 +77,7 @@ def _seed_pr_run(
                 head_sha=f"sha{pr_number}",
                 client_profile=client_profile,
                 opened_at=opened_at,
+                merged_at=merged_at,
                 first_pass_accepted=first_pass_accepted,
                 merged=merged,
             ),
@@ -198,6 +200,7 @@ def test_profiles_counts_in_flight_and_completed_24h(
         merged=1,
         first_pass_accepted=1,
         opened_at=recent_iso,
+        merged_at=recent_iso,
     )
 
     c = TestClient(_mk_app())
@@ -205,6 +208,52 @@ def test_profiles_counts_in_flight_and_completed_24h(
     assert r.status_code == 200
     [p] = r.json()["profiles"]
     assert p["id"] == "alpha"
+    assert p["in_flight"] == 1
+    assert p["completed_24h"] == 1
+
+
+def test_profiles_counts_long_running_and_recently_merged_by_correct_timestamps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+
+    profiles_dir = tmp_path / "client-profiles"
+    _write_profile(profiles_dir, "alpha")
+    import client_profile as cp_module
+
+    monkeypatch.setattr(cp_module, "PROFILES_DIR", profiles_dir)
+
+    from datetime import UTC, datetime, timedelta
+
+    old_opened = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+    recent_merged = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+
+    # Still-open PRs should count as in-flight even when opened before
+    # the 24h activity window.
+    _seed_pr_run(
+        db_path,
+        ticket_id="T-LONG",
+        pr_number=10,
+        client_profile="alpha",
+        merged=0,
+        opened_at=old_opened,
+    )
+    # Recently merged PRs should count by merged_at, not opened_at.
+    _seed_pr_run(
+        db_path,
+        ticket_id="T-MERGED",
+        pr_number=11,
+        client_profile="alpha",
+        merged=1,
+        opened_at=old_opened,
+        merged_at=recent_merged,
+    )
+
+    c = TestClient(_mk_app())
+    [p] = c.get("/api/operator/profiles").json()["profiles"]
     assert p["in_flight"] == 1
     assert p["completed_24h"] == 1
 
@@ -652,6 +701,39 @@ def test_trace_detail_marks_failed_phase(
     data = c.get("/api/operator/traces/HARN-FAIL").json()
     impl = next(p for p in data["phases"] if p["key"] == "implementing")
     assert impl["state"] == "fail"
+
+
+def test_trace_detail_maps_l3_only_phases_to_reviewing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    logs_dir = tmp_path / "logs"
+    import tracer as tracer_module
+
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    _write_rich_trace(
+        logs_dir,
+        "HARN-L3",
+        phases_events=[
+            ("pr_review_spawned", "review_spawned", "L3 review spawned"),
+            ("l3_approval", "review_approved", "Review approved"),
+        ],
+    )
+
+    c = TestClient(_mk_app())
+    data = c.get("/api/operator/traces/HARN-L3").json()
+    reviewing = next(p for p in data["phases"] if p["key"] == "reviewing")
+    assert reviewing["event_count"] >= 2
+    assert reviewing["state"] == "active"
 
 
 # ---------- /api/operator/autonomy/{profile} ----------

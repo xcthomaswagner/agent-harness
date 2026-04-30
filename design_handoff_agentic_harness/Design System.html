@@ -1,0 +1,1288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1280">
+<title>Agentic Harness — Design System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Instrument+Serif:ital@0;1&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* Surfaces — warm near-black, layered */
+    --ink-000: #0b0b0a;
+    --ink-050: #121211;
+    --ink-100: #1a1a18;
+    --ink-200: #22221f;
+    --ink-300: #2e2e2a;
+    --ink-400: #3c3c37;
+    --ink-500: #5a5a52;
+    --ink-600: #7d7d73;
+    --ink-700: #a8a89c;
+    --ink-800: #d4d4c6;
+    --ink-900: #ece9dc;   /* bone white */
+    --ink-950: #f7f5e8;   /* paper */
+
+    /* Signal colors */
+    --signal-active:   #ff7a1a;   /* running / in-flight */
+    --signal-active-2: #ffae5c;
+    --signal-ok:       #9db48a;   /* sage, passed */
+    --signal-warn:     #e8c46a;   /* stuck, clarify */
+    --signal-err:      #d26a5a;   /* failed */
+    --signal-cool:     #6c8fb0;   /* queued, info */
+
+    /* Typography */
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --font-sans: "IBM Plex Sans", -apple-system, system-ui, sans-serif;
+    --font-serif: "Instrument Serif", "Times New Roman", serif;
+
+    /* Rhythm */
+    --unit: 8px;
+    --gutter: 32px;
+    --rule: 1px solid var(--ink-300);
+    --rule-strong: 1px solid var(--ink-500);
+    --rule-dim: 1px solid var(--ink-200);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    background: var(--ink-000);
+    color: var(--ink-900);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    background-image:
+      radial-gradient(circle at 18% 8%, rgba(255,122,26,0.06), transparent 40%),
+      radial-gradient(circle at 92% 90%, rgba(108,143,176,0.05), transparent 45%);
+    background-attachment: fixed;
+  }
+
+  /* ——— Layout shell ——— */
+  .shell {
+    max-width: 1320px;
+    margin: 0 auto;
+    padding: 56px 48px 120px;
+  }
+
+  /* Masthead */
+  .masthead {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: end;
+    gap: var(--gutter);
+    padding-bottom: 28px;
+    border-bottom: var(--rule-strong);
+    margin-bottom: 56px;
+  }
+  .masthead .lockup {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .glyph {
+    width: 44px;
+    height: 44px;
+    border: 1px solid var(--ink-900);
+    display: grid;
+    place-items: center;
+    position: relative;
+  }
+  .glyph::before, .glyph::after {
+    content: "";
+    position: absolute;
+    background: var(--ink-900);
+  }
+  .glyph::before { width: 14px; height: 1px; top: 21px; left: 7px; }
+  .glyph::after  { width: 1px; height: 14px; top: 14px; left: 21px; }
+  .glyph .dot {
+    width: 6px; height: 6px;
+    background: var(--signal-active);
+    position: absolute; right: -3px; top: -3px;
+    border-radius: 50%;
+    box-shadow: 0 0 0 2px var(--ink-000), 0 0 12px var(--signal-active);
+  }
+  .wordmark {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-800);
+  }
+  .wordmark b { color: var(--ink-900); font-weight: 500; }
+
+  .masthead h1 {
+    font-family: var(--font-serif);
+    font-weight: 400;
+    font-size: 76px;
+    line-height: 0.95;
+    letter-spacing: -0.02em;
+    color: var(--ink-950);
+  }
+  .masthead h1 em {
+    font-style: italic;
+    color: var(--signal-active);
+  }
+  .masthead .meta {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-600);
+    display: grid;
+    gap: 4px;
+    text-align: right;
+  }
+  .masthead .meta span { color: var(--ink-800); }
+
+  .subhead {
+    font-family: var(--font-sans);
+    font-size: 16px;
+    color: var(--ink-700);
+    max-width: 680px;
+    margin-top: 20px;
+  }
+
+  /* Section */
+  section {
+    margin-top: 80px;
+  }
+  .section-head {
+    display: grid;
+    grid-template-columns: 180px 1fr auto;
+    align-items: baseline;
+    gap: var(--gutter);
+    padding-bottom: 16px;
+    border-bottom: var(--rule);
+    margin-bottom: 32px;
+  }
+  .section-head .index {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    color: var(--ink-600);
+    text-transform: uppercase;
+  }
+  .section-head h2 {
+    font-family: var(--font-serif);
+    font-weight: 400;
+    font-size: 34px;
+    letter-spacing: -0.01em;
+    color: var(--ink-950);
+  }
+  .section-head .note {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-600);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  /* ——— Foundations: Principles ——— */
+  .principles {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0;
+    border-top: var(--rule);
+    border-bottom: var(--rule);
+  }
+  .principle {
+    padding: 28px 24px 32px;
+    border-right: var(--rule);
+  }
+  .principle:last-child { border-right: none; }
+  .principle .num {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--signal-active);
+    letter-spacing: 0.12em;
+  }
+  .principle h3 {
+    font-family: var(--font-serif);
+    font-size: 24px;
+    font-weight: 400;
+    margin-top: 12px;
+    color: var(--ink-950);
+  }
+  .principle p {
+    margin-top: 10px;
+    color: var(--ink-700);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  /* ——— Color ——— */
+  .color-grid {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 1px;
+    background: var(--ink-300);
+    border: var(--rule);
+  }
+  .swatch {
+    background: var(--ink-050);
+    padding: 16px 14px;
+    min-height: 130px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+  }
+  .swatch .chip {
+    width: 100%;
+    height: 64px;
+    margin-bottom: 14px;
+    border: 1px solid rgba(255,255,255,0.04);
+  }
+  .swatch .label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-800);
+    letter-spacing: 0.04em;
+  }
+  .swatch .hex {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--ink-600);
+    margin-top: 2px;
+  }
+
+  .signal-row {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 16px;
+    margin-top: 20px;
+  }
+  .signal {
+    border: var(--rule);
+    padding: 18px 18px 22px;
+    background: var(--ink-050);
+    position: relative;
+  }
+  .signal .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    display: inline-block;
+    margin-right: 10px;
+    vertical-align: middle;
+  }
+  .signal .name {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    color: var(--ink-900);
+    text-transform: uppercase;
+  }
+  .signal .use {
+    font-size: 12px;
+    color: var(--ink-700);
+    margin-top: 14px;
+    line-height: 1.5;
+  }
+  .signal .token {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--ink-600);
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: var(--rule-dim);
+  }
+
+  /* ——— Type ——— */
+  .type-row {
+    display: grid;
+    grid-template-columns: 200px 1fr 160px;
+    gap: var(--gutter);
+    padding: 28px 0;
+    border-bottom: var(--rule);
+    align-items: baseline;
+  }
+  .type-row:first-child { border-top: var(--rule); }
+  .type-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    color: var(--ink-600);
+    text-transform: uppercase;
+  }
+  .type-label b {
+    display: block;
+    color: var(--ink-900);
+    margin-bottom: 4px;
+    font-weight: 500;
+  }
+  .type-sample { color: var(--ink-950); }
+  .type-spec {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-600);
+    text-align: right;
+    line-height: 1.8;
+  }
+
+  .t-display { font-family: var(--font-serif); font-weight: 400; font-size: 64px; line-height: 1; letter-spacing: -0.02em; }
+  .t-display em { font-style: italic; color: var(--signal-active); }
+  .t-h1 { font-family: var(--font-serif); font-weight: 400; font-size: 42px; line-height: 1.05; letter-spacing: -0.015em; }
+  .t-h2 { font-family: var(--font-sans); font-weight: 500; font-size: 24px; line-height: 1.25; letter-spacing: -0.01em; }
+  .t-body { font-family: var(--font-sans); font-weight: 400; font-size: 15px; line-height: 1.6; color: var(--ink-800); }
+  .t-meta { font-family: var(--font-mono); font-weight: 400; font-size: 12px; letter-spacing: 0.06em; color: var(--ink-700); text-transform: uppercase; }
+  .t-code { font-family: var(--font-mono); font-weight: 400; font-size: 13px; color: var(--ink-800); }
+
+  /* ——— Spacing + Grid ——— */
+  .spacing-scale {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 16px;
+    border-top: var(--rule);
+    padding-top: 24px;
+  }
+  .space-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .space-cell .bar {
+    background: var(--signal-active);
+    height: 10px;
+  }
+  .space-cell .bar.track {
+    background: var(--ink-200);
+    position: relative;
+    height: 10px;
+  }
+  .space-cell .bar.track::before {
+    content: "";
+    position: absolute; left: 0; top: 0; bottom: 0;
+    background: var(--signal-active);
+  }
+  .space-cell .n { font-family: var(--font-mono); font-size: 11px; color: var(--ink-900); }
+  .space-cell .px { font-family: var(--font-mono); font-size: 10px; color: var(--ink-600); }
+
+  .grid-demo {
+    margin-top: 32px;
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    gap: 8px;
+    background: var(--ink-050);
+    border: var(--rule);
+    padding: 16px;
+  }
+  .grid-demo .col {
+    height: 48px;
+    background: repeating-linear-gradient(
+      45deg,
+      rgba(255,122,26,0.08) 0 6px,
+      transparent 6px 12px
+    );
+    border: 1px dashed var(--ink-400);
+    display: grid; place-items: center;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--ink-600);
+  }
+
+  /* ——— Components ——— */
+  .component-grid {
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    gap: 24px;
+  }
+  .c-card {
+    background: var(--ink-050);
+    border: var(--rule);
+    padding: 24px;
+    grid-column: span 4;
+    display: flex;
+    flex-direction: column;
+  }
+  .c-card.wide { grid-column: span 6; }
+  .c-card.full { grid-column: span 12; }
+  .c-card .c-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 14px;
+    margin-bottom: 18px;
+    border-bottom: var(--rule-dim);
+  }
+  .c-card .c-head .title {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-700);
+  }
+  .c-card .c-head .tag {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--ink-500);
+  }
+
+  /* Buttons */
+  .btn-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center;}
+  .btn {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 10px 18px;
+    border: 1px solid var(--ink-900);
+    background: var(--ink-900);
+    color: var(--ink-000);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .btn:hover { background: var(--signal-active); border-color: var(--signal-active); color: var(--ink-000); }
+  .btn.ghost { background: transparent; color: var(--ink-900); }
+  .btn.ghost:hover { background: var(--ink-200); color: var(--ink-950); border-color: var(--ink-900);}
+  .btn.danger { background: transparent; color: var(--signal-err); border-color: var(--signal-err); }
+  .btn.danger:hover { background: var(--signal-err); color: var(--ink-000);}
+  .btn.sm { padding: 6px 12px; font-size: 10px;}
+  .btn .k {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 1px 6px;
+    background: rgba(0,0,0,0.18);
+    border: 1px solid rgba(0,0,0,0.25);
+    font-size: 9px;
+  }
+  .btn.ghost .k { background: rgba(255,255,255,0.04); border-color: var(--ink-400); color: var(--ink-700); }
+
+  /* Status pill */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border: 1px solid var(--ink-400);
+    color: var(--ink-800);
+    background: var(--ink-100);
+  }
+  .pill .d { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-600); }
+  .pill.active { color: var(--signal-active); border-color: var(--signal-active); }
+  .pill.active .d { background: var(--signal-active); box-shadow: 0 0 8px var(--signal-active); animation: pulse 1.6s ease-in-out infinite; }
+  .pill.ok { color: var(--signal-ok); border-color: var(--signal-ok); }
+  .pill.ok .d { background: var(--signal-ok); }
+  .pill.warn { color: var(--signal-warn); border-color: var(--signal-warn); }
+  .pill.warn .d { background: var(--signal-warn); }
+  .pill.err { color: var(--signal-err); border-color: var(--signal-err); }
+  .pill.err .d { background: var(--signal-err); }
+  .pill.cool { color: var(--signal-cool); border-color: var(--signal-cool); }
+  .pill.cool .d { background: var(--signal-cool); }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+
+  .pill-row { display: flex; gap: 8px; flex-wrap: wrap;}
+
+  /* Input */
+  .input-block { display: flex; flex-direction: column; gap: 6px; }
+  .input-block label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-600);
+  }
+  .input {
+    background: var(--ink-000);
+    border: 1px solid var(--ink-400);
+    padding: 10px 12px;
+    color: var(--ink-900);
+    font-family: var(--font-mono);
+    font-size: 13px;
+  }
+  .input:focus { outline: none; border-color: var(--signal-active); box-shadow: inset 0 0 0 1px var(--signal-active); }
+  .input::placeholder { color: var(--ink-500); }
+
+  /* Ticket card */
+  .ticket {
+    border-left: 2px solid var(--signal-active);
+  }
+  .ticket .id {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--signal-active);
+    letter-spacing: 0.1em;
+  }
+  .ticket h4 {
+    font-family: var(--font-serif);
+    font-weight: 400;
+    font-size: 22px;
+    margin-top: 6px;
+    line-height: 1.2;
+    color: var(--ink-950);
+  }
+  .ticket .meta-row {
+    display: flex;
+    gap: 18px;
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: var(--rule-dim);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--ink-600);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .ticket .meta-row b { color: var(--ink-900); font-weight: 400; display: block; margin-top: 2px; font-size: 12px;}
+
+  /* Pipeline / phases */
+  .phase-map {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 0;
+    border: var(--rule);
+    background: var(--ink-050);
+  }
+  .phase {
+    padding: 20px 18px 22px;
+    border-right: var(--rule);
+    position: relative;
+  }
+  .phase:last-child { border-right: none; }
+  .phase .layer {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    color: var(--ink-500);
+  }
+  .phase .name {
+    font-family: var(--font-sans);
+    font-weight: 500;
+    font-size: 15px;
+    margin-top: 8px;
+    color: var(--ink-950);
+  }
+  .phase .state {
+    margin-top: 16px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--ink-600);
+    text-transform: uppercase;
+  }
+  .phase .bar {
+    height: 2px;
+    background: var(--ink-300);
+    margin-top: 6px;
+  }
+  .phase.done .bar { background: var(--signal-ok); }
+  .phase.active .bar { background: var(--signal-active); position: relative; overflow: hidden; }
+  .phase.active .bar::after {
+    content: "";
+    position: absolute; inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.5), transparent);
+    animation: shimmer 1.6s linear infinite;
+  }
+  @keyframes shimmer {
+    0% { transform: translateX(-100%);}
+    100% { transform: translateX(100%);}
+  }
+  .phase.done .state { color: var(--signal-ok); }
+  .phase.active .state { color: var(--signal-active); }
+
+  /* Log */
+  .log {
+    background: var(--ink-000);
+    border: var(--rule);
+    padding: 16px 18px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--ink-800);
+  }
+  .log .ln {display: grid; grid-template-columns: 60px 72px 1fr; gap: 14px; align-items: baseline;}
+  .log .t { color: var(--ink-500); font-size: 10px; }
+  .log .lv { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;}
+  .log .lv.i { color: var(--signal-cool); }
+  .log .lv.w { color: var(--signal-warn); }
+  .log .lv.e { color: var(--signal-err); }
+  .log .lv.s { color: var(--signal-ok); }
+  .log .msg b { color: var(--ink-950); font-weight: 500;}
+  .log .msg em { color: var(--signal-active); font-style: normal;}
+
+  /* Agent card */
+  .agents {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+  }
+  .agent {
+    border: var(--rule);
+    background: var(--ink-050);
+    padding: 18px;
+    position: relative;
+  }
+  .agent::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0;
+    width: 24px; height: 1px;
+    background: var(--signal-active);
+  }
+  .agent .handle {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--signal-active);
+    letter-spacing: 0.08em;
+  }
+  .agent .role {
+    font-family: var(--font-serif);
+    font-size: 22px;
+    font-weight: 400;
+    margin-top: 4px;
+    color: var(--ink-950);
+  }
+  .agent p {
+    font-size: 12px;
+    color: var(--ink-700);
+    margin-top: 12px;
+    line-height: 1.55;
+  }
+  .agent .role-meta {
+    display: flex; gap: 14px;
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: var(--rule-dim);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--ink-600);
+    text-transform: uppercase;
+  }
+  .agent .role-meta b { color: var(--ink-900); font-weight: 400;}
+
+  /* Stats */
+  .stat-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0;
+    border: var(--rule);
+  }
+  .stat {
+    padding: 22px 20px 24px;
+    border-right: var(--rule);
+  }
+  .stat:last-child { border-right: none;}
+  .stat .label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-600);
+  }
+  .stat .val {
+    font-family: var(--font-serif);
+    font-size: 44px;
+    line-height: 1;
+    margin-top: 10px;
+    color: var(--ink-950);
+  }
+  .stat .val em { color: var(--signal-active); font-style: normal; font-family: var(--font-mono); font-size: 16px; margin-left: 6px; vertical-align: middle;}
+  .stat .sub {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--ink-600);
+    margin-top: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  /* Motion */
+  .motion-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+  }
+  .motion {
+    border: var(--rule);
+    padding: 18px;
+    background: var(--ink-050);
+  }
+  .motion .ease {
+    height: 60px;
+    margin: 12px 0;
+    background:
+      linear-gradient(var(--ink-300), var(--ink-300)) no-repeat left center / 100% 1px;
+    position: relative;
+  }
+  .motion .ease .dot {
+    position: absolute;
+    top: 50%;
+    width: 10px; height: 10px;
+    background: var(--signal-active);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    left: 0;
+    animation: travel 2.4s infinite;
+  }
+  .motion.e1 .dot { animation-timing-function: linear; }
+  .motion.e2 .dot { animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1); }
+  .motion.e3 .dot { animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1); }
+  .motion.e4 .dot { animation-timing-function: cubic-bezier(0.8, 0, 0.2, 1); }
+  @keyframes travel {
+    0%, 12% { left: 0%; }
+    45%, 55% { left: 100%; }
+    88%, 100% { left: 0%;}
+  }
+  .motion .nm { font-family: var(--font-mono); font-size: 11px; color: var(--ink-900); letter-spacing: 0.06em;}
+  .motion .cv { font-family: var(--font-mono); font-size: 10px; color: var(--ink-600); margin-top: 4px;}
+
+  /* Iconography */
+  .icons {
+    display: grid;
+    grid-template-columns: repeat(10, 1fr);
+    gap: 1px;
+    background: var(--ink-300);
+    border: var(--rule);
+  }
+  .icon {
+    background: var(--ink-050);
+    aspect-ratio: 1 / 1;
+    display: grid;
+    place-items: center;
+    position: relative;
+  }
+  .icon svg { width: 20px; height: 20px; stroke: var(--ink-900); stroke-width: 1.25; fill: none; stroke-linecap: round; stroke-linejoin: round;}
+  .icon .n {
+    position: absolute;
+    bottom: 6px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--ink-500);
+    letter-spacing: 0.04em;
+  }
+
+  /* Voice / copy */
+  .copy-pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    border: var(--rule);
+  }
+  .copy-col { padding: 24px 24px 28px; }
+  .copy-col.yes { border-right: var(--rule); }
+  .copy-col .tag {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .copy-col.yes .tag { color: var(--signal-ok); }
+  .copy-col.no .tag { color: var(--signal-err); }
+  .copy-col .tag::before {
+    content: "";
+    width: 8px; height: 8px;
+    background: currentColor;
+  }
+  .copy-col ul {
+    list-style: none;
+    margin-top: 16px;
+    display: grid;
+    gap: 12px;
+  }
+  .copy-col li {
+    font-family: var(--font-serif);
+    font-size: 18px;
+    line-height: 1.35;
+    color: var(--ink-900);
+    padding-left: 18px;
+    position: relative;
+  }
+  .copy-col.yes li::before { content: "→"; position: absolute; left: 0; color: var(--signal-active); font-family: var(--font-mono); font-size: 14px; top: 2px;}
+  .copy-col.no li { color: var(--ink-500); text-decoration: line-through; text-decoration-color: var(--ink-400);}
+
+  /* Footer */
+  .colophon {
+    margin-top: 96px;
+    padding-top: 32px;
+    border-top: var(--rule-strong);
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: var(--gutter);
+    align-items: end;
+  }
+  .colophon .tag {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    color: var(--ink-600);
+    text-transform: uppercase;
+  }
+  .colophon .sig {
+    font-family: var(--font-serif);
+    font-style: italic;
+    font-size: 20px;
+    color: var(--ink-800);
+  }
+
+  /* Small utility */
+  .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px;}
+  .row-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px;}
+  .stack { display: grid; gap: 16px;}
+  .hr { height: 1px; background: var(--ink-300); margin: 28px 0;}
+  .crosshatch {
+    background-image:
+      repeating-linear-gradient(45deg, rgba(255,255,255,0.02) 0 1px, transparent 1px 8px);
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ============ MASTHEAD ============ -->
+  <header class="masthead">
+    <div>
+      <div class="lockup">
+        <div class="glyph"><span class="dot"></span></div>
+        <div class="wordmark"><b>AGENTIC</b> / HARNESS — DESIGN SYSTEM v1.0</div>
+      </div>
+      <h1>Mission control<br>for agents that <em>ship code.</em></h1>
+      <p class="subhead">A visual language for observing, orchestrating, and trusting software agents. Built for operators watching pipelines at 3am — precise, legible, unflinching. No delight where clarity is needed.</p>
+    </div>
+    <div class="meta">
+      <div>DOC — DS/2026-04-19</div>
+      <div>REV — <span>0.1.0 · draft</span></div>
+      <div>SCOPE — <span>dashboard + runtime UI</span></div>
+      <div>OWNER — <span>harness team</span></div>
+    </div>
+  </header>
+
+  <!-- ============ PRINCIPLES ============ -->
+  <section>
+    <div class="section-head">
+      <div class="index">§ 00 — Foundations</div>
+      <h2>Principles</h2>
+      <div class="note">Four rules, pinned</div>
+    </div>
+    <div class="principles">
+      <div class="principle">
+        <div class="num">01</div>
+        <h3>State is sacred.</h3>
+        <p>Every surface makes the state of the pipeline visible at a glance: queued, running, stuck, passed, failed. Never decorative, never ambiguous.</p>
+      </div>
+      <div class="principle">
+        <div class="num">02</div>
+        <h3>Numerals are primary.</h3>
+        <p>Durations, counts, IDs, diffs — data is the subject. Monospace dominates. Typography serves legibility at 11px before 64px.</p>
+      </div>
+      <div class="principle">
+        <div class="num">03</div>
+        <h3>Silence the chrome.</h3>
+        <p>Hairline rules, warm black, restrained accents. The UI gets out of the way so the work — agents reasoning, code shipping — remains the loudest thing.</p>
+      </div>
+      <div class="principle">
+        <div class="num">04</div>
+        <h3>Motion signals progress.</h3>
+        <p>We animate only when something is happening: a phase running, a ticket arriving, an agent thinking. Motion is information.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ COLOR ============ -->
+  <section>
+    <div class="section-head">
+      <div class="index">§ 01 — Color</div>
+      <h2>Palette &amp; signals</h2>
+      <div class="note">OKLCH-adjacent · warm neutrals</div>
+    </div>
+
+    <div class="t-meta" style="margin-bottom:14px;">Neutrals — ink scale</div>
+    <div class="color-grid">
+      <div class="swatch"><div class="chip" style="background:#0b0b0a"></div><div class="label">ink-000</div><div class="hex">#0B0B0A · canvas</div></div>
+      <div class="swatch"><div class="chip" style="background:#121211"></div><div class="label">ink-050</div><div class="hex">#121211 · surface</div></div>
+      <div class="swatch"><div class="chip" style="background:#22221f"></div><div class="label">ink-200</div><div class="hex">#22221F · raised</div></div>
+      <div class="swatch"><div class="chip" style="background:#3c3c37"></div><div class="label">ink-400</div><div class="hex">#3C3C37 · border</div></div>
+      <div class="swatch"><div class="chip" style="background:#7d7d73"></div><div class="label">ink-600</div><div class="hex">#7D7D73 · muted</div></div>
+      <div class="swatch"><div class="chip" style="background:#ece9dc"></div><div class="label">ink-900</div><div class="hex">#ECE9DC · text</div></div>
+    </div>
+
+    <div class="t-meta" style="margin:28px 0 14px;">Signals — state semantics</div>
+    <div class="signal-row">
+      <div class="signal">
+        <span class="dot" style="background:#ff7a1a; box-shadow: 0 0 10px #ff7a1a;"></span>
+        <span class="name">Active</span>
+        <div class="use">In-flight: agent thinking, phase running, commit arriving.</div>
+        <div class="token">--signal-active · #FF7A1A</div>
+      </div>
+      <div class="signal">
+        <span class="dot" style="background:#9db48a"></span>
+        <span class="name">OK</span>
+        <div class="use">Tests pass, review approved, merge complete, PR green.</div>
+        <div class="token">--signal-ok · #9DB48A</div>
+      </div>
+      <div class="signal">
+        <span class="dot" style="background:#e8c46a"></span>
+        <span class="name">Warn</span>
+        <div class="use">Needs clarification, stuck ticket, retryable anomaly.</div>
+        <div class="token">--signal-warn · #E8C46A</div>
+      </div>
+      <div class="signal">
+        <span class="dot" style="background:#d26a5a"></span>
+        <span class="name">Error</span>
+        <div class="use">Failed, escalate, human intervention required.</div>
+        <div class="token">--signal-err · #D26A5A</div>
+      </div>
+      <div class="signal">
+        <span class="dot" style="background:#6c8fb0"></span>
+        <span class="name">Cool</span>
+        <div class="use">Queued, idle, informational, auxiliary metrics.</div>
+        <div class="token">--signal-cool · #6C8FB0</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ TYPOGRAPHY ============ -->
+  <section>
+    <div class="section-head">
+      <div class="index">§ 02 — Type</div>
+      <h2>Typography</h2>
+      <div class="note">Instrument Serif · IBM Plex Sans · JetBrains Mono</div>
+    </div>
+
+    <div class="type-row">
+      <div class="type-label"><b>Display</b>Serif / 64 / -0.02em</div>
+      <div class="type-sample t-display">Ship reviewed <em>PRs</em> in minutes, not mornings.</div>
+      <div class="type-spec">Instrument Serif<br>64 / 61 / -20<br>Regular · italic</div>
+    </div>
+    <div class="type-row">
+      <div class="type-label"><b>Heading 1</b>Serif / 42 / -0.015em</div>
+      <div class="type-sample t-h1">Layer 2 — agent team execution</div>
+      <div class="type-spec">Instrument Serif<br>42 / 44 / -15<br>Regular</div>
+    </div>
+    <div class="type-row">
+      <div class="type-label"><b>Heading 2</b>Sans / 24 / 500</div>
+      <div class="type-sample t-h2">Planner decomposes ticket into atomic units</div>
+      <div class="type-spec">IBM Plex Sans<br>24 / 30 / -10<br>Medium</div>
+    </div>
+    <div class="type-row">
+      <div class="type-label"><b>Body</b>Sans / 15 / 400</div>
+      <div class="type-sample t-body">The Judge validates each reviewer finding before it reaches the developer — checking the actual code, running git blame, and rejecting false positives that would otherwise consume correction cycles.</div>
+      <div class="type-spec">IBM Plex Sans<br>15 / 24 / 0<br>Regular</div>
+    </div>
+    <div class="type-row">
+      <div class="type-label"><b>Metadata</b>Mono / 12 / 0.06em</div>
+      <div class="type-sample t-meta">L2 · DEVELOPER · UNIT-03 · 02:14 ELAPSED</div>
+      <div class="type-spec">JetBrains Mono<br>12 / 18 / +60<br>Regular · caps</div>
+    </div>
+    <div class="type-row">
+      <div class="type-label"><b>Code</b>Mono / 13 / 400</div>
+      <div class="type-sample t-code">$ spawn-team.sh --ticket HARN-2043 --profile sitecore</div>
+      <div class="type-spec">JetBrains Mono<br>13 / 20 / 0<br>Regular</div>
+    </div>
+  </section>
+
+  <!-- ============ SPACING + GRID ============ -->
+  <section>
+    <div class="section-head">
+      <div class="index">§ 03 — Spacing</div>
+      <h2>Rhythm &amp; grid</h2>
+      <div class="note">8pt base · 12-col layout</div>
+    </div>
+
+    <div class="spacing-scale">
+      <div class="space-cell"><div class="bar track"><i style="width: 12.5%"></i></div><div class="n">s/1</div><div class="px">4 px</div></div>
+      <div class="space-cell"><div class="bar track"><i style="width: 25%"></i></div><div class="n">s/2</div><div class="px">8 px</div></div>
+      <div class="space-cell"><div class="bar track"><i style="width: 37.5%"></i></div><div class="n">s/3</div><div class="px">12 px</div></div>
+      <div class="space-cell"><div class="bar track"><i style="width: 50%"></i></div><div class="n">s/4</div><div class="px">16 px</div></div>
+      <div class="space-cell"><div class="bar track"><i style="width: 62.5%"></i></div><div class="n">s/6</div><div class="px">24 px</div></div>
+      <div class="space-cell"><div class="bar track"><i style="width: 75%"></i></div><div class="n">s/8</div><div class="px">32 px</div></div>
+      <div class="space-cell"><div class="bar track"><i style="width: 87.5%"></i></div><div class="n">s/12</div><div class="px">48 px</div></div>
+      <div class="space-cell"><div class="bar"></div><div class="n">s/16</div><div class="px">64 px</div></div>
+    </div>
+
+    <div class="grid-demo">
+      <div class="col">01</div><div class="col">02</div><div class="col">03</div><div class="col">04</div>
+      <div class="col">05</div><div class="col">06</div><div class="col">07</div><div class="col">08</div>
+      <div class="col">09</div><div class="col">10</div><div class="col">11</div><div class="col">12</div>
+    </div>
+    <div class="t-meta" style="margin-top:14px; color: var(--ink-500);">12 cols · 24px gutter · 1320px max — breakpoints at 960 / 1200 / 1440</div>
+  </section>
+
+  <!-- ============ COMPONENTS ============ -->
+  <section>
+    <div class="section-head">
+      <div class="index">§ 04 — Components</div>
+      <h2>Interface vocabulary</h2>
+      <div class="note">Buttons · pills · tickets · phase maps</div>
+    </div>
+
+    <div class="component-grid">
+
+      <div class="c-card">
+        <div class="c-head"><div class="title">Buttons</div><div class="tag">04.01</div></div>
+        <div class="stack">
+          <div class="btn-row">
+            <button class="btn">Spawn team<span class="k">⌘ ↵</span></button>
+            <button class="btn ghost">Retry<span class="k">R</span></button>
+          </div>
+          <div class="btn-row">
+            <button class="btn sm">Approve</button>
+            <button class="btn sm ghost">Reject</button>
+            <button class="btn sm danger">Abort run</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="c-card">
+        <div class="c-head"><div class="title">Status pills</div><div class="tag">04.02</div></div>
+        <div class="stack">
+          <div class="pill-row">
+            <span class="pill active"><span class="d"></span>Running</span>
+            <span class="pill ok"><span class="d"></span>Passed</span>
+            <span class="pill warn"><span class="d"></span>Clarify</span>
+          </div>
+          <div class="pill-row">
+            <span class="pill err"><span class="d"></span>Failed</span>
+            <span class="pill cool"><span class="d"></span>Queued</span>
+            <span class="pill"><span class="d"></span>Idle</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="c-card">
+        <div class="c-head"><div class="title">Inputs</div><div class="tag">04.03</div></div>
+        <div class="stack">
+          <div class="input-block">
+            <label>Ticket ID</label>
+            <input class="input" value="HARN-2043" />
+          </div>
+          <div class="input-block">
+            <label>Client profile</label>
+            <input class="input" placeholder="sitecore / salesforce / …" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Ticket card -->
+      <div class="c-card wide ticket">
+        <div class="c-head">
+          <div class="title">Ticket card · L2 in-flight</div>
+          <div class="tag">04.04</div>
+        </div>
+        <div class="id">HARN-2043</div>
+        <h4>Add retry-with-backoff to the Figma design spec extractor</h4>
+        <div class="pill-row" style="margin-top:18px">
+          <span class="pill active"><span class="d"></span>Developer · unit-02</span>
+          <span class="pill cool"><span class="d"></span>2 of 4 units</span>
+          <span class="pill"><span class="d"></span>Sitecore</span>
+        </div>
+        <div class="meta-row">
+          <div>Size<b>2 units</b></div>
+          <div>Elapsed<b>08:42</b></div>
+          <div>Budget<b>45m</b></div>
+          <div>Reviewer<b>—</b></div>
+          <div>Branch<b>ai/HARN-2043</b></div>
+        </div>
+      </div>
+
+      <!-- Log stream -->
+      <div class="c-card wide">
+        <div class="c-head">
+          <div class="title">Log stream · /.harness/logs/run.log</div>
+          <div class="tag">04.05</div>
+        </div>
+        <div class="log">
+          <div class="ln"><span class="t">02:14.103</span><span class="lv i">info</span><span class="msg">L1 analyst enriched · size=<b>2 units</b></span></div>
+          <div class="ln"><span class="t">02:14.421</span><span class="lv i">info</span><span class="msg">Spawned worktree <em>ai/HARN-2043</em> · 7 skills injected</span></div>
+          <div class="ln"><span class="t">02:15.002</span><span class="lv s">pass</span><span class="msg">Planner → 2 atomic units · DAG valid</span></div>
+          <div class="ln"><span class="t">02:17.881</span><span class="lv w">warn</span><span class="msg">Unit-01 dev retry 1/3 · test <b>test_backoff_sequence</b> failed</span></div>
+          <div class="ln"><span class="t">02:19.204</span><span class="lv s">pass</span><span class="msg">Unit-01 tests green · committed</span></div>
+          <div class="ln"><span class="t">02:21.556</span><span class="lv i">info</span><span class="msg">Merge coordinator → dependencies resolved</span></div>
+        </div>
+      </div>
+
+      <!-- Stats -->
+      <div class="c-card full">
+        <div class="c-head"><div class="title">KPI tiles</div><div class="tag">04.06</div></div>
+        <div class="stat-row">
+          <div class="stat">
+            <div class="label">PRs shipped / 24h</div>
+            <div class="val">17<em>↑ 4</em></div>
+            <div class="sub">vs. prev window</div>
+          </div>
+          <div class="stat">
+            <div class="label">Median cycle time</div>
+            <div class="val">11m<em>42s</em></div>
+            <div class="sub">analyst → draft PR</div>
+          </div>
+          <div class="stat">
+            <div class="label">Judge pass-through</div>
+            <div class="val">68<em>%</em></div>
+            <div class="sub">reviewer findings upheld</div>
+          </div>
+          <div class="stat">
+            <div class="label">Stuck tickets</div>
+            <div class="val">2</div>
+            <div class="sub">awaiting human clarify</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Phase map -->
+      <div class="c-card full">
+        <div class="c-head"><div class="title">Phase map · single ticket</div><div class="tag">04.07</div></div>
+        <div class="phase-map">
+          <div class="phase done">
+            <div class="layer">L1 · 00:24</div>
+            <div class="name">Analyst enrich</div>
+            <div class="bar"></div>
+            <div class="state">Complete</div>
+          </div>
+          <div class="phase done">
+            <div class="layer">L2 · 01:47</div>
+            <div class="name">Plan + review</div>
+            <div class="bar"></div>
+            <div class="state">Complete</div>
+          </div>
+          <div class="phase active">
+            <div class="layer">L2 · 08:42</div>
+            <div class="name">Develop · 2 units</div>
+            <div class="bar"></div>
+            <div class="state">In-flight</div>
+          </div>
+          <div class="phase">
+            <div class="layer">L2</div>
+            <div class="name">Code review + judge</div>
+            <div class="bar"></div>
+            <div class="state">Queued</div>
+          </div>
+          <div class="phase">
+            <div class="layer">L3</div>
+            <div class="name">Architecture</div>
+            <div class="bar"></div>
+            <div class="state">Queued</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Agent cards -->
+      <div class="c-card full">
+        <div class="c-head"><div class="title">Agent personae — the team</div><div class="tag">04.08</div></div>
+        <div class="agents">
+          <div class="agent">
+            <div class="handle">@team-lead</div>
+            <div class="role">The Conductor</div>
+            <p>Reads the ticket, picks simple vs. full pipeline, orchestrates the sub-agents, owns the feature branch.</p>
+            <div class="role-meta"><div>Spawns<b>planner · dev · reviewer</b></div><div>Model<b>opus</b></div></div>
+          </div>
+          <div class="agent">
+            <div class="handle">@developer</div>
+            <div class="role">The Builder</div>
+            <p>Implements the change, writes the tests, runs the suite. Self-corrects up to 3 cycles before surrendering the unit.</p>
+            <div class="role-meta"><div>Isolation<b>worktree</b></div><div>Retries<b>3</b></div></div>
+          </div>
+          <div class="agent">
+            <div class="handle">@judge</div>
+            <div class="role">The Skeptic</div>
+            <p>Validates each reviewer finding against the actual code — rejecting false positives before they burn correction cycles.</p>
+            <div class="role-meta"><div>Threshold<b>80 / 100</b></div><div>Blame-aware<b>yes</b></div></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============ MOTION ============ -->
+  <section>
+    <div class="section-head">
+      <div class="index">§ 05 — Motion</div>
+      <h2>Easing &amp; duration</h2>
+      <div class="note">Motion = progress · never decoration</div>
+    </div>
+    <div class="motion-grid">
+      <div class="motion e2">
+        <div class="nm">expo-out</div>
+        <div class="ease"><div class="dot"></div></div>
+        <div class="cv">cubic-bezier(0.2, 0.8, 0.2, 1) · 240ms · panel enters</div>
+      </div>
+      <div class="motion e3">
+        <div class="nm">standard</div>
+        <div class="ease"><div class="dot"></div></div>
+        <div class="cv">cubic-bezier(0.4, 0, 0.2, 1) · 180ms · hover, focus</div>
+      </div>
+      <div class="motion e4">
+        <div class="nm">emphasis</div>
+        <div class="ease"><div class="dot"></div></div>
+        <div class="cv">cubic-bezier(0.8, 0, 0.2, 1) · 320ms · phase transition</div>
+      </div>
+      <div class="motion e1">
+        <div class="nm">linear / progress</div>
+        <div class="ease"><div class="dot"></div></div>
+        <div class="cv">linear · ∞ · shimmer bar, pulse dot</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ICONS ============ -->
+  <section>
+    <div class="section-head">
+      <div class="index">§ 06 — Iconography</div>
+      <h2>Symbols</h2>
+      <div class="note">20px · 1.25 stroke · square caps</div>
+    </div>
+    <div class="icons">
+      <div class="icon"><svg viewBox="0 0 24 24"><polyline points="4 12 10 18 20 6"/></svg><span class="n">pass</span></div>
+      <div class="icon"><svg viewBox="0 0 24 24"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg><span class="n">fail</span></div>
+      <div class="icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><line x1="12" y1="8" x2="12" y2="13"/><line x1="12" y1="16" x2="12" y2="16.5"/></svg><span class="n">warn</span></div>
+      <div class="icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><polyline points="12 8 12 12 15 14"/></svg><span class="n">clock</span></div>
+      <div class="icon"><svg viewBox="0 0 24 24"><polygon points="8 5 19 12 8 19 8 5"/></svg><span class="n">run</span></div>
+      <div class="icon"><svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg><span class="n">pause</span></div>
+      <div class="icon"><svg viewBox="0 0 24 24"><circle cx="7" cy="7" r="2.5"/><circle cx="17" cy="17" r="2.5"/><path d="M9 7h6a3 3 0 0 1 3 3v4"/></svg><span class="n">branch</span></div>
+      <div class="icon"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg><span class="n">log</span></div>
+      <div class="icon"><svg viewBox="0 0 24 24"><path d="M4 4h10l6 6v10H4z"/><polyline points="14 4 14 10 20 10"/></svg><span class="n">ticket</span></div>
+      <div class="icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3"/><path d="M6 20v-1a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v1"/></svg><span class="n">agent</span></div>
+    </div>
+  </section>
+
+  <!-- ============ VOICE ============ -->
+  <section>
+    <div class="section-head">
+      <div class="index">§ 07 — Voice</div>
+      <h2>Tone &amp; copy</h2>
+      <div class="note">Operator-grade · plain · no cheerleading</div>
+    </div>
+    <div class="copy-pair">
+      <div class="copy-col yes">
+        <div class="tag">Do — operator voice</div>
+        <ul>
+          <li>“Unit-02 failed 3/3. Escalated to team lead.”</li>
+          <li>“68% of reviewer findings upheld this week.”</li>
+          <li>“Needs clarification. Replied on HARN-2043.”</li>
+          <li>“Draft PR ready · 4 files · +142 −38.”</li>
+        </ul>
+      </div>
+      <div class="copy-col no">
+        <div class="tag">Don't — marketing voice</div>
+        <ul>
+          <li>“Oops! Something went wrong 😬”</li>
+          <li>“Your AI teammates crushed it today! 🚀”</li>
+          <li>“We need a little more info to help you!”</li>
+          <li>“Ta-da! Your PR is ready to review ✨”</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ COLOPHON ============ -->
+  <footer class="colophon">
+    <div class="tag">End of document · Agentic Harness / Design System · v1.0 draft · ECE9DC on 0B0B0A</div>
+    <div class="sig">— set in Instrument Serif, IBM Plex &amp; JetBrains Mono.</div>
+  </footer>
+
+</div>
+</body>
+</html>
