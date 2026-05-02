@@ -13,7 +13,7 @@ export function BrandGlyph() {
 export function Wordmark() {
   return (
     <span class="op-wordmark">
-      <b>AGENTIC</b>HARNESS
+      XC <b>AGENTIC</b> HARNESS
     </span>
   );
 }
