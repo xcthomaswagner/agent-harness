@@ -105,6 +105,23 @@ class Settings(BaseSettings):
     # Service
     log_level: str = "INFO"
 
+    # ---- Platform-profile pass-through env ---------------------------------
+    # These are NOT consumed by L1 itself. They live in services/l1_preprocessing/.env
+    # so they're inherited by spawned L2 agent subprocesses, where the platform
+    # profile's harness-mcp.json references them as ${VAR} placeholders. Declared
+    # here as Optional fields so Pydantic Settings doesn't reject them as extras.
+    # When adding a new platform profile that needs runtime secrets, declare its
+    # vars in this block — same pattern.
+    #
+    # ContentStack (runtime/platform-profiles/contentstack/harness-mcp.json):
+    contentstack_api_key: str = ""
+    contentstack_delivery_token: str = ""
+    contentstack_management_token: str = ""
+    contentstack_region: str = ""           # NA | EU | AZURE_NA | AZURE_EU
+    contentstack_environment: str = ""      # e.g. "development"
+    contentstack_branch: str = ""           # e.g. "ai" (Enterprise branching)
+    # ------------------------------------------------------------------------
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     @field_validator("default_client_repo")
