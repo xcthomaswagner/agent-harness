@@ -163,9 +163,43 @@ app.include_router(operator_data_router)
 app.include_router(operator_router)
 
 
+_PLATFORM_PASS_THROUGH_VARS: tuple[str, ...] = (
+    # Mirror the fields declared under the "Platform-profile pass-through env"
+    # block in config.py. These are NOT consumed by L1 directly — they're
+    # exported back into os.environ at startup so spawn_team's
+    # _platform_pass_through_env() helper can re-inject them into the agent
+    # subprocess + the inject_runtime subprocess (which substitutes ${VAR}
+    # placeholders in the platform profile's harness-mcp.json).
+    #
+    # Pydantic Settings reads these from .env into the settings object but
+    # does NOT export them back to os.environ — without this re-export, the
+    # MCP server in the agent subprocess starts with empty credentials.
+    "CONTENTSTACK_API_KEY",
+    "CONTENTSTACK_DELIVERY_TOKEN",
+    "CONTENTSTACK_MANAGEMENT_TOKEN",
+    "CONTENTSTACK_REGION",
+    "CONTENTSTACK_ENVIRONMENT",
+    "CONTENTSTACK_BRANCH",
+)
+
+
+def _export_platform_pass_through() -> None:
+    """Export platform-profile pass-through vars from settings to os.environ.
+
+    See ``_PLATFORM_PASS_THROUGH_VARS`` above for the rationale.
+    """
+    import os
+    for var in _PLATFORM_PASS_THROUGH_VARS:
+        attr = var.lower()
+        value = getattr(settings, attr, "")
+        if value:
+            os.environ[var] = value
+
+
 @app.on_event("startup")
 async def _validate_config() -> None:
     """Warn about missing configuration at startup."""
+    _export_platform_pass_through()
     if not settings.webhook_secret:
         logger.warning(
             "webhook_secret_not_configured",
