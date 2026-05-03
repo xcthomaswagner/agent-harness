@@ -19,7 +19,6 @@ if str(SERVICES_DIR) not in sys.path:
 
 from shared.platform_profile_env import _scan_for_placeholders, pass_through_vars  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # _scan_for_placeholders
 # ---------------------------------------------------------------------------
