@@ -10,9 +10,11 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 from httpx import ASGITransport, AsyncClient
 
 import main
+from config import settings
 from main import app
 
 FIXTURES = Path(__file__).resolve().parents[3] / "tests" / "fixtures"
@@ -21,6 +23,15 @@ FIXTURES = Path(__file__).resolve().parents[3] / "tests" / "fixtures"
 async def _make_client() -> AsyncClient:
     transport = ASGITransport(app=app)
     return AsyncClient(transport=transport, base_url="http://test")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_autonomy_db(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persisted trigger-state tests should not touch the local dev DB."""
+    monkeypatch.setattr(settings, "autonomy_db_path", str(tmp_path / "autonomy.db"))
 
 
 # --- Jira Webhook ---
@@ -378,6 +389,30 @@ async def test_ado_webhook_processes_when_ai_tag_present() -> None:
             response = await client.post("/webhooks/ado", json=payload)
             assert response.status_code == 202
             assert response.json()["status"] == "accepted"
+
+
+async def test_ado_webhook_removes_quick_label_when_that_triggered() -> None:
+    """Quick-mode tickets remove ai-quick, not the default ai-implement label."""
+    from adapters.ado_adapter import AdoAdapter
+
+    payload = _ado_payload(work_item_id=4242, tags="ai-quick; sprint-7")
+    adapter = AdoAdapter(main.settings)
+    adapter.remove_label = AsyncMock()
+    adapter.write_comment = AsyncMock()
+
+    with (
+        _no_ado_auth(),
+        patch.object(main, "_get_ado_adapter", return_value=adapter),
+        patch.object(main, "_process_ticket", _mock_process_ticket_that_releases()),
+    ):
+        async with await _make_client() as client:
+            response = await client.post("/webhooks/ado", json=payload)
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "accepted"
+    adapter.remove_label.assert_awaited_once_with("TestProject-4242", "ai-quick")
+    adapter.write_comment.assert_awaited_once()
+    assert "`ai-quick`" in adapter.write_comment.await_args.args[1]
 
 
 # --- Phase 1: Fail-closed webhook auth (ADO) ---

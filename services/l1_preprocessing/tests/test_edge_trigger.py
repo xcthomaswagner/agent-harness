@@ -9,15 +9,23 @@ Covers two paths:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from adapters.ado_adapter import extract_tag_transition
-from main import _check_trigger_edge, _last_trigger_state
+from autonomy_store import autonomy_conn
+from config import settings
+from main import _check_trigger_edge, _clear_trigger_state, _last_trigger_state
 
 
 @pytest.fixture(autouse=True)
-def _clear_memory_between_tests() -> None:
+def _clear_memory_between_tests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Isolate tests by clearing the in-process edge memory before each."""
+    monkeypatch.setattr(settings, "autonomy_db_path", str(tmp_path / "autonomy.db"))
     _last_trigger_state.clear()
 
 
@@ -87,6 +95,31 @@ def test_payload_delta_missing_falls_back_to_memory_first_seen() -> None:
     assert _check_trigger_edge("T-4", now, was_present_before=before) is True
     # A second webhook with same memory state → not a new edge.
     assert _check_trigger_edge("T-4", now, was_present_before=None) is False
+
+
+def test_memory_fallback_uses_persisted_state_after_restart() -> None:
+    """No-delta dedupe survives process memory loss."""
+    assert _check_trigger_edge("T-PERSIST", True, was_present_before=None) is True
+    _last_trigger_state.clear()
+
+    assert _check_trigger_edge("T-PERSIST", True, was_present_before=None) is False
+
+    with autonomy_conn() as conn:
+        row = conn.execute(
+            "SELECT tag_present FROM trigger_state WHERE ticket_id = ?",
+            ("T-PERSIST",),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == 1
+
+
+def test_clear_trigger_state_deletes_persisted_state() -> None:
+    """Clearing trigger state removes the restart baseline too."""
+    assert _check_trigger_edge("T-CLEAR", True, was_present_before=None) is True
+    _clear_trigger_state("T-CLEAR")
+    _last_trigger_state.clear()
+
+    assert _check_trigger_edge("T-CLEAR", True, was_present_before=None) is True
 
 
 def test_payload_delta_missing_with_continued_presence_does_not_fire() -> None:

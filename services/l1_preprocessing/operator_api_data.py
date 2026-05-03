@@ -1157,8 +1157,8 @@ async def remove_trigger_label(ticket_id: str) -> dict[str, Any]:
     Raises 404 if no profile is found for the ticket's project prefix.
     Raises 502 if the ADO call fails.
     """
-    from main import _get_ado_adapter
     from claim_store import _clear_trigger_state
+    from main import _get_ado_adapter
     from tracer import append_trace, generate_trace_id
 
     prefix = ticket_id.split("-")[0] if "-" in ticket_id else ticket_id
