@@ -1,0 +1,33 @@
+assertion_pattern: experiencebundle_currenttheme_id_mismatch
+category: experience_cloud_lwr
+priority: 6
+confidence: Verified (Primary)
+required_clouds: ["experience_cloud"]
+# Gate: Experience Cloud hosts many content types — B2B Commerce storefronts,
+# B2C storefronts, partner portals, customer help centers, none at all (pure
+# marketing site). The currentThemeId issue is Experience Cloud-level,
+# independent of what's running on top. Gate on presence of experiences/**/*
+# files or ExperienceBundle metadata, not on storefront-specific signals.
+xcsf30_relevance: "Relevant for any cross-org ExperienceBundle deploy (scratch → sandbox, sandbox → prod, dev → QA)."
+trigger_conditions:
+  - cloud_match: detected_clouds must include "experience_cloud" (gate)
+  - deploy action targets ExperienceBundle metadata type
+  - deploy is cross-org (source org != target org)
+detection_signals:
+  - grep `experiences/**/*.json` finds 18-character ID values in `currentThemeId` field
+  - OR deploy error text contains: "currentThemeId", "non-theme component"
+  - OR deploy error: "ThemeLayout's label must be unique" (label collision variant)
+expected_agent_behavior:
+  - pre-deploy: grep ExperienceBundle JSON files for 18-char IDs in currentThemeId; flag each
+  - offer to substitute with target org's theme ID (requires SOQL on target for theme) or use env-var templating
+  - for label collision: query target for existing theme labels, offer rename
+must_not_do:
+  - deploy ExperienceBundle cross-org without checking currentThemeId
+  - assume the retrieve matches the target automatically
+citations:
+  - https://issues.salesforce.com/issue/a028c00000gAykEAAS/deploying-experiencebundle-with-custom-theme-layout-fails
+  - https://docs.gearset.com/en/articles/8205188-resolving-common-validation-errors-related-to-experience-bundle-metadata-type
+salesforce_known_issue: a028c00000gAykEAAS
+verified_facts:
+  - "currentThemeId is an 18-char record ID (Salesforce standard)"
+  - "Metadata API does not translate IDs cross-org"

@@ -79,6 +79,8 @@ from learning_api import router as learning_api_router
 from learning_dashboard import router as learning_dashboard_router
 from live_stream import router as live_stream_router
 from models import TicketPayload
+from operator_api import router as operator_router
+from operator_api_data import router as operator_data_router
 from pipeline import Pipeline
 from trace_bundle import _ARTIFACT_DOWNLOAD_MAP as _ARTIFACT_DOWNLOAD_MAP
 from trace_bundle import _BUNDLE_README as _BUNDLE_README
@@ -150,6 +152,15 @@ app.include_router(completion_router)
 # global dashboard-auth dependency to keep both routes on the same
 # permission surface.
 app.include_router(live_stream_router)
+# operator_api_data serves /api/operator/* JSON endpoints. Mount BEFORE
+# operator_router so the SPA catch-all route (/operator/{path:path})
+# doesn't swallow requests intended for /api/operator/*.
+app.include_router(operator_data_router)
+# operator_api serves the /operator Preact SPA. Auth is applied
+# per-route inside the module (query-param-or-header on HTML shell,
+# none on static assets). Mount LAST so the SPA catch-all route
+# doesn't shadow any other app route.
+app.include_router(operator_router)
 
 
 @app.on_event("startup")

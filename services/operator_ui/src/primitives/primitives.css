@@ -1,0 +1,410 @@
+/*
+ * Operator primitives — component styles.
+ *
+ * Ported from design_handoff_agentic_harness/dashboard.css. Class names
+ * are prefixed with ``op-`` so they don't collide with the existing
+ * server-rendered dashboard CSS that gets served from the same origin.
+ */
+
+/* ============ Pill ============ */
+.op-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border: 1px solid var(--ink-400);
+  color: var(--ink-700);
+  background: var(--ink-050);
+  width: max-content;
+  border-radius: 2px;
+}
+
+.op-pill .op-pill-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ink-600);
+}
+
+.op-pill.is-active {
+  color: var(--signal-active);
+  border-color: var(--signal-active);
+}
+.op-pill.is-active .op-pill-dot {
+  background: var(--signal-active);
+  box-shadow: 0 0 6px var(--signal-active);
+  animation: operator-pulse 1.6s ease-in-out infinite;
+}
+
+.op-pill.is-ok {
+  color: var(--signal-ok);
+  border-color: var(--signal-ok);
+}
+.op-pill.is-ok .op-pill-dot {
+  background: var(--signal-ok);
+}
+
+.op-pill.is-warn {
+  color: var(--signal-warn);
+  border-color: var(--signal-warn);
+}
+.op-pill.is-warn .op-pill-dot {
+  background: var(--signal-warn);
+}
+
+.op-pill.is-err {
+  color: var(--signal-err);
+  border-color: var(--signal-err);
+}
+.op-pill.is-err .op-pill-dot {
+  background: var(--signal-err);
+}
+
+.op-pill.is-cool {
+  color: var(--signal-cool);
+  border-color: var(--signal-cool);
+}
+.op-pill.is-cool .op-pill-dot {
+  background: var(--signal-cool);
+}
+
+/* ============ Phase Dots ============ */
+.op-phase-dots {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.op-phase-dots .op-phase-dot {
+  width: 14px;
+  height: 2px;
+  background: var(--ink-300);
+}
+
+.op-phase-dots .op-phase-dot.is-done {
+  background: var(--signal-ok);
+}
+
+.op-phase-dots .op-phase-dot.is-active {
+  background: var(--accent);
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 0 0 3px rgba(255, 122, 26, 0.18);
+}
+
+.op-phase-dots .op-phase-dot.is-active::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.6), transparent);
+  animation: operator-shimmer 1.4s linear infinite;
+}
+
+.op-phase-dots[data-shimmer="off"] .op-phase-dot.is-active::after {
+  display: none;
+}
+
+.op-phase-dots .op-phase-dot.is-fail {
+  background: var(--signal-err);
+}
+
+/* ============ Chip ============ */
+.op-chip {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  padding: 5px 10px;
+  border: 1px solid var(--ink-400);
+  color: var(--ink-700);
+  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 1px;
+  transition:
+    color 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.op-chip:hover {
+  color: var(--ink-900);
+  border-color: var(--ink-500);
+}
+
+.op-chip.is-on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.op-chip .op-chip-n {
+  font-size: 8px;
+  color: var(--ink-500);
+  border: 1px solid var(--ink-400);
+  padding: 0 4px;
+  border-radius: 1px;
+}
+
+.op-chip.is-on .op-chip-n {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ============ KPI tile ============ */
+.op-kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 20px 24px 22px;
+}
+
+.op-kpi .op-kpi-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-600);
+}
+
+.op-kpi .op-kpi-val {
+  font-family: var(--font-serif);
+  font-size: 42px;
+  line-height: 1;
+  color: var(--ink-950);
+  font-weight: 400;
+}
+
+.op-kpi .op-kpi-val em {
+  font-style: normal;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--accent);
+  margin-left: 6px;
+}
+
+.op-kpi .op-kpi-sub {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--ink-600);
+}
+
+.op-kpi .op-kpi-spark {
+  margin-top: 4px;
+  color: var(--accent);
+}
+
+/* ============ Sparkline ============ */
+.op-sparkline {
+  display: block;
+}
+
+/* ============ Button ============ */
+.op-btn {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 7px 12px;
+  border: 1px solid var(--ink-400);
+  background: transparent;
+  color: var(--ink-900);
+  cursor: pointer;
+  border-radius: 0;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.op-btn:hover {
+  background: var(--ink-200);
+  border-color: var(--ink-900);
+}
+
+.op-btn.is-primary {
+  background: var(--ink-900);
+  color: var(--ink-000);
+  border-color: var(--ink-900);
+}
+
+.op-btn.is-primary:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.op-btn.is-ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink-700);
+}
+
+.op-btn.is-ghost:hover {
+  color: var(--ink-900);
+  background: transparent;
+  border-color: transparent;
+}
+
+.op-btn.is-danger {
+  color: var(--signal-err);
+  border-color: var(--signal-err);
+}
+
+.op-btn.is-danger:hover {
+  background: var(--signal-err);
+  color: var(--ink-000);
+}
+
+.op-btn.is-sm {
+  padding: 4px 8px;
+  font-size: 9px;
+}
+
+/* ============ Search input ============ */
+.op-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--ink-050);
+  border: 1px solid var(--ink-300);
+  padding: 6px 10px;
+  min-width: 260px;
+  border-radius: 0;
+}
+
+.op-search input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--ink-900);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  width: 100%;
+}
+
+.op-search input::placeholder {
+  color: var(--ink-500);
+}
+
+.op-search .op-search-icon {
+  color: var(--ink-500);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.op-search .op-search-hotkey {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--ink-600);
+  border: 1px solid var(--ink-400);
+  padding: 1px 5px;
+  border-radius: 1px;
+}
+
+/* ============ Section header ============ */
+.op-sec-hd {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: 12px;
+  border-bottom: var(--rule);
+  margin-bottom: 16px;
+}
+
+.op-sec-hd .op-sec-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-700);
+}
+
+.op-sec-hd .op-sec-right {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-500);
+}
+
+/* ============ Table ============ */
+.op-tbl {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.op-tbl thead th {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-500);
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: var(--rule);
+  background: var(--ink-050);
+  font-weight: 400;
+}
+
+.op-tbl tbody td {
+  padding: 12px;
+  border-bottom: var(--rule-dim);
+  font-size: 13px;
+}
+
+.op-tbl.is-lg tbody td {
+  padding: 14px;
+}
+
+.op-tbl tbody tr {
+  transition: background 0.1s ease;
+}
+
+.op-tbl tbody tr:hover {
+  background: var(--ink-050);
+}
+
+.op-tbl tbody tr.is-live {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 122, 26, 0.08),
+    transparent 70%
+  );
+}
+
+.op-tbl td.is-num {
+  text-align: right;
+  font-family: var(--font-mono);
+}
+
+/* ============ Brand glyph ============ */
+.op-glyph {
+  width: 20px;
+  height: 20px;
+  background: var(--ink-900);
+  position: relative;
+  display: inline-block;
+}
+
+.op-glyph .op-glyph-dot {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 4px;
+  height: 4px;
+  background: var(--accent);
+  box-shadow: 0 0 4px var(--accent);
+}
+
+.op-wordmark {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-900);
+}
+
+.op-wordmark b {
+  font-weight: 600;
+}

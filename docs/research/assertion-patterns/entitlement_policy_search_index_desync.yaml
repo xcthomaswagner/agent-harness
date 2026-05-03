@@ -1,0 +1,35 @@
+assertion_pattern: entitlement_policy_search_index_desync
+category: sharing_entitlements
+priority: 2
+confidence: Verified (Primary)
+required_clouds: ["commerce_b2b"]
+# CRITICAL GATE: "Entitlement" is a name collision between Salesforce clouds.
+# Service Cloud has Entitlement (support-contract entitlements on cases).
+# B2B Commerce has CommerceEntitlementPolicy (buyer-to-product access).
+# Without this gate, every Service Cloud ticket mentioning "entitlement" would
+# falsely trigger. Detector MUST confirm commerce_b2b is in detected_clouds
+# via presence of CommerceEntitlementPolicy / BuyerGroup / WebStore sObjects or
+# commerce-specific metadata, not just the word "entitlement".
+xcsf30_relevance: "Not yet hit in XCSF30 archive but likely inevitable for any B2B store work."
+trigger_conditions:
+  - cloud_match: detected_clouds must include "commerce_b2b" (gate)
+  - ticket involves: entitlement policy, BuyerGroup, CommerceEntitlementPolicy, CommerceEntitlementProduct, BuyerGroupMember, catalog assignment, price book linkage
+  - complaint about product visibility (empty storefront, blank catalog, products not showing)
+detection_signals:
+  - ticket text matches: "products not showing", "empty catalog", "blank storefront", "buyer can't see products", "entitlement set up but no products"
+  - recent change to: entitlement policy, buyer group membership, catalog assignment, price book
+  - NO mention of: "search index rebuild", "index rebuild", "reindex"
+expected_agent_behavior:
+  - clarify first: "Was a search index rebuild performed after the last entitlement/catalog/price book change? Rebuild is required — it does not happen automatically."
+  - provide context: "Salesforce imposes a 60-rebuild-per-hour cap (release 234, Spring '22)."
+  - surface rebuild endpoint / CLI / UI path before deep code investigation
+must_not_do:
+  - assume code-level fix is needed before confirming rebuild status
+  - recommend SOQL-based debugging without the rebuild check first
+citations:
+  - https://help.salesforce.com/s/articleView?id=sf.comm_search_index_build.htm
+  - https://help.salesforce.com/s/articleView?id=release-notes.rn_b2b_comm_lex_index_rebuild_limit.htm&release=234
+  - https://trailhead.salesforce.com/content/learn/modules/b2b2c-commerce-for-merchandisers/b2b2c-make-store-searchable
+frequency_in_community: high (most common B2B Commerce day-1 support call)
+verified_numeric_facts:
+  - 60 rebuilds per hour cap (release 234 / Spring '22)

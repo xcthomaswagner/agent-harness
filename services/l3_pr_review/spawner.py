@@ -17,6 +17,7 @@ import structlog
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from shared.env_sanitize import sanitized_env
+from shared.model_policy import resolve_model
 
 logger = structlog.get_logger()
 
@@ -392,7 +393,10 @@ class SessionSpawner:
             # _spawn itself fails (e.g. FileNotFoundError before the
             # watchdog starts), it releases the fd before returning.
             return self._spawn(
-                "pr-review", prompt, model="opus", pr_number=pr_number,
+                "pr-review",
+                prompt,
+                role="l3_pr_review",
+                pr_number=pr_number,
                 claim_fd=claim_fd,
             )
         except BaseException:
@@ -414,7 +418,9 @@ class SessionSpawner:
             bot_marker=BOT_COMMENT_MARKER,
             failure_logs=self._sanitize_ci_logs(failure_logs[:3000]),
         )
-        return self._spawn("ci-fix", prompt, model="sonnet", pr_number=pr_number)
+        return self._spawn(
+            "ci-fix", prompt, role="l3_ci_fix", pr_number=pr_number
+        )
 
     @staticmethod
     def _sanitize_tag(text: str, tag: str) -> str:
@@ -463,7 +469,12 @@ class SessionSpawner:
             comment_body=self._sanitize_user_content(comment_body[:3000]),
             bot_marker=BOT_COMMENT_MARKER,
         )
-        return self._spawn("comment-response", prompt, model="sonnet", pr_number=pr_number)
+        return self._spawn(
+            "comment-response",
+            prompt,
+            role="l3_comment_response",
+            pr_number=pr_number,
+        )
 
     # Default timeout per session type (seconds). Override via L3_SESSION_TIMEOUT.
     _TIMEOUTS: ClassVar[dict[str, int]] = {
@@ -473,7 +484,12 @@ class SessionSpawner:
     }
 
     def _spawn(
-        self, session_type: str, prompt: str, model: str = "opus", pr_number: int = 0,
+        self,
+        session_type: str,
+        prompt: str,
+        role: str = "l3_pr_review",
+        pr_number: int = 0,
+        model: str = "",
         claim_fd: int | None = None,
     ) -> bool:
         """Launch a Claude Code headless session with logging and timeout.
@@ -483,11 +499,18 @@ class SessionSpawner:
         watchdog releases it when the subprocess exits. On early
         failure paths (CLI not found, OSError) we release it here.
         """
+        model_selection = resolve_model(role)
+        model = model or model_selection.claude_code_model
         cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions"]
         if model == "sonnet":
-            cmd.extend(["--model", "sonnet"])
+            cmd.extend(["--model", model])
 
-        log = logger.bind(session_type=session_type, model=model, pr_number=pr_number)
+        log = logger.bind(
+            session_type=session_type,
+            model=model,
+            reasoning=model_selection.reasoning,
+            pr_number=pr_number,
+        )
 
         cwd = self._repo_path or os.getenv("CLIENT_REPO_PATH", "")
         if not cwd:

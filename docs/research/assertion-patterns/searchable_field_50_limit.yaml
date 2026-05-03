@@ -1,0 +1,33 @@
+assertion_pattern: searchable_field_50_limit
+category: catalog_search
+priority: 4
+confidence: Verified (Primary)
+required_clouds: ["commerce_b2b", "commerce_b2c"]
+# Gate: the 50-searchable-field cap is specific to B2B/B2C Commerce product
+# indexing. Sales Cloud's "custom field searchability" is governed by a
+# different mechanism (Search Layouts / global search). Without the gate, a
+# ticket that says "add searchable custom fields to the Opportunity" would
+# falsely trigger.
+xcsf30_relevance: "Not yet hit; relevant for any B2B store configuration work touching product attributes."
+trigger_conditions:
+  - cloud_match: detected_clouds must include "commerce_b2b" or "commerce_b2c" (gate)
+  - ticket involves: custom product attributes, searchable fields, filter facets, product indexing
+  - OR adding ProductAttributeSet / ProductAttributeSetItem records
+  - complaint about: search rebuild running but products invisible, new attributes not showing as filters
+detection_signals:
+  - per-product count of (ProductAttributeSetItem where IsSearchable=true OR IsFilterable=true) + (standard searchable fields on Product2) > 50
+  - OR ticket requests addition of searchable attributes that would push the count over 50
+  - recent attribute-addition work combined with "products not returning in search"
+expected_agent_behavior:
+  - query product attribute counts before acting on rebuild failures
+  - flag: "Hard cap: 50 searchable fields + attributes per product. Exceeding breaks the next rebuild."
+  - if ticket requests > 50, route to architecture: either consolidate attributes or split product into multiple products
+must_not_do:
+  - recommend rebuild retry without count check
+  - suggest adding more searchable attributes without counting current total
+citations:
+  - https://help.salesforce.com/s/articleView?id=sf.b2b_commerce_product_index.htm
+  - https://trailhead.salesforce.com/content/learn/modules/b2b2c-commerce-for-merchandisers/b2b2c-make-store-searchable
+verified_numeric_facts:
+  - "50 searchable fields + attributes per product (combined cap)"
+verbatim_quote: "A product can have up to 50 searchable fields or other attributes, and having more than that interferes with the next search index rebuild."

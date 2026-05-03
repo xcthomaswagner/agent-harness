@@ -9,6 +9,7 @@ API (autonomy_ingest.GET /api/autonomy) and the HTML dashboard
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -408,7 +409,7 @@ def compute_daily_trend(
 ) -> list[tuple[str, float | None, int]]:
     """Return daily buckets for the given metric over window_days.
 
-    metric in ('fpa', 'defect_escape', 'catch_rate').
+    metric in ('fpa', 'defect_escape', 'catch_rate', 'auto_merge').
 
     Each tuple: (iso_date, value_or_None, sample_count_that_day).
 
@@ -416,6 +417,9 @@ def compute_daily_trend(
     - defect_escape: PRs merged that day (merged=1, merged_at set) →
       (escaped within window) / merged_for_day
     - catch_rate: human issues created that day → matched/total
+    - auto_merge: auto-merge decision rows created that day →
+      merged / (merged + blocked + hold). 'skipped' rows excluded as
+      not-eligible; matches the Home card's point-in-time math.
     """
     today = datetime.now(UTC).date()
     start_date = today - timedelta(days=window_days - 1)
@@ -506,6 +510,54 @@ def compute_daily_trend(
                     {int(m["human_issue_id"]) for m in matched_rows}
                 )
                 buckets.append((d, round(matched_count / n, 3), n))
+        return buckets
+
+    if metric == "auto_merge":
+        # Daily auto-merge adoption from manual_overrides decision stream.
+        # Uses the same allow-list as ``operator_api_data._compute_auto_merge_rate``
+        # so the daily trend and the point-in-time rate on the Home card agree
+        # on which decision values count toward the denominator.
+        from autonomy_store.auto_merge import list_recent_auto_merge_decisions
+
+        eligible_decisions = frozenset(
+            {"merged", "auto_merged", "merge", "blocked", "hold"}
+        )
+        succeeded_decisions = frozenset({"merged", "auto_merged", "merge"})
+
+        decisions = list_recent_auto_merge_decisions(
+            conn,
+            limit=10_000,
+            since_iso=cutoff,
+            client_profile=profile,
+        )
+        by_day_counts: dict[str, tuple[int, int]] = {}
+        for d_row in decisions:
+            created = d_row["created_at"] or ""
+            if len(created) < 10:
+                continue
+            day = created[:10]
+            try:
+                payload = json.loads(d_row["payload_json"] or "{}")
+            except (ValueError, TypeError):
+                continue
+            decision = str(payload.get("decision", "")).lower()
+            if decision not in eligible_decisions:
+                continue
+            merged_now, eligible_now = by_day_counts.get(day, (0, 0))
+            eligible_now += 1
+            if decision in succeeded_decisions:
+                merged_now += 1
+            by_day_counts[day] = (merged_now, eligible_now)
+
+        for i in range(window_days):
+            d = (start_date + timedelta(days=i)).isoformat()
+            merged_now, eligible_now = by_day_counts.get(d, (0, 0))
+            if eligible_now == 0:
+                buckets.append((d, None, 0))
+            else:
+                buckets.append(
+                    (d, round(merged_now / eligible_now, 3), eligible_now)
+                )
         return buckets
 
     raise ValueError(f"unknown metric: {metric!r}")

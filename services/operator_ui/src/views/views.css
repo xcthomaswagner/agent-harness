@@ -1,0 +1,507 @@
+/* ============ Shared view scaffolding ============ */
+
+.op-section {
+  margin-bottom: 44px;
+}
+
+/* ============ Home — profile cards ============ */
+.op-profiles-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0;
+  border-top: var(--rule);
+  border-left: var(--rule);
+}
+
+.op-profile-card {
+  border-right: var(--rule);
+  border-bottom: var(--rule);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--ink-050);
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    transform 0.15s ease;
+  text-decoration: none;
+  color: inherit;
+}
+
+.op-profile-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+  text-decoration: none;
+}
+
+.op-profile-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.op-profile-name {
+  font-family: var(--font-serif);
+  font-size: 22px;
+  color: var(--ink-950);
+}
+
+.op-profile-sample {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-500);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.op-profile-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border: var(--rule);
+  background: var(--ink-000);
+}
+
+.op-profile-metric {
+  padding: 10px 12px;
+  border-right: var(--rule);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.op-profile-metric:last-child {
+  border-right: none;
+}
+
+.op-profile-metric-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--ink-500);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.op-profile-metric-val {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  color: var(--ink-900);
+}
+
+.op-profile-metric-val.is-missing {
+  color: var(--ink-500);
+}
+
+.op-profile-footer {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ============ Lessons strip ============ */
+.op-lessons-strip {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  border: var(--rule);
+}
+
+.op-lessons-cell {
+  padding: 18px 16px;
+  border-right: var(--rule);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--ink-050);
+  cursor: pointer;
+  transition: background 0.12s ease;
+  color: inherit;
+  text-decoration: none;
+}
+
+.op-lessons-cell:hover {
+  background: var(--ink-100);
+  text-decoration: none;
+}
+
+.op-lessons-cell:last-child {
+  border-right: none;
+}
+
+.op-lessons-cell-n {
+  font-family: var(--font-serif);
+  font-size: 32px;
+  line-height: 1;
+  color: var(--ink-950);
+}
+
+.op-lessons-cell-lbl {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-600);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+/* ============ Data-state banners ============ */
+.op-loading,
+.op-error,
+.op-empty {
+  padding: 40px 24px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-500);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.op-error {
+  color: var(--signal-err);
+}
+
+/* ============ Trace Detail ============ */
+.op-phase-timeline {
+  display: flex;
+  flex-direction: column;
+  border: var(--rule);
+}
+
+.op-phase-row {
+  display: grid;
+  grid-template-columns: 90px 48px 24px 180px 1fr 90px;
+  gap: 16px;
+  align-items: center;
+  padding: 14px 16px;
+  border-bottom: var(--rule-dim);
+  background: var(--ink-000);
+}
+
+.op-phase-row:last-child {
+  border-bottom: none;
+}
+
+.op-phase-row.is-active {
+  background: rgba(255, 122, 26, 0.06);
+}
+
+.op-phase-row .op-phase-dur {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-700);
+}
+
+.op-phase-row .op-phase-idx {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-500);
+}
+
+.op-phase-row .op-phase-name {
+  font-family: var(--font-serif);
+  font-size: 16px;
+  color: var(--ink-900);
+}
+
+.op-phase-row .op-phase-events {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-600);
+}
+
+.op-phase-row .op-phase-state {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  text-align: right;
+}
+
+.op-phase-row.is-done .op-phase-state {
+  color: var(--signal-ok);
+}
+.op-phase-row.is-active .op-phase-state {
+  color: var(--signal-active);
+}
+.op-phase-row.is-fail .op-phase-state {
+  color: var(--signal-err);
+}
+.op-phase-row.is-pending .op-phase-state {
+  color: var(--ink-500);
+}
+
+/* Event log */
+.op-event-log {
+  max-height: 360px;
+  overflow-y: auto;
+  border: var(--rule);
+  background: var(--ink-050);
+}
+
+.op-event-row {
+  display: grid;
+  grid-template-columns: 180px 160px 1fr;
+  gap: 16px;
+  padding: 8px 12px;
+  border-bottom: var(--rule-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  align-items: baseline;
+}
+
+.op-event-row:last-child {
+  border-bottom: none;
+}
+
+.op-event-row .op-event-time {
+  color: var(--ink-600);
+}
+
+.op-event-row .op-event-ev {
+  color: var(--signal-active);
+}
+
+.op-event-row .op-event-msg {
+  color: var(--ink-800);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Meta row of chips under view head */
+.op-meta-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+}
+
+/* ============ Autonomy ============ */
+.op-metric-band {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border: var(--rule);
+  background: var(--ink-050);
+  margin-bottom: 32px;
+}
+
+.op-metric-cell {
+  padding: 22px 24px;
+  border-right: var(--rule);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.op-metric-cell:last-child {
+  border-right: none;
+}
+
+.op-metric-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-600);
+}
+
+.op-metric-val {
+  font-family: var(--font-serif);
+  font-size: 38px;
+  line-height: 1;
+  color: var(--ink-950);
+}
+
+.op-metric-sub {
+  font-size: 12px;
+  color: var(--ink-600);
+}
+
+.op-trend-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.op-trend-card {
+  border: var(--rule);
+  padding: 20px 22px;
+  background: var(--ink-050);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.op-trend-card-lbl {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-600);
+}
+
+.op-trend-card-val {
+  font-family: var(--font-serif);
+  font-size: 30px;
+  color: var(--ink-950);
+  line-height: 1;
+}
+
+.op-escape-severe {
+  color: var(--signal-err);
+}
+
+/* ============ PR drilldown ============ */
+.op-pr-two-col {
+  display: grid;
+  grid-template-columns: 1.6fr 1fr;
+  gap: 24px;
+  margin-bottom: 32px;
+}
+
+.op-auto-merge-card {
+  border: var(--rule);
+  padding: 22px 24px;
+  background: var(--ink-050);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.op-auto-merge-decision {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.op-auto-merge-decision.is-merged {
+  color: var(--signal-ok);
+}
+.op-auto-merge-decision.is-blocked {
+  color: var(--signal-err);
+}
+.op-auto-merge-decision.is-hold {
+  color: var(--signal-warn);
+}
+
+.op-auto-merge-conf {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-700);
+}
+
+.op-auto-merge-reasons {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.op-auto-merge-reasons li {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-700);
+}
+
+/* ============ Tickets view ============ */
+.op-tickets-grid {
+  display: grid;
+  grid-template-columns: 1fr 360px;
+  gap: 0;
+  min-height: 500px;
+}
+
+.op-tickets-list {
+  border-right: var(--rule);
+}
+
+.op-tickets-rail {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+.op-rail-empty {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-500);
+  text-align: center;
+  padding: 40px 0;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.op-rail-ticket-id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-600);
+  letter-spacing: 0.08em;
+}
+
+.op-rail-ticket-title {
+  font-family: var(--font-serif);
+  font-size: 20px;
+  color: var(--ink-950);
+}
+
+.op-rail-live-log {
+  flex: 1;
+  max-height: 420px;
+  overflow-y: auto;
+  border: var(--rule);
+  background: var(--ink-050);
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column-reverse; /* Newest on top */
+  gap: 4px;
+}
+
+.op-rail-log-line {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-800);
+  display: grid;
+  grid-template-columns: 60px 90px 1fr;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: var(--rule-dim);
+  animation: operator-log-in 180ms ease-out;
+}
+
+.op-rail-log-line:last-child {
+  border-bottom: none;
+}
+
+.op-rail-log-time {
+  color: var(--ink-500);
+}
+
+.op-rail-log-team {
+  color: var(--signal-active);
+}
+
+.op-rail-log-msg {
+  color: var(--ink-900);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.op-rail-log-conn {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-500);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 6px 0;
+}
+
+.op-rail-log-conn.is-err {
+  color: var(--signal-err);
+}

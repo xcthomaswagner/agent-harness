@@ -1,0 +1,32 @@
+assertion_pattern: scratch_org_commerce_oms_feature_check
+category: sfdx_deployment
+priority: 1
+confidence: Corroborated  # single practitioner blog; strengthen before production
+required_clouds: ["commerce_b2b", "revenue_cpq"]
+# Gate: only fire when ticket touches B2B Commerce AND/OR Revenue Cloud's Order
+# Management. OMS lives under Revenue Cloud in some org contexts and is bridged
+# to Commerce checkout in others. A Sales Cloud ticket that mentions "order
+# history" must NOT trigger this detector — hence the required_clouds gate.
+xcsf30_relevance: "XCSF30-88825 hit this exact failure mode. Agent pivoted OrderSummary → Order mid-run ad-hoc. Would have been caught."
+trigger_conditions:
+  - cloud_match: ticket's detected_clouds must intersect required_clouds (gate)
+  - ticket text references: "OrderSummary", "OrderItemSummary", "ConnectApi.OrderSummary", "Order Management", "OMS"
+  - deploy target is a scratch org
+  - OR scratch org definition JSON being created/modified
+detection_signals:
+  - scratch org def missing "OrderManagement" in features array
+  - OR scratch org def missing "B2BCommerce" in features array
+  - OR settings.orderSettings.enableEnhancedCommerceOrders is not true
+  - OR settings.orderManagementSettings.enableOrderManagement is not true
+  - AND ticket work touches OMS-related sObjects
+expected_agent_behavior:
+  - flag before deploy: "Scratch org may lack OMS bridge. Verify triple-flag setup: OrderManagement + B2BCommerce features, enableEnhancedCommerceOrders, enableOrderManagement."
+  - offer to either (a) add missing settings to scratch def, or (b) pivot to standard Order/OrderItem if OMS not available
+must_not_do:
+  - silently proceed to deploy against incomplete scratch org config
+  - attempt OMS API calls that will runtime-fail at checkout test
+citations:
+  - https://lekkimworld.com/2023/01/31/scratch-org-with-salesforce-order-management/
+  - https://developer.salesforce.com/docs/atlas.en-us.sfdx_dev.meta/sfdx_dev/sfdx_dev_scratch_orgs_def_file_config_values.htm
+frequency_in_community: medium (thin public discussion; internal SF partner knowledge)
+follow_up: "Confirm with a second practitioner source before committing to detector."

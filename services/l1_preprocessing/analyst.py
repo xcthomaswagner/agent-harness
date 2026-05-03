@@ -16,6 +16,7 @@ from typing import Any
 
 import anthropic
 import structlog
+from shared.model_policy import resolve_model
 
 from config import Settings
 from models import (
@@ -317,6 +318,12 @@ class TicketAnalyst:
 
         system_prompt = self._build_system_prompt(ticket.ticket_type)
         user_content = self._build_user_prompt(ticket)
+        model_selection = resolve_model("analyst")
+        log.info(
+            "analyst_model_selected",
+            model=model_selection.anthropic_model,
+            reasoning=model_selection.reasoning,
+        )
 
         # Single retry loop for every retryable Anthropic error type.
         # Previously there were three near-identical ``except`` blocks
@@ -331,7 +338,7 @@ class TicketAnalyst:
         for attempt in range(1, max_retries + 1):
             try:
                 response = await self._client.messages.create(
-                    model="claude-opus-4-20250514",
+                    model=model_selection.anthropic_model,
                     max_tokens=4096,
                     system=system_prompt,
                     messages=[{"role": "user", "content": user_content}],  # type: ignore[typeddict-item]

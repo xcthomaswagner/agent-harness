@@ -1,0 +1,212 @@
+/*
+ * Operator dashboard — design-system tokens.
+ *
+ * Ported from design_handoff_agentic_harness/Design System.html + dashboard.css.
+ * Variable names preserved 1:1 with the handoff so a future designer can
+ * grep between the HTML prototype and this stylesheet.
+ *
+ * Theme: default = dark (warm near-black). Light theme activated by
+ *   <html data-theme="light">. Toggle persists in localStorage via the
+ *   Topbar component.
+ */
+
+:root,
+:root[data-theme="dark"] {
+  /* Ink scale — cool graphite → clear white */
+  --ink-000: #0a0d12; /* canvas */
+  --ink-050: #111620; /* raised surface */
+  --ink-080: #13233f; /* accent ink (rare) */
+  --ink-100: #171d27; /* sidebar, hover */
+  --ink-200: #202938; /* dim rules */
+  --ink-300: #2b3647; /* rules */
+  --ink-400: #3a475a;
+  --ink-500: #697586; /* meta text */
+  --ink-600: #9aa4b2; /* muted body */
+  --ink-700: #c5ccd6; /* headings / section labels */
+  --ink-800: #d8dee6; /* body */
+  --ink-900: #e7ecf3; /* primary text */
+  --ink-950: #ffffff; /* crisp highlight */
+
+  /* Signal colours — meaning-bearing only */
+  --signal-active: #14b8a6; /* running / in-flight (THE accent) */
+  --signal-active-2: #5eead4;
+  --signal-ok: #22c55e; /* passed */
+  --signal-warn: #f59e0b; /* stuck */
+  --signal-err: #ef4444; /* failed */
+  --signal-cool: #60a5fa; /* queued */
+  --accent: var(--signal-active);
+
+  /* Typography */
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: "Inter", -apple-system, system-ui, sans-serif;
+  --font-serif: var(--font-sans);
+
+  /* Rhythm */
+  --unit: 8px;
+  --gutter: 32px;
+  --rule: 1px solid var(--ink-300);
+  --rule-dim: 1px solid var(--ink-200);
+  --rule-strong: 1px solid var(--ink-500);
+  --row-pad-y: 14px;
+}
+
+/* Cozy density reduces row height without changing other rhythm. */
+[data-density="cozy"] {
+  --row-pad-y: 9px;
+}
+
+/* ============ LIGHT THEME ============ */
+:root[data-theme="light"] {
+  --ink-000: #f7f9fc;
+  --ink-050: #ffffff;
+  --ink-100: #f1f5f9;
+  --ink-200: #e2e8f0;
+  --ink-300: #cbd5e1;
+  --ink-400: #94a3b8;
+  --ink-500: #64748b;
+  --ink-600: #475569;
+  --ink-700: #334155;
+  --ink-800: #1e293b;
+  --ink-900: #101828;
+  --ink-950: #020617;
+
+  --signal-active: #0f766e;
+  --signal-ok: #15803d;
+  --signal-warn: #b45309;
+  --signal-err: #b91c1c;
+  --signal-cool: #2563eb;
+}
+
+/* ============ Base ============ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--ink-000);
+  color: var(--ink-900);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+[data-theme="light"] body {
+  background-image: none;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+::selection {
+  background: var(--signal-active);
+  color: var(--ink-000);
+}
+
+/* Type utility classes used by view chrome */
+.font-serif {
+  font-family: var(--font-serif);
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+/* Section header rule — mono uppercase label above a rule */
+.sec-hd {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: 12px;
+  border-bottom: var(--rule);
+  margin-bottom: 16px;
+}
+
+.sec-hd .label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-700);
+}
+
+.sec-hd .rt {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-500);
+}
+
+/* Data values — always monospace. Scoped to the .op-mono class and the
+ * op-app shell so we don't accidentally restyle <code>/<time>/<kbd>
+ * elements on neighbouring dashboards that share the origin. */
+.op-mono,
+.op-app code,
+.op-app kbd,
+.op-app time,
+[data-mono] {
+  font-family: var(--font-mono);
+  font-feature-settings: "tnum" 1, "zero" 1;
+}
+
+/* Animation keyframes used by active dots & log lines */
+@keyframes operator-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.9);
+  }
+}
+
+@keyframes operator-log-in {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+    background: rgba(255, 122, 26, 0.12);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+    background: transparent;
+  }
+}
+
+@keyframes operator-log-in-light {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+    background: rgba(217, 83, 10, 0.12);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+    background: transparent;
+  }
+}
+
+@keyframes operator-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
