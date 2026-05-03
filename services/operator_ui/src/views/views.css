@@ -410,7 +410,14 @@
 /* ============ Tickets view ============ */
 .op-tickets-grid {
   display: grid;
-  grid-template-columns: 1fr 360px;
+  /*
+   * List width is sized to comfortably fit its 4 fixed columns (120 + 120
+   * + 120 + 80 = 440px) plus a readable title column and borders. The rail
+   * gets the remaining space — typically wider than the list on a desktop
+   * viewport — so live agent activity has room to breathe instead of
+   * truncating mid-message in a narrow side panel.
+   */
+  grid-template-columns: minmax(560px, 0.9fr) minmax(520px, 1.6fr);
   gap: 0;
   min-height: 500px;
 }
@@ -452,7 +459,12 @@
 
 .op-rail-live-log {
   flex: 1;
-  max-height: 420px;
+  /*
+   * Tall enough that a typical multi-phase ticket run is visible without
+   * scrolling. Capped by the viewport so the panel doesn't push other UI
+   * off-screen on small displays.
+   */
+  max-height: min(720px, calc(100vh - 280px));
   overflow-y: auto;
   border: var(--rule);
   background: var(--ink-050);
@@ -464,14 +476,15 @@
 
 .op-rail-log-line {
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--ink-800);
   display: grid;
-  grid-template-columns: 60px 90px 1fr;
-  gap: 8px;
-  padding: 3px 0;
+  grid-template-columns: 70px 110px 1fr;
+  gap: 10px;
+  padding: 4px 0;
   border-bottom: var(--rule-dim);
   animation: operator-log-in 180ms ease-out;
+  align-items: start;
 }
 
 .op-rail-log-line:last-child {
@@ -488,9 +501,15 @@
 
 .op-rail-log-msg {
   color: var(--ink-900);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /*
+   * With the rail widened, prefer wrapping over ellipsis-truncation so
+   * full step messages are visible. Long unbroken tokens (paths, SHAs)
+   * still break to keep the layout from blowing out.
+   */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+  line-height: 1.4;
 }
 
 .op-rail-log-conn {
