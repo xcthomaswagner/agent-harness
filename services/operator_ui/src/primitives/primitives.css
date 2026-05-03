@@ -368,7 +368,7 @@
 .op-tbl tbody tr.is-live {
   background: linear-gradient(
     90deg,
-    rgba(255, 122, 26, 0.08),
+    var(--live-row-tint),
     transparent 70%
   );
 }
