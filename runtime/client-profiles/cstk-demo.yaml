@@ -1,0 +1,69 @@
+# Client Profile: cstk-demo
+# Internal demo client for the ContentStack platform profile. Routes ADO work
+# items in the "Research and Development" project to the cstk-demo GitHub repo.
+#
+# Aligned with the setup guide at:
+#   ~/SecondBrain/50-Research/Harness Demo For ContentStack/docs/contentstack-harness-setup.docx
+
+client: "cstk-demo"
+platform_profile: "contentstack"
+
+ticket_source:
+  type: "ado"
+  instance: "https://xc-devops.visualstudio.com"
+  project_key: "RND"  # Not used for ADO routing (which uses ado_project_name); placeholder for log/dashboard display
+  ado_project_name: "Research and Development"  # Exact ADO project name — used by L1 webhook routing
+  ai_label: "ai-implement"
+  quick_label: "ai-quick"
+  clarification_status: "Needs Info"
+  in_progress_status: "Active"   # ADO Agile process default
+  done_status: "Done"
+  custom_fields: {}
+
+source_control:
+  type: "github"
+  org: "xcthomaswagner"
+  repo: "cstk-demo"
+  default_branch: "main"
+  branch_prefix: "ai/"
+  pr_reviewers: []
+  github_repo: "xcthomaswagner/cstk-demo"
+
+ci_pipeline:
+  # Defaults assume a Next.js + pnpm client repo. Adjust once the repo's
+  # actual stack is in place (the cstk-demo repo is currently empty besides
+  # the README — these commands will become real when the repo is scaffolded).
+  test_command: "pnpm test"
+  lint_command: "pnpm lint"
+  build_command: "pnpm build"
+  e2e_command: ""
+
+test_framework:
+  unit: "vitest"
+  integration: ""
+  e2e: ""
+
+client_repo:
+  local_path: "/Users/thomaswagner/.harness/clients/cstk-demo"
+  github_repo: "xcthomaswagner/cstk-demo"
+  url: "https://github.com/xcthomaswagner/cstk-demo"
+
+autonomy:
+  auto_merge_enabled: false
+  low_risk_ticket_types: [docs, chore, config, dependency]
+
+# ---------------------------------------------------------------------------
+# Secrets — set these in services/l1_preprocessing/.env BEFORE first run.
+# Never commit values. The harness-mcp.json template references them as
+# ${VAR} placeholders that resolve from the runtime env at agent-spawn time.
+#
+#   CONTENTSTACK_API_KEY=<stack api key>
+#   CONTENTSTACK_DELIVERY_TOKEN=<delivery token for the env we'll QA against>
+#   CONTENTSTACK_MANAGEMENT_TOKEN=<management token>
+#   CONTENTSTACK_REGION=NA          # confirmed: NA region
+#   CONTENTSTACK_ENVIRONMENT=development
+#   CONTENTSTACK_BRANCH=ai          # all harness writes go to the `ai` branch
+#
+# Smoke-test before first run:
+#   ./scripts/smoke-test-contentstack-mcp.sh
+# ---------------------------------------------------------------------------
