@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -622,6 +623,109 @@ def test_traces_limit_caps_at_500(traces_client: TestClient) -> None:
     r = traces_client.get("/api/operator/traces?limit=9999")
     assert r.status_code == 200
     assert r.json()["limit"] == 500
+
+
+def test_traces_pr_created_bucket_is_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR Created / Review Done / QA Done should all land in 'done', not 'in-flight'."""
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    logs_dir = tmp_path / "logs"
+    import tracer as tracer_module
+
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    # Trace with a pr_url but no "Pipeline complete" → derive_trace_status = "PR Created"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    pr_path = logs_dir / "HARN-PR.jsonl"
+    pr_path.write_text(
+        json.dumps({
+            "ticket_id": "HARN-PR",
+            "trace_id": "t-pr",
+            "phase": "pr",
+            "event": "pr_opened",
+            "pr_url": "https://github.com/org/repo/pull/1",
+            "timestamp": "2026-04-18T12:00:00+00:00",
+            "source": "pipeline",
+        }) + "\n"
+    )
+
+    c = TestClient(_mk_app())
+    rows = c.get("/api/operator/traces").json()["traces"]
+    pr_row = next(r for r in rows if r["id"] == "HARN-PR")
+    assert pr_row["raw_status"] == "PR Created"
+    assert pr_row["status"] == "done", (
+        "PR Created should bucket as 'done' — agent work is finished"
+    )
+
+
+def test_traces_stale_inflight_reclassified_as_stuck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In-flight tickets with last activity > 2 hours ago should show as 'stuck'."""
+    import operator_api_data as oad_module
+
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    monkeypatch.setattr(oad_module, "_STALE_INFLIGHT_HOURS", 2)
+    logs_dir = tmp_path / "logs"
+    import tracer as tracer_module
+
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    # Dispatched ticket whose last event was 3 hours ago — should become stuck.
+    stale_ts = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    stale_path = logs_dir / "HARN-STALE.jsonl"
+    stale_path.write_text(
+        json.dumps({
+            "ticket_id": "HARN-STALE",
+            "trace_id": "t-stale",
+            "phase": "implement",
+            "event": "l2_dispatched",
+            "timestamp": stale_ts,
+            "source": "pipeline",
+        }) + "\n"
+    )
+
+    # Fresh ticket dispatched 30 minutes ago — should stay in-flight.
+    fresh_ts = (datetime.now(UTC) - timedelta(minutes=30)).isoformat()
+    fresh_path = logs_dir / "HARN-FRESH.jsonl"
+    fresh_path.write_text(
+        json.dumps({
+            "ticket_id": "HARN-FRESH",
+            "trace_id": "t-fresh",
+            "phase": "implement",
+            "event": "l2_dispatched",
+            "timestamp": fresh_ts,
+            "source": "pipeline",
+        }) + "\n"
+    )
+
+    c = TestClient(_mk_app())
+    rows = {r["id"]: r for r in c.get("/api/operator/traces").json()["traces"]}
+
+    assert rows["HARN-STALE"]["status"] == "stuck", (
+        "Dispatched ticket silent for 3h should be reclassified as stuck"
+    )
+    assert rows["HARN-FRESH"]["status"] == "in-flight", (
+        "Dispatched ticket only 30min old should remain in-flight"
+    )
 
 
 # ---------- /api/operator/traces/{id} (trace detail) ----------

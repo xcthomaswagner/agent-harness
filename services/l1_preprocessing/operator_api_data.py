@@ -415,21 +415,29 @@ _STATUS_TO_BUCKET: dict[str, str] = {
     "Merged": "done",
     "Failed": "done",
     "Timed Out": "done",
+    "Cleaned Up": "done",
+    # Agent work finished — PR exists or pipeline reached a human-review
+    # gate. No further pipeline action expected; move off the active board.
+    "PR Created": "done",
+    "Review Done": "done",
+    "QA Done": "done",
     # Stuck — the pipeline is alive but can't progress without help.
     "CI Fix": "stuck",
     "Agent Done (no PR)": "stuck",
     # Queued — before anything started.
     "Received": "queued",
     "Enriched": "queued",
-    # Everything else is in-flight.
+    # Active pipeline work.
     "Processing": "in-flight",
     "Dispatched": "in-flight",
     "Planned": "in-flight",
     "Implementing": "in-flight",
-    "Review Done": "in-flight",
-    "QA Done": "in-flight",
-    "PR Created": "in-flight",
 }
+
+# Tickets whose derived status is still "in-flight" after this long with
+# no new trace activity are reclassified as "stuck". Agents running for
+# more than 2 hours without writing a new event almost certainly died.
+_STALE_INFLIGHT_HOURS = 2
 
 
 def _normalize_trace_status(status: str) -> str:
@@ -439,10 +447,28 @@ def _normalize_trace_status(status: str) -> str:
 
 def _shape_trace_row(t: dict[str, Any]) -> dict[str, Any]:
     """Reshape a tracer.list_traces row to the operator dashboard contract."""
+    bucket = _normalize_trace_status(t.get("status", ""))
+
+    # Staleness override: a ticket still reporting "in-flight" whose last
+    # trace event is older than _STALE_INFLIGHT_HOURS is almost certainly
+    # a dead agent — reclassify as "stuck" so the operator knows to act.
+    if bucket == "in-flight":
+        last_ts_str = t.get("completed_at", "")
+        if last_ts_str:
+            try:
+                last_ts = datetime.fromisoformat(last_ts_str)
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.replace(tzinfo=UTC)
+                age_hours = (datetime.now(UTC) - last_ts).total_seconds() / 3600
+                if age_hours > _STALE_INFLIGHT_HOURS:
+                    bucket = "stuck"
+            except ValueError:
+                pass
+
     return {
         "id": t["ticket_id"],
         "title": t.get("ticket_title") or "",
-        "status": _normalize_trace_status(t.get("status", "")),
+        "status": bucket,
         "raw_status": t.get("status", ""),
         "phase": t.get("current_phase", ""),
         "elapsed": t.get("duration", ""),
