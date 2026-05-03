@@ -70,10 +70,11 @@
   --ink-900: #101828;
   --ink-950: #020617;
 
-  --signal-active: #0f766e;
+  --signal-active: #16a34a;
+  --signal-active-2: #4ade80;
   --signal-ok: #15803d;
-  --signal-warn: #b45309;
-  --signal-err: #b91c1c;
+  --signal-warn: #d97706;
+  --signal-err: #dc2626;
   --signal-cool: #2563eb;
 }
 
