@@ -141,6 +141,15 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
             )
         version = 6
         logger.info("autonomy_schema_migrated", version=version)
+    if version < 7:
+        with conn:
+            _migrate_to_v7(conn)
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (7, _now_iso()),
+            )
+        version = 7
+        logger.info("autonomy_schema_migrated", version=version)
     return version
 
 
@@ -492,6 +501,25 @@ def _migrate_to_v6(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX idx_pipeline_metrics_ticket_id "
         "ON pipeline_metrics (ticket_id)"
+    )
+
+
+def _migrate_to_v7(conn: sqlite3.Connection) -> None:
+    """v7: trigger_state table — persists edge-detection across restarts.
+
+    Stores the last-known tag state per ticket so an L1 restart doesn't
+    re-dispatch tickets that already had the trigger label before the
+    restart. Replaces the in-process _last_trigger_state dict in
+    claim_store.py for the cross-restart case.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trigger_state (
+            ticket_id TEXT PRIMARY KEY,
+            tag_present INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )
+        """
     )
 
 

@@ -448,6 +448,27 @@ async def ado_webhook(
         }
 
     _bump_webhook_counter(COUNTER_ACCEPTED_EDGE)
+
+    # Remove the trigger label and write a pickup comment so ADO reflects
+    # that the harness has accepted this ticket and won't re-dispatch it.
+    _trigger_label = ai_label
+    _ado_adapter = _get_ado_adapter()
+
+    async def _ado_pickup_writeback() -> None:
+        try:
+            await _ado_adapter.remove_label(ticket.id, _trigger_label)
+            await _ado_adapter.write_comment(
+                ticket.id,
+                f"🤖 **Agentic Harness** picked up this ticket. "
+                f"Dispatching to agent team now.\n\n"
+                f"The `{_trigger_label}` tag has been removed to prevent re-dispatch. "
+                f"Re-add it to trigger a new run.",
+            )
+        except Exception:
+            logger.warning("ado_pickup_writeback_failed", ticket_id=ticket.id, exc_info=True)
+
+    background_tasks.add_task(_ado_pickup_writeback)
+
     return _dispatch_ticket(
         ticket,
         background_tasks,

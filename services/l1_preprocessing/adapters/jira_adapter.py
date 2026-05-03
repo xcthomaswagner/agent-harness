@@ -391,6 +391,19 @@ class JiraAdapter:
             raise
         logger.info("jira_label_added", ticket_id=ticket_id, label=label)
 
+    async def remove_label(self, ticket_id: str, label: str) -> None:
+        """Remove a label from a Jira ticket, idempotently."""
+        url = f"/rest/api/3/issue/{ticket_id}"
+        body = {"update": {"labels": [{"remove": label}]}}
+        try:
+            response = await self._client.put(url, json=body)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error("jira_remove_label_failed", ticket_id=ticket_id,
+                         label=label, status=exc.response.status_code)
+            raise
+        logger.info("jira_label_removed", ticket_id=ticket_id, label=label)
+
     # --- Attachment upload ---
 
     async def upload_attachment(

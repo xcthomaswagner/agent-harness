@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "preact/hooks";
+import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 import { ViewHead } from "../chrome";
 import { Button, Chip, Pill, SectionHeader, Table } from "../primitives";
 import type { PillTone } from "../primitives";
@@ -172,6 +172,24 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
   const roster = useFeed<AgentRosterResponse>(
     row ? `/api/operator/tickets/${encodeURIComponent(row.id)}/agents` : null,
   );
+  const [triggerState, setTriggerState] = useState<"idle" | "busy" | "done" | "error">("idle");
+
+  // Reset button state when selected ticket changes
+  useEffect(() => { setTriggerState("idle"); }, [row?.id]);
+
+  const removeTrigger = useCallback(async () => {
+    if (!row || triggerState === "busy") return;
+    setTriggerState("busy");
+    try {
+      const res = await fetch(
+        `/api/operator/tickets/${encodeURIComponent(row.id)}/trigger-label`,
+        { method: "DELETE" },
+      );
+      setTriggerState(res.ok ? "done" : "error");
+    } catch {
+      setTriggerState("error");
+    }
+  }, [row, triggerState]);
 
   if (!row) {
     return <div class="op-rail-empty">Select a ticket to see its live log</div>;
@@ -190,7 +208,7 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
         {row.phase && <Pill tone="cool">phase · {row.phase}</Pill>}
       </div>
 
-      <div style={{ display: "flex", gap: "6px" }}>
+      <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
         <a href={href({ name: "trace-detail", id: row.id })}>
           <Button size="sm" variant="ghost">
             Trace →
@@ -202,6 +220,22 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
               PR ↗
             </Button>
           </a>
+        )}
+        {(row.status === "in-flight" || row.status === "stuck") && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={removeTrigger}
+            disabled={triggerState === "busy" || triggerState === "done"}
+          >
+            {triggerState === "busy"
+              ? "Removing…"
+              : triggerState === "done"
+                ? "Trigger removed"
+                : triggerState === "error"
+                  ? "Failed — retry?"
+                  : "Remove Trigger"}
+          </Button>
         )}
       </div>
 

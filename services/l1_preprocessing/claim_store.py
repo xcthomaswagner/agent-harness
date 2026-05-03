@@ -36,6 +36,40 @@ import structlog
 logger = structlog.get_logger()
 
 
+def _load_trigger_state_from_db(ticket_id: str) -> bool | None:
+    """Read persisted tag state for ticket_id. Returns None if no row."""
+    try:
+        from autonomy_store import autonomy_conn
+        with autonomy_conn() as conn:
+            row = conn.execute(
+                "SELECT tag_present FROM trigger_state WHERE ticket_id = ?",
+                (ticket_id,),
+            ).fetchone()
+            return bool(row[0]) if row is not None else None
+    except Exception:
+        return None
+
+
+def _save_trigger_state_to_db(ticket_id: str, tag_present: bool) -> None:
+    """Persist tag state for ticket_id to survive restarts."""
+    try:
+        from autonomy_store import autonomy_conn
+        from datetime import UTC, datetime
+        with autonomy_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO trigger_state (ticket_id, tag_present, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT (ticket_id) DO UPDATE SET
+                    tag_present = excluded.tag_present,
+                    updated_at = excluded.updated_at
+                """,
+                (ticket_id, int(tag_present), datetime.now(UTC).isoformat()),
+            )
+    except Exception:
+        pass
+
+
 # --- Idempotency: prevent duplicate processing ---
 #
 # Claims are stored as ``{ticket_id: claim_timestamp_unix_seconds}``
@@ -182,8 +216,13 @@ def _check_trigger_edge(
     next webhook to compare against.
     """
     with _last_trigger_state_lock:
+        if ticket_id not in _last_trigger_state:
+            db_state = _load_trigger_state_from_db(ticket_id)
+            if db_state is not None:
+                _last_trigger_state[ticket_id] = db_state
         prev_mem = _last_trigger_state.get(ticket_id, False)
         _last_trigger_state[ticket_id] = tag_present_now
+        _save_trigger_state_to_db(ticket_id, tag_present_now)
         if was_present_before is not None:
             # Payload delta is authoritative for this webhook's transition.
             return tag_present_now and not was_present_before
@@ -201,6 +240,12 @@ def _clear_trigger_state(ticket_id: str) -> None:
     """
     with _last_trigger_state_lock:
         _last_trigger_state.pop(ticket_id, None)
+    try:
+        from autonomy_store import autonomy_conn
+        with autonomy_conn() as conn:
+            conn.execute("DELETE FROM trigger_state WHERE ticket_id = ?", (ticket_id,))
+    except Exception:
+        pass
 
 
 def _reset_state(*extra: Any) -> None:

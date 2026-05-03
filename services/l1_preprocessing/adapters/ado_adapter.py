@@ -597,3 +597,34 @@ class AdoAdapter:
         new_tags = f"{current_tags}; {label_stripped}" if current_tags else label_stripped
         await self.update_fields(ticket_id, {"System.Tags": new_tags})
         logger.info("ado_label_added", ticket_id=ticket_id, label=label)
+
+    async def remove_label(self, ticket_id: str, label: str) -> None:
+        """Remove a tag from an ADO work item, idempotently.
+
+        No-ops if the tag isn't present. Case-insensitive match on
+        semicolon-separated tag elements — mirrors the guard in add_label.
+        """
+        project, wi_id = self._parse_ticket_id(ticket_id)
+
+        url = f"/{project}/_apis/wit/workItems/{wi_id}?api-version=7.1&$select=System.Tags"
+        response = await self._client.get(url)
+        if response.status_code >= 400:
+            logger.warning(
+                "ado_get_tags_failed",
+                ticket_id=ticket_id,
+                status=response.status_code,
+            )
+            response.raise_for_status()
+        current_tags = response.json().get("fields", {}).get("System.Tags", "")
+
+        label_stripped = label.strip()
+        existing = [t.strip() for t in current_tags.split(";") if t.strip()]
+        filtered = [t for t in existing if t.lower() != label_stripped.lower()]
+
+        if len(filtered) == len(existing):
+            logger.info("ado_label_not_present", ticket_id=ticket_id, label=label)
+            return
+
+        new_tags = "; ".join(filtered)
+        await self.update_fields(ticket_id, {"System.Tags": new_tags})
+        logger.info("ado_label_removed", ticket_id=ticket_id, label=label)

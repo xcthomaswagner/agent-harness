@@ -1140,3 +1140,53 @@ def get_lesson_counts() -> dict[str, Any]:
         return {"counts": counts}
     finally:
         conn.close()
+
+
+@router.delete(
+    "/tickets/{ticket_id}/trigger-label",
+    dependencies=[Depends(_require_dashboard_auth)],
+)
+async def remove_trigger_label(ticket_id: str) -> dict[str, Any]:
+    """Remove the ai-implement trigger label from a ticket in ADO.
+
+    Looks up the client profile for this ticket to find the configured
+    ai_label, then calls AdoAdapter.remove_label. Also writes a comment
+    so the ADO work item history shows who removed it and why.
+
+    Returns {"removed": true, "label": "<label>"} on success.
+    Raises 404 if no profile is found for the ticket's project prefix.
+    Raises 502 if the ADO call fails.
+    """
+    from main import _get_ado_adapter
+    from claim_store import _clear_trigger_state
+    from tracer import append_trace, generate_trace_id
+
+    prefix = ticket_id.split("-")[0] if "-" in ticket_id else ticket_id
+    profile = load_profile(prefix)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"No profile for project prefix '{prefix}'")
+
+    ai_label = profile.ai_label
+    adapter = _get_ado_adapter()
+
+    try:
+        await adapter.remove_label(ticket_id, ai_label)
+        await adapter.write_comment(
+            ticket_id,
+            f"🤖 **Agentic Harness** — trigger label `{ai_label}` removed via operator dashboard. "
+            f"Re-add the label to trigger a new run.",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"ADO write-back failed: {exc}") from exc
+
+    _clear_trigger_state(ticket_id)
+    append_trace(
+        ticket_id,
+        generate_trace_id(),
+        "operator",
+        "trigger_label_removed",
+        source="operator",
+        label=ai_label,
+    )
+
+    return {"removed": True, "label": ai_label, "ticket_id": ticket_id}
