@@ -401,8 +401,17 @@ async def ado_webhook(
     # --- Tag check: skip if neither ai_label nor quick_label is present ---
     # Use the already-tokenized labels from the adapter (exact match, not substring)
     ticket_labels_lower = {lbl.lower() for lbl in ticket.labels}
-    ai_label = (profile.ai_label if profile else "ai-implement").lower()
-    quick_label = (profile.quick_label if profile else "ai-quick").lower()
+    ai_label_raw = profile.ai_label if profile else "ai-implement"
+    quick_label_raw = profile.quick_label if profile else "ai-quick"
+    ai_label = ai_label_raw.lower()
+    quick_label = quick_label_raw.lower()
+    trigger_labels: list[str] = []
+    seen_trigger_labels: set[str] = set()
+    for label in (ai_label_raw, quick_label_raw):
+        label_key = label.lower()
+        if label_key in ticket_labels_lower and label_key not in seen_trigger_labels:
+            trigger_labels.append(label)
+            seen_trigger_labels.add(label_key)
     tag_present = (
         ai_label in ticket_labels_lower or quick_label in ticket_labels_lower
     )
@@ -451,18 +460,29 @@ async def ado_webhook(
 
     # Remove the trigger label and write a pickup comment so ADO reflects
     # that the harness has accepted this ticket and won't re-dispatch it.
-    _trigger_label = ai_label
+    _trigger_labels = tuple(trigger_labels)
     _ado_adapter = _get_ado_adapter()
 
     async def _ado_pickup_writeback() -> None:
         try:
-            await _ado_adapter.remove_label(ticket.id, _trigger_label)
+            for trigger_label in _trigger_labels:
+                await _ado_adapter.remove_label(ticket.id, trigger_label)
+            if len(_trigger_labels) == 1:
+                removal_sentence = (
+                    f"The trigger label `{_trigger_labels[0]}` has been removed "
+                    "to prevent re-dispatch."
+                )
+            else:
+                label_list = ", ".join(f"`{label}`" for label in _trigger_labels)
+                removal_sentence = (
+                    f"The trigger labels {label_list} have been removed "
+                    "to prevent re-dispatch."
+                )
             await _ado_adapter.write_comment(
                 ticket.id,
                 f"🤖 **Agentic Harness** picked up this ticket. "
                 f"Dispatching to agent team now.\n\n"
-                f"The `{_trigger_label}` tag has been removed to prevent re-dispatch. "
-                f"Re-add it to trigger a new run.",
+                f"{removal_sentence} Re-add a trigger label to start a new run.",
             )
         except Exception:
             logger.warning("ado_pickup_writeback_failed", ticket_id=ticket.id, exc_info=True)

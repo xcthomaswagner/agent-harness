@@ -29,6 +29,7 @@ from __future__ import annotations
 import collections
 import threading
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -54,8 +55,7 @@ def _save_trigger_state_to_db(ticket_id: str, tag_present: bool) -> None:
     """Persist tag state for ticket_id to survive restarts."""
     try:
         from autonomy_store import autonomy_conn
-        from datetime import UTC, datetime
-        with autonomy_conn() as conn:
+        with autonomy_conn() as conn, conn:
             conn.execute(
                 """
                 INSERT INTO trigger_state (ticket_id, tag_present, updated_at)
@@ -242,8 +242,11 @@ def _clear_trigger_state(ticket_id: str) -> None:
         _last_trigger_state.pop(ticket_id, None)
     try:
         from autonomy_store import autonomy_conn
-        with autonomy_conn() as conn:
-            conn.execute("DELETE FROM trigger_state WHERE ticket_id = ?", (ticket_id,))
+        with autonomy_conn() as conn, conn:
+            conn.execute(
+                "DELETE FROM trigger_state WHERE ticket_id = ?",
+                (ticket_id,),
+            )
     except Exception:
         pass
 
