@@ -33,6 +33,16 @@ def _mk_conn(db_path: Path):
     return conn
 
 
+def _days_ago(n: int) -> str:
+    """Return an ISO timestamp N days before now.
+
+    Tests must seed timestamps relative to the wall clock — never hardcoded —
+    because metrics use a sliding window (`datetime.now(UTC) - timedelta(days=window)`),
+    and any fixed date eventually ages out of every window.
+    """
+    return (datetime.now(UTC) - timedelta(days=n)).isoformat()
+
+
 def _seed_pr(
     conn,
     *,
@@ -51,7 +61,7 @@ def _seed_pr(
             repo_full_name="acme/widgets",
             head_sha=head_sha,
             client_profile=profile,
-            opened_at="2026-04-01T12:00:00+00:00",
+            opened_at=_days_ago(1),
             first_pass_accepted=first_pass_accepted,
             merged=merged,
         ),
@@ -77,7 +87,7 @@ def test_backfilled_rows_excluded_from_fpa(tmp_path: Path) -> None:
                 repo_full_name="acme/widgets",
                 head_sha=f"bf{i}",
                 client_profile="rockwell",
-                opened_at="2026-04-01T12:00:00+00:00",
+                opened_at=_days_ago(1),
                 backfilled=1,
             ))
         m = compute_profile_metrics(conn, "rockwell", 30)
@@ -388,7 +398,7 @@ def test_defect_escape_unknown_note_when_merged_but_none(tmp_path: Path) -> None
                     repo_full_name="acme/widgets",
                     head_sha=f"s{i}",
                     client_profile="rockwell",
-                    opened_at="2026-04-01T12:00:00+00:00",
+                    opened_at=_days_ago(1),
                     first_pass_accepted=1,
                     merged=1,
                 ),
@@ -516,10 +526,10 @@ def test_ticket_type_breakdown_excludes_backfilled_from_fpa(
             head_sha="live-sha",
             client_profile="rockwell",
             ticket_type="bug",
-            opened_at="2026-04-01T12:00:00+00:00",
+            opened_at=_days_ago(1),
             first_pass_accepted=1,
             merged=1,
-            merged_at="2026-04-01T13:00:00+00:00",
+            merged_at=_days_ago(1),
         ))
         # 5 backfilled bug PRs — first_pass_accepted defaults to 0.
         for i in range(5):
@@ -530,7 +540,7 @@ def test_ticket_type_breakdown_excludes_backfilled_from_fpa(
                 head_sha=f"bf{i}",
                 client_profile="rockwell",
                 ticket_type="bug",
-                opened_at="2026-04-01T12:00:00+00:00",
+                opened_at=_days_ago(1),
                 backfilled=1,
             ))
 

@@ -30,6 +30,18 @@ def _mk_app() -> FastAPI:
     return app
 
 
+def _now_iso() -> str:
+    """Return an ISO timestamp at "roughly now" (yesterday in UTC).
+
+    Tests must seed timestamps relative to the wall clock — never hardcoded —
+    because the dashboard query uses a sliding window
+    (`datetime.now(UTC) - timedelta(days=window)`), and any fixed date
+    eventually ages out of every window. See _days_ago in
+    test_autonomy_metrics.py for the same pattern.
+    """
+    return (datetime.now(UTC) - timedelta(days=1)).isoformat()
+
+
 def _seed(db_path: Path, rows: list[dict]) -> None:
     conn = open_connection(db_path)
     try:
@@ -44,7 +56,7 @@ def _seed(db_path: Path, rows: list[dict]) -> None:
                     pr_url=row.get("pr_url", f"https://example.test/pr/{i + 1}"),
                     head_sha=row.get("head_sha", f"sha{i}"),
                     client_profile=row["client_profile"],
-                    opened_at=row.get("opened_at", "2026-04-01T12:00:00+00:00"),
+                    opened_at=row.get("opened_at", _now_iso()),
                     first_pass_accepted=row.get("first_pass_accepted", 0),
                     merged=row.get("merged", 0),
                 ),
@@ -183,7 +195,7 @@ def _seed_pr_run(
                 repo_full_name="acme/widgets",
                 head_sha=head_sha,
                 client_profile=profile,
-                opened_at="2026-04-01T12:00:00+00:00",
+                opened_at=_now_iso(),
                 first_pass_accepted=first_pass_accepted,
                 merged=merged,
             ),
