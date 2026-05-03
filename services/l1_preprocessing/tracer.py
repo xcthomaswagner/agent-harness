@@ -393,8 +393,12 @@ def derive_trace_status(
         return "Unknown"
 
     if "stale_worktree_cleaned" in events:
-        # This run was cleaned up by a subsequent spawn.
         return "Cleaned Up"
+    # Skipped/manually-routed tickets never enter the pipeline — terminal.
+    if any(ev.startswith("ado_webhook_skipped") for ev in events):
+        return "Skipped"
+    if "manual_ticket_submitted" in events:
+        return "Submitted"
     if "Escalated" in events:
         return "Escalated"
     if any(

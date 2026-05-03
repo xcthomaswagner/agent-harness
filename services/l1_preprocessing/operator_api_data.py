@@ -416,6 +416,10 @@ _STATUS_TO_BUCKET: dict[str, str] = {
     "Failed": "done",
     "Timed Out": "done",
     "Cleaned Up": "done",
+    # Webhook deliberately skipped (no ai-implement tag) or manually routed
+    # outside the pipeline — nothing will happen, clear the board.
+    "Skipped": "done",
+    "Submitted": "done",
     # Agent work finished — PR exists or pipeline reached a human-review
     # gate. No further pipeline action expected; move off the active board.
     "PR Created": "done",
