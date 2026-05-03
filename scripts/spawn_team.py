@@ -32,7 +32,24 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from shared.env_sanitize import sanitized_env  # noqa: E402
 from shared.model_policy import resolve_model  # noqa: E402
+from shared.platform_profile_env import pass_through_vars  # noqa: E402
 from worktree_safety import safe_remove_worktree  # noqa: E402
+
+
+def _platform_pass_through_env(profile_name: str) -> dict[str, str]:
+    """Build a dict of env vars the platform profile's MCP needs.
+
+    Reads the profile's harness-mcp.json placeholders and pulls each
+    referenced var from the spawn process's os.environ. Vars that
+    aren't set in the process env are skipped (they'll resolve to
+    their ``${VAR:-default}`` default during inject_runtime, or to
+    empty if no default — same behavior as before this fix).
+
+    Returns the dict so callers can merge it into a sanitized env
+    (for the agent) or pass it to a subprocess (for inject_runtime).
+    """
+    needed = pass_through_vars(profile_name)
+    return {name: os.environ[name] for name in needed if name in os.environ}
 
 
 def run_git(client_repo: str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -330,7 +347,14 @@ def main() -> None:
     if args.platform_profile:
         inject_args.extend(["--platform-profile", args.platform_profile])
 
-    subprocess.run(inject_args, check=True)
+    # inject_runtime resolves ${VAR} placeholders in the platform
+    # profile's harness-mcp.json against its own os.environ. L1 loads
+    # platform-profile vars (e.g. CONTENTSTACK_API_KEY) via Pydantic
+    # Settings from .env but does NOT export them back to os.environ —
+    # so without the explicit env= here, those placeholders silently
+    # resolve to "" and the agent gets a non-functional MCP.
+    inject_env = {**os.environ, **_platform_pass_through_env(args.platform_profile)}
+    subprocess.run(inject_args, check=True, env=inject_env)
     apply_model_policy_to_agents(worktree_dir)
 
     # Verify injection created CLAUDE.md (critical for agent operation)
@@ -517,6 +541,16 @@ def main() -> None:
         )
 
     env = sanitized_env()
+
+    # Re-inject platform-profile pass-through env vars after sanitization.
+    # ``sanitized_env()`` strips anything ending in _API_KEY / _TOKEN / _KEY
+    # (correct for security), but a platform profile's MCP server (e.g.
+    # Contentstack's) needs its credentials to actually start. Pull only
+    # the names that the profile's harness-mcp.json explicitly references —
+    # narrow surface, no broad pass-through. Mirrors the ADO_PAT block
+    # below in posture: surgical re-injection of what a specific runtime
+    # configuration requires.
+    env.update(_platform_pass_through_env(args.platform_profile))
 
     # Re-inject ADO_PAT + GIT_ASKPASS after env sanitization when the
     # client is on Azure Repos. ``sanitized_env()`` strips ADO_PAT by
