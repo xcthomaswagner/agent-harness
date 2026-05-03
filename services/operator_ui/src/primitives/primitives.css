@@ -366,11 +366,7 @@
 }
 
 .op-tbl tbody tr.is-live {
-  background: linear-gradient(
-    90deg,
-    var(--live-row-tint),
-    transparent 70%
-  );
+  background: transparent;
 }
 
 .op-tbl td.is-num {

@@ -181,7 +181,7 @@
 }
 
 .op-phase-row.is-active {
-  background: var(--live-row-tint);
+  background: rgba(22, 163, 74, 0.06);
 }
 
 .op-phase-row .op-phase-dur {
