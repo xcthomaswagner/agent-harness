@@ -411,32 +411,24 @@
 .op-tickets-grid {
   display: grid;
   /*
-   * List width is sized to comfortably fit its 4 fixed columns (120 + 120
-   * + 120 + 80 = 440px) plus a readable title column and borders. The rail
-   * gets the remaining space — typically wider than the list on a desktop
-   * viewport — so live agent activity has room to breathe instead of
-   * truncating mid-message in a narrow side panel.
-   *
-   * Combined minimum (560 + 440 = 1000px) chosen to fit a 1280px-class
-   * viewport with a sidebar without horizontal scroll.
+   * List needs ~720px to render its 5 columns (120/title/120/120/80)
+   * with the Title column at a readable ~280px+. Rail gets enough room
+   * for multi-line log lines but no longer dominates — list is the
+   * primary surface, rail is the contextual side panel. List takes
+   * the slightly larger share (1.1fr vs 1fr) to keep titles + Phase
+   * + Elapsed visible without clipping.
    */
-  grid-template-columns: minmax(560px, 0.9fr) minmax(440px, 1.6fr);
+  grid-template-columns: minmax(720px, 1.1fr) minmax(420px, 1fr);
   gap: 0;
   min-height: 500px;
 }
 
 .op-tickets-list {
   border-right: var(--rule);
-  /*
-   * `min-width: 0` lets the inner Table respect this grid track's width
-   * instead of forcing the track wider when a Title cell holds long
-   * text. Without it, long titles + the four fixed-width columns
-   * (120/120/120/80 = 440px) silently push the list pane past its
-   * track and overlap the rail. `overflow: hidden` is a second guard
-   * for any descendant that ignores `min-width: 0`.
-   */
+  /* `min-width: 0` lets the inner Table respect this grid track when
+   * a long Title would otherwise force the track wider. Without it,
+   * long titles silently push the table past the rail boundary. */
   min-width: 0;
-  overflow: hidden;
 }
 
 .op-tickets-rail {
