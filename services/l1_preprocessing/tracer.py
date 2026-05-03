@@ -404,6 +404,13 @@ def derive_trace_status(
         return "Failed"
     if any("timed out" in ev.lower() for ev in events):
         return "Timed Out"
+    # If the last event written is an error and no forward-progress event
+    # follows it, the pipeline crashed. Mark as Failed so the board clears it.
+    if entries[-1].get("event") == "error" and not any(
+        ev in events
+        for ev in ("Pipeline complete", "l2_dispatched", "processing_completed")
+    ):
+        return "Failed"
     if "Pipeline complete" in events:
         return "Complete"
     if pr_url and not any("Pipeline complete" in ev for ev in events):

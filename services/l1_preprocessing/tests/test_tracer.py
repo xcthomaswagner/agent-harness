@@ -1344,6 +1344,31 @@ class TestDeriveTraceStatus:
     def test_agent_done_no_pr(self) -> None:
         assert self._run(["agent_finished"]) == "Agent Done (no PR)"
 
+    def test_pipeline_error_with_no_progress_returns_failed(self) -> None:
+        # processing_started → error with no l2_dispatched or Pipeline complete
+        # is a crashed enrichment step — should be Failed, not Processing.
+        entries = [
+            {"event": "webhook_received"},
+            {"event": "processing_started"},
+            {"event": "error"},
+        ]
+        events = [e["event"] for e in entries]
+        assert derive_trace_status(entries, events, "") == "Failed"
+
+    def test_error_after_dispatch_does_not_override_to_failed(self) -> None:
+        # An error entry that appears after l2_dispatched means the agent
+        # wrote something downstream — don't clobber the real status.
+        entries = [
+            {"event": "webhook_received"},
+            {"event": "processing_started"},
+            {"event": "l2_dispatched"},
+            {"event": "error"},
+        ]
+        events = [e["event"] for e in entries]
+        # l2_dispatched is in events so the error guard is bypassed;
+        # last-event is "error" so falls through to Dispatched branch.
+        assert derive_trace_status(entries, events, "") == "Dispatched"
+
     def test_received_when_only_webhook(self) -> None:
         assert self._run(["webhook_received"]) == "Received"
 
