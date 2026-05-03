@@ -35,6 +35,7 @@
   --signal-err: #ef4444; /* failed */
   --signal-cool: #60a5fa; /* queued */
   --accent: var(--signal-active);
+  --live-row-tint: rgba(20, 184, 166, 0.07); /* teal wash for in-flight rows */
 
   /* Typography */
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -70,11 +71,13 @@
   --ink-900: #101828;
   --ink-950: #020617;
 
-  --signal-active: #0f766e;
+  --signal-active: #16a34a;
+  --signal-active-2: #4ade80;
   --signal-ok: #15803d;
-  --signal-warn: #b45309;
-  --signal-err: #b91c1c;
+  --signal-warn: #d97706;
+  --signal-err: #dc2626;
   --signal-cool: #2563eb;
+  --live-row-tint: rgba(22, 163, 74, 0.06); /* green wash for in-flight rows */
 }
 
 /* ============ Base ============ */
