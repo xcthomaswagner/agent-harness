@@ -69,6 +69,11 @@ describe("LearningView", () => {
       );
       expect(rejectCall).toBeTruthy();
       expect(rejectCall?.[1]?.method).toBe("POST");
+      expect(
+        fetchMock.mock.calls.filter(([input]) =>
+          String(input).startsWith("/api/operator/lessons/counts"),
+        ),
+      ).toHaveLength(2);
     });
   });
 });

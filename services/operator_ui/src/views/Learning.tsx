@@ -162,6 +162,7 @@ export function LearningView() {
           });
         }
         feed.refresh();
+        lessonCounts.refresh();
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
         setNotice({
@@ -172,7 +173,7 @@ export function LearningView() {
         setPendingLessonId(null);
       }
     },
-    [feed],
+    [feed, lessonCounts],
   );
 
   return (
