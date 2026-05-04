@@ -358,19 +358,18 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
     log = logger.bind(ticket_id=payload.ticket_id, status=payload.status)
     log.info("agent_completion_received", pr_url=payload.pr_url)
 
-    # Delay releasing the ticket — ADO fires webhooks when we post comments
-    # and transition status below. Keep the ticket claimed to absorb those
-    # self-triggered webhooks before allowing reprocessing. Edge-detection
-    # memory is cleared on the same schedule so the lifecycles align and a
-    # future re-add of the trigger tag produces a fresh edge as expected.
-    # Window is tunable via settings.agent_complete_release_delay_sec.
     async def _delayed_release(ticket_id: str) -> None:
+        """Release claim/trigger state after durable completion writeback.
+
+        ADO fires webhooks when we post comments and transition status. Keep
+        the ticket claimed long enough to absorb those self-triggered webhooks,
+        then clear edge state so a future re-add of the trigger tag dispatches
+        a fresh run.
+        """
         # Re-resolve inside the task so we see fresh patched settings.
         await asyncio.sleep(_settings().agent_complete_release_delay_sec)
         _release_ticket(ticket_id)
         _clear_trigger_state(ticket_id)
-
-    _spawn_background_task(_delayed_release(payload.ticket_id))
 
     # Trace: record completion — reuse the trace_id from the spawn chain
     # so live-reported entries and completion entries share the same trace_id
@@ -404,6 +403,21 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
     else:
         adapter = _get_jira_adapter()
 
+    valid_statuses = {"complete", "partial", "escalated"}
+    if payload.status not in valid_statuses:
+        append_trace(
+            payload.ticket_id,
+            trace_id,
+            "completion",
+            "completion_writeback_failed",
+            status=payload.status,
+            reason="unknown_completion_status",
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown completion status: {payload.status}",
+        )
+
     try:
         if payload.pr_url:
             comment = (
@@ -426,16 +440,17 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
         # Note: ADO adapter doesn't have upload_attachment yet — skip for ADO
         screenshot_path = Path(worktree_path) / ".harness" / "screenshots" / "final.png"
         if screenshot_path.exists() and isinstance(adapter, JiraAdapter):
-            await adapter.upload_attachment(
-                payload.ticket_id,
-                str(screenshot_path),
-                filename=f"{payload.ticket_id}-implementation.png",
-            )
-            log.info("screenshot_uploaded", path=str(screenshot_path))
+            try:
+                await adapter.upload_attachment(
+                    payload.ticket_id,
+                    str(screenshot_path),
+                    filename=f"{payload.ticket_id}-implementation.png",
+                )
+                log.info("screenshot_uploaded", path=str(screenshot_path))
+            except Exception:
+                log.warning("screenshot_upload_failed", path=str(screenshot_path))
 
-        if payload.status not in ("complete", "partial", "escalated"):
-            log.warning("unknown_completion_status", status=payload.status)
-        elif payload.status == "complete":
+        if payload.status == "complete":
             await adapter.transition_status(payload.ticket_id, "Done")
             log.info("ticket_transitioned_to_done")
         elif payload.status in ("partial", "escalated"):
@@ -452,7 +467,22 @@ async def agent_complete(payload: CompletionPayload) -> dict[str, str]:
                 await adapter.write_comment(payload.ticket_id, sub_comment)
                 log.info("failed_unit_reported", unit_id=unit.unit_id)
 
-    except Exception:
+    except Exception as exc:
         log.exception("completion_update_failed")
+        append_trace(
+            payload.ticket_id,
+            trace_id,
+            "completion",
+            "completion_writeback_failed",
+            status=payload.status,
+            error_type=type(exc).__name__,
+            error_message=str(exc)[:500],
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Completion writeback failed",
+        ) from exc
+
+    _spawn_background_task(_delayed_release(payload.ticket_id))
 
     return {"status": "ok", "ticket_id": payload.ticket_id}

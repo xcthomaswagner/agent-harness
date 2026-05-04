@@ -877,6 +877,37 @@ async def test_agent_complete_clears_trigger_state_after_delay() -> None:
     )
 
 
+async def test_agent_complete_writeback_failure_returns_error_and_keeps_claim() -> None:
+    """If ticket-source writeback fails, L1 must not report success or
+    release trigger state. spawn_team.py treats non-2xx as
+    completion-pending.json, which is the durable retry path.
+    """
+    main._active_tickets["SCRUM-10"] = __import__("time").time()
+    main._last_trigger_state["SCRUM-10"] = True
+
+    completion = {
+        "ticket_id": "SCRUM-10",
+        "status": "complete",
+        "pr_url": "https://github.com/org/repo/pull/10",
+        "branch": "ai/SCRUM-10",
+    }
+    before = set(main._background_tasks)
+
+    with patch.object(main, "_get_jira_adapter") as mock_get:
+        mock_adapter = AsyncMock()
+        mock_adapter.write_comment.side_effect = RuntimeError("jira down")
+        mock_get.return_value = mock_adapter
+
+        async with await _make_client() as client:
+            response = await client.post("/api/agent-complete", json=completion)
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Completion writeback failed"
+    assert "SCRUM-10" in main._active_tickets
+    assert main._last_trigger_state["SCRUM-10"] is True
+    assert main._background_tasks == before
+
+
 # --- /api/agent-complete ticket_id + branch validation ---
 #
 # Bug regression: /api/retest validates ticket_id and branch because
