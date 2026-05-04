@@ -924,6 +924,53 @@ def test_traces_stale_active_or_queued_reclassified_as_stuck(
     )
 
 
+def test_trace_detail_reuses_stale_status_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Trace list and detail should agree when silent work is stale."""
+    import operator_api_data as oad_module
+
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    monkeypatch.setattr(oad_module, "_STALE_INFLIGHT_HOURS", 2)
+    logs_dir = tmp_path / "logs"
+    import tracer as tracer_module
+
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    stale_ts = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    (logs_dir / "HARN-DETAIL-STALE.jsonl").write_text(
+        json.dumps(
+            {
+                "ticket_id": "HARN-DETAIL-STALE",
+                "trace_id": "t-detail-stale",
+                "phase": "implement",
+                "event": "l2_dispatched",
+                "timestamp": stale_ts,
+                "source": "pipeline",
+            }
+        )
+        + "\n"
+    )
+
+    c = TestClient(_mk_app())
+    list_rows = c.get("/api/operator/traces").json()["traces"]
+    detail = c.get("/api/operator/traces/HARN-DETAIL-STALE").json()
+
+    assert next(r for r in list_rows if r["id"] == "HARN-DETAIL-STALE")[
+        "status"
+    ] == "stuck"
+    assert detail["status"] == "stuck"
+
+
 def test_trace_state_mark_misfire_hides_trace_and_excludes_pr_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

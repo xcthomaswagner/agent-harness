@@ -215,11 +215,13 @@ export function LearningView() {
               key: "id",
               label: "Lesson",
               width: "120px",
+              sortValue: (c) => c.lesson_id,
               render: (c) => <span class="op-mono">{c.lesson_id}</span>,
             },
             {
               key: "pattern",
               label: "Pattern",
+              sortValue: (c) => `${c.detector_name} ${c.pattern_key}`,
               render: (c) => (
                 <span>
                   <span class="op-mono" style={{ color: "var(--ink-600)" }}>
@@ -242,6 +244,7 @@ export function LearningView() {
               key: "profile",
               label: "Profile",
               width: "140px",
+              sortValue: (c) => c.client_profile || "",
               render: (c) => (
                 <span class="op-mono">{c.client_profile || "—"}</span>
               ),
@@ -250,6 +253,7 @@ export function LearningView() {
               key: "impact",
               label: "Impact",
               width: "130px",
+              sortValue: (c) => IMPACT_RANK[lessonImpact(c).level],
               render: (c) => {
                 const impact = lessonImpact(c);
                 return (
@@ -265,6 +269,7 @@ export function LearningView() {
               label: "Freq",
               numeric: true,
               width: "70px",
+              sortValue: (c) => c.frequency,
               render: (c) => c.frequency,
             },
             {
@@ -279,6 +284,7 @@ export function LearningView() {
               key: "actions",
               label: "",
               width: "220px",
+              sortValue: (c) => c.status,
               render: (c) => (
                 <LessonActions
                   candidate={c}

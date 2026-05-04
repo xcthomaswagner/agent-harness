@@ -170,6 +170,7 @@ export function TracesView() {
               key: "pr",
               label: "PR",
               width: "80px",
+              sortValue: (t) => Boolean(t.pr_url),
               render: (t) =>
                 t.pr_url ? (
                   <a href={t.pr_url} target="_blank" rel="noopener noreferrer" class="op-mono">
@@ -183,6 +184,7 @@ export function TracesView() {
               key: "actions",
               label: "Actions",
               width: "248px",
+              sortValue: (t) => t.lifecycle_state || t.status,
               render: (t) => (
                 <span style={{ display: "flex", gap: "6px", justifyContent: "flex-end" }}>
                   {t.hidden ? (

@@ -737,6 +737,27 @@ def _last_progress_at(t: dict[str, Any]) -> datetime | None:
     return _parse_iso(str(t.get("completed_at") or ""))
 
 
+def _apply_trace_staleness(bucket: str, t: dict[str, Any]) -> str:
+    """Reclassify silent active/queued trace rows as stuck."""
+    if bucket not in ("in-flight", "queued"):
+        return bucket
+
+    now = datetime.now(UTC)
+    last_progress = _last_progress_at(t)
+    if last_progress is not None:
+        age_hours = (now - last_progress).total_seconds() / 3600
+        if age_hours > _STALE_INFLIGHT_HOURS:
+            return "stuck"
+
+    run_started = _parse_iso(str(t.get("run_started_at") or t.get("started_at") or ""))
+    if run_started is not None:
+        run_age_hours = (now - run_started).total_seconds() / 3600
+        if run_age_hours > _MAX_INFLIGHT_RUN_HOURS:
+            return "stuck"
+
+    return bucket
+
+
 def _shape_trace_row(
     t: dict[str, Any],
     *,
@@ -772,18 +793,7 @@ def _shape_trace_row(
     # whose last meaningful progress is old, or whose current run exceeded
     # the max runtime, is almost certainly dead. Late duplicate review/webhook
     # events must not keep ancient work active.
-    if bucket in ("in-flight", "queued"):
-        now = datetime.now(UTC)
-        last_progress = _last_progress_at(t)
-        if last_progress is not None:
-            age_hours = (now - last_progress).total_seconds() / 3600
-            if age_hours > _STALE_INFLIGHT_HOURS:
-                bucket = "stuck"
-        run_started = _parse_iso(str(t.get("run_started_at") or t.get("started_at") or ""))
-        if run_started is not None:
-            run_age_hours = (now - run_started).total_seconds() / 3600
-            if run_age_hours > _MAX_INFLIGHT_RUN_HOURS:
-                bucket = "stuck"
+    bucket = _apply_trace_staleness(bucket, t)
 
     return {
         "id": t["ticket_id"],
@@ -1082,6 +1092,17 @@ def _shape_trace_detail(
             raw_status = "Stale"
             bucket = "stuck"
             state_reason = pr_state.get("state_reason", "") or state_reason
+
+    bucket = _apply_trace_staleness(
+        bucket,
+        {
+            "_raw_entries": entries,
+            "_run_start_idx": run_start_idx,
+            "run_started_at": metadata["started_at"],
+            "started_at": metadata["started_at"],
+            "completed_at": metadata["started_at"],
+        },
+    )
 
     # Phase durations + event counts, mapped into canonical buckets.
     durations = compute_phase_durations(entries, run_start_idx=run_start_idx)

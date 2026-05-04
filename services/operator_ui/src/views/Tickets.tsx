@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 import { ViewHead } from "../chrome";
 import { Button, Chip, Pill, SectionHeader, Table } from "../primitives";
 import type { PillTone } from "../primitives";
+import { fetchHeaders } from "../api/key";
 import { useFeed } from "../hooks/useFeed";
 import { useLiveLog } from "../hooks/useLiveLog";
 import type { LiveLogEntry } from "../hooks/useLiveLog";
@@ -216,7 +217,11 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
     try {
       const res = await fetch(
         `/api/operator/tickets/${encodeURIComponent(row.id)}/trigger-label`,
-        { method: "DELETE" },
+        {
+          method: "DELETE",
+          headers: fetchHeaders({ Accept: "application/json" }),
+          credentials: "same-origin",
+        },
       );
       setTriggerState(res.ok ? "done" : "error");
     } catch {
