@@ -78,7 +78,10 @@ export function useLiveLog(ticketId: string | null): {
     const es = new EventSource(url);
     srcRef.current = es;
 
-    es.onopen = () => setState("connected");
+    es.onopen = () => {
+      setState("connected");
+      setError(null);
+    };
     es.onerror = () => {
       setState("error");
       setError("SSE disconnected — reconnecting…");

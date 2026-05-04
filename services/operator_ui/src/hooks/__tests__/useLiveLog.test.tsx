@@ -16,6 +16,14 @@ class FakeEventSource {
 
   close() {}
 
+  fail() {
+    this.onerror?.(new Event("error"));
+  }
+
+  open() {
+    this.onopen?.(new Event("open"));
+  }
+
   emit(data: unknown) {
     this.onmessage?.(
       new MessageEvent("message", { data: JSON.stringify(data) }),
@@ -29,6 +37,7 @@ function LiveLogProbe({ ticketId }: { ticketId: string | null }) {
     <div>
       <span data-testid="state">{log.state}</span>
       <span data-testid="count">{log.entries.length}</span>
+      <span data-testid="error">{log.error ?? ""}</span>
       <ol>
         {log.entries.map((entry) => (
           <li key={entry.event_id ?? entry.timestamp}>
@@ -76,5 +85,25 @@ describe("useLiveLog", () => {
       "event-2:Dispatching dev",
       "event-1:Planning ticket",
     ]);
+  });
+
+  it("clears reconnect error after the EventSource reopens", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+
+    const { getByTestId } = render(<LiveLogProbe ticketId="HARN-2" />);
+
+    await waitFor(() => expect(sources).toHaveLength(1));
+    const source = sources[0];
+    if (!source) throw new Error("EventSource was not created");
+
+    source.fail();
+    await waitFor(() => expect(getByTestId("state").textContent).toBe("error"));
+    expect(getByTestId("error").textContent).toContain("SSE disconnected");
+
+    source.open();
+    await waitFor(() =>
+      expect(getByTestId("state").textContent).toBe("connected"),
+    );
+    expect(getByTestId("error").textContent).toBe("");
   });
 });
