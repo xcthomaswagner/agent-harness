@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -261,6 +262,30 @@ def _read_model_policy_file() -> dict[str, Any]:
     }
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Persist text via same-directory replace so readers never see partial JSON."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp_name = tmp.name
+            tmp.write(content)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(tmp_name, path)
+    finally:
+        if tmp_name:
+            with suppress(FileNotFoundError):
+                Path(tmp_name).unlink()
+
+
 def _write_model_policy_file(update: ModelPolicyUpdate) -> dict[str, Any]:
     defaults = _default_model_policy()
     default_by_role = {r["role"]: r for r in defaults["roles"]}
@@ -292,10 +317,9 @@ def _write_model_policy_file(update: ModelPolicyUpdate) -> dict[str, Any]:
         "updated_at": datetime.now(UTC).isoformat(),
         "roles": [next_by_role[r["role"]] for r in defaults["roles"]],
     }
-    _MODEL_POLICY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _MODEL_POLICY_PATH.write_text(
+    _atomic_write_text(
+        _MODEL_POLICY_PATH,
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
     return _read_model_policy_file()
 

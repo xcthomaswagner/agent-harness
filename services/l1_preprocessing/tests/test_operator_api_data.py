@@ -628,6 +628,33 @@ def test_model_policy_put_persists_operator_choices(
     }["developer"]["model"] == "sonnet"
 
 
+def test_model_policy_write_is_atomic_on_replace_failure(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import operator_api_data as oad
+
+    policy_path = tmp_path / "policy.json"
+    original = '{"version":1,"roles":[],"updated_at":"old"}\n'
+    policy_path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(oad, "_MODEL_POLICY_PATH", policy_path)
+    current = client.get("/api/operator/model-policy").json()
+    roles = current["roles"]
+    for row in roles:
+        if row["role"] == "developer":
+            row["model"] = "sonnet"
+
+    def fail_replace(src: str, dst: Path) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(oad.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        oad._write_model_policy_file(oad.ModelPolicyUpdate(roles=roles))
+
+    assert policy_path.read_text(encoding="utf-8") == original
+    assert list(tmp_path.glob(".policy.json.*.tmp")) == []
+
+
 def test_model_policy_rejects_unknown_role(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
