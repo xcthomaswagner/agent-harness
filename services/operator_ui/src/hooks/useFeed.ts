@@ -19,6 +19,7 @@
  */
 
 import { useEffect, useRef, useState } from "preact/hooks";
+import { readableErrorText } from "../api/errors";
 import { fetchHeaders } from "../api/key";
 
 export type FeedStatus = "idle" | "loading" | "refreshing" | "ok" | "error";
@@ -80,7 +81,8 @@ export function useFeed<T>(
       .then(async (res) => {
         if (cancelled) return;
         if (!res.ok) {
-          throw new Error(`${res.status} ${res.statusText}`);
+          const text = await res.text();
+          throw new Error(`${res.status}: ${readableErrorText(text)}`);
         }
         const json = (await res.json()) as T;
         if (cancelled) return;
