@@ -1706,6 +1706,73 @@ def _parse_roster_time(value: str | None) -> datetime | None:
     return parsed
 
 
+def _read_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _trace_archive_for_ticket(ticket_id: str) -> Path | None:
+    for entry in reversed(read_trace(ticket_id)):
+        raw_path = entry.get("worktree_path") or entry.get("worktree")
+        if not isinstance(raw_path, str) or not raw_path:
+            continue
+        worktree_path = Path(raw_path).expanduser().resolve()
+        for parent in worktree_path.parents:
+            if parent.name == "worktrees":
+                candidate = parent.parent / "trace-archive" / ticket_id
+                if candidate.is_dir():
+                    return candidate
+                break
+    return None
+
+
+def _client_readiness_path(ticket_id: str) -> tuple[Path | None, str]:
+    worktree = _worktree_root_for_ticket(ticket_id)
+    if worktree is not None:
+        path = worktree / ".harness" / "client-readiness.json"
+        if path.is_file():
+            return path, "worktree"
+    archive = _trace_archive_for_ticket(ticket_id)
+    if archive is not None:
+        path = archive / "client-readiness.json"
+        if path.is_file():
+            return path, "archive"
+    return None, ""
+
+
+@router.get("/tickets/{ticket_id}/readiness")
+def get_ticket_readiness(ticket_id: str) -> dict[str, Any]:
+    """Client readiness notes written by spawn_team for a ticket run."""
+    path, source = _client_readiness_path(ticket_id)
+    if path is None:
+        return {
+            "ticket_id": ticket_id,
+            "available": False,
+            "source": "",
+            "generated_by": "",
+            "client_profile": "",
+            "is_next": False,
+            "warning_count": 0,
+            "warnings": [],
+        }
+    data = _read_json_file(path) or {}
+    warnings = data.get("warnings")
+    warnings = warnings if isinstance(warnings, list) else []
+    return {
+        "ticket_id": ticket_id,
+        "available": True,
+        "source": source,
+        "generated_by": str(data.get("generated_by") or ""),
+        "client_profile": str(data.get("client_profile") or ""),
+        "is_next": bool(data.get("is_next")),
+        "warning_count": int(data.get("warning_count") or len(warnings)),
+        "warnings": warnings,
+    }
+
+
 @router.get("/tickets/{ticket_id}/agents")
 def get_ticket_agents(ticket_id: str) -> dict[str, Any]:
     """Agent roster for one ticket.

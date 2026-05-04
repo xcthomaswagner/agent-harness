@@ -1080,6 +1080,10 @@ def main() -> None:
                 for log_file in harness_logs.iterdir():
                     if log_file.is_file():
                         shutil.copy2(log_file, trace_archive / log_file.name)
+            for readiness_name in ("client-readiness.json", "client-readiness.md"):
+                readiness_file = worktree_dir / ".harness" / readiness_name
+                if readiness_file.is_file():
+                    shutil.copy2(readiness_file, trace_archive / readiness_name)
             print(f"[spawn] Logs archived to {trace_archive}")
         except OSError as exc:
             print(f"[spawn] WARNING: Log archival failed: {exc}")

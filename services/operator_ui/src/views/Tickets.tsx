@@ -11,6 +11,8 @@ import type {
   AgentRosterResponse,
   ActivitySummaryResponse,
   ActivitySummaryItem,
+  ClientReadinessResponse,
+  ClientReadinessWarning,
   TraceStatus,
   TraceSummary,
   TracesResponse,
@@ -239,6 +241,10 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
     row ? `/api/operator/tickets/${encodeURIComponent(row.id)}/activity-summary` : null,
     { clearOnUrlChange: true },
   );
+  const readiness = useFeed<ClientReadinessResponse>(
+    row ? `/api/operator/tickets/${encodeURIComponent(row.id)}/readiness` : null,
+    { clearOnUrlChange: true },
+  );
   const [triggerState, setTriggerState] = useState<"idle" | "busy" | "done" | "error">("idle");
   const [triggerError, setTriggerError] = useState("");
   const [liveFilter, setLiveFilter] = useState<LiveFilter>("all");
@@ -344,6 +350,12 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
         compact
       />
 
+      <ClientReadinessPanel
+        data={readiness.data}
+        state={readiness.status}
+        error={readiness.error}
+      />
+
       {row.status !== "in-flight" && (
         <ActivitySummaryPanel
           data={activitySummary.data}
@@ -386,6 +398,63 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
         ))}
       </div>
     </>
+  );
+}
+
+function ClientReadinessPanel({
+  data,
+  state,
+  error,
+}: {
+  data: ClientReadinessResponse | undefined;
+  state: string;
+  error?: string;
+}) {
+  if (state === "loading" && !data) {
+    return <div class="op-rail-log-conn">Loading readiness...</div>;
+  }
+  if (state === "error" && !data) {
+    return (
+      <div class="op-error">
+        Failed to load readiness{error ? `: ${error}` : ""}
+      </div>
+    );
+  }
+  if (!data || !data.available || data.warning_count === 0) {
+    return null;
+  }
+  const visible = data.warnings.slice(0, 5);
+  const hiddenCount = Math.max(0, data.warnings.length - visible.length);
+  return (
+    <section class="op-readiness-panel">
+      <SectionHeader
+        label="Client readiness"
+        right={`${data.warning_count} note${data.warning_count === 1 ? "" : "s"}`}
+      />
+      {visible.map((warning) => (
+        <ReadinessWarning key={warning.id} warning={warning} />
+      ))}
+      {hiddenCount > 0 && (
+        <div class="op-readiness-more">
+          {hiddenCount} more in .harness/client-readiness.md
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ReadinessWarning({ warning }: { warning: ClientReadinessWarning }) {
+  return (
+    <div class={`op-readiness-warning is-${warning.severity || "warning"}`}>
+      <div class="op-readiness-warning-head">
+        <span>{warning.area || "repo"}</span>
+        <span>{warning.severity || "warning"}</span>
+      </div>
+      <div>{warning.message}</div>
+      {warning.recommendation && (
+        <div class="op-readiness-recommendation">{warning.recommendation}</div>
+      )}
+    </div>
   );
 }
 

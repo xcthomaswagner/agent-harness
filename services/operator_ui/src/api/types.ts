@@ -279,6 +279,27 @@ export interface AgentRosterResponse {
   agents: AgentRosterEntry[];
 }
 
+export type ClientReadinessSeverity = "info" | "warning" | "error";
+
+export interface ClientReadinessWarning {
+  id: string;
+  area: string;
+  severity: ClientReadinessSeverity;
+  message: string;
+  recommendation: string;
+}
+
+export interface ClientReadinessResponse {
+  ticket_id: string;
+  available: boolean;
+  source: "worktree" | "archive" | "";
+  generated_by: string;
+  client_profile: string;
+  is_next: boolean;
+  warning_count: number;
+  warnings: ClientReadinessWarning[];
+}
+
 export interface ActivitySummaryItem {
   event_id: string;
   teammate: string;

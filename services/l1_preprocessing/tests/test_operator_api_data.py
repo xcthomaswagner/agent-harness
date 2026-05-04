@@ -2217,6 +2217,60 @@ def test_activity_summary_uses_finished_artifacts_without_session_stream(
     assert any("QA complete" in item["message"] for item in data["highlights"])
 
 
+def test_ticket_readiness_returns_spawn_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    worktree = tmp_path / "wt" / "HARN-READY"
+    readiness = worktree / ".harness" / "client-readiness.json"
+    readiness.parent.mkdir(parents=True)
+    readiness.write_text(
+        json.dumps(
+            {
+                "generated_by": "spawn_team.client_readiness",
+                "client_profile": "harness-test-client",
+                "is_next": True,
+                "warning_count": 1,
+                "warnings": [
+                    {
+                        "id": "github_actions_missing",
+                        "area": "ci",
+                        "severity": "warning",
+                        "message": "No GitHub Actions workflow was found.",
+                        "recommendation": "Add CI.",
+                    }
+                ],
+            }
+        )
+    )
+
+    import operator_api_data as oad
+
+    monkeypatch.setattr(oad, "_worktree_root_for_ticket", lambda _tid: worktree)
+
+    c = TestClient(_mk_app())
+    data = c.get("/api/operator/tickets/HARN-READY/readiness").json()
+    assert data["available"] is True
+    assert data["source"] == "worktree"
+    assert data["client_profile"] == "harness-test-client"
+    assert data["warnings"][0]["id"] == "github_actions_missing"
+
+
+def test_ticket_readiness_empty_when_report_missing(client: TestClient) -> None:
+    data = client.get("/api/operator/tickets/HARN-NOREADY/readiness").json()
+    assert data["available"] is False
+    assert data["warning_count"] == 0
+
+
 def test_operator_trigger_label_removal_clears_ai_and_quick_labels(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

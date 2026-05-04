@@ -81,6 +81,9 @@ describe("TicketsView", () => {
           warnings: [],
         });
       }
+      if (url.endsWith("/readiness")) {
+        return jsonResponse(emptyReadiness("HARN-1"));
+      }
       if (url.endsWith("/trigger-label")) {
         return jsonResponse({ status: "accepted" }, { status: 200 });
       }
@@ -247,6 +250,7 @@ describe("TicketsView", () => {
           warnings: [],
         });
       }
+      if (url.endsWith("/readiness")) return jsonResponse(emptyReadiness("HARN-2"));
       if (url.endsWith("/trigger-label")) {
         return jsonResponse({ detail: "Adapter token expired" }, { status: 500 });
       }
@@ -258,6 +262,69 @@ describe("TicketsView", () => {
     fireEvent.click(await findByText("Remove Trigger"));
 
     expect(await findByText(/Remove trigger failed: Adapter token expired/))
+      .toBeTruthy();
+  });
+
+  it("surfaces client readiness warnings in the ticket rail", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/operator/traces")) {
+        return jsonResponse({
+          traces: [traceSummary("HARN-READY")],
+          count: 1,
+          status_counts: {
+            all: 1,
+            "in-flight": 1,
+            stuck: 0,
+            queued: 0,
+            done: 0,
+            hidden: 0,
+          },
+          offset: 0,
+          limit: 200,
+          include_hidden: false,
+        });
+      }
+      if (url.endsWith("/agents")) return jsonResponse({ agents: [] });
+      if (url.endsWith("/activity-summary")) {
+        return jsonResponse({
+          ticket_id: "HARN-READY",
+          summary: "",
+          raw_event_count: 0,
+          deduped_event_count: 0,
+          teammates: [],
+          highlights: [],
+          warnings: [],
+        });
+      }
+      if (url.endsWith("/readiness")) {
+        return jsonResponse({
+          ...emptyReadiness("HARN-READY"),
+          available: true,
+          source: "worktree",
+          warning_count: 1,
+          warnings: [
+            {
+              id: "next_tailwind_not_configured",
+              area: "frontend",
+              severity: "warning",
+              message: "Tailwind is referenced but not configured.",
+              recommendation: "Use existing CSS or configure Tailwind first.",
+            },
+          ],
+        });
+      }
+      return jsonResponse({}, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { findByText } = render(<TicketsView />);
+
+    expect(await findByText("Client readiness")).toBeTruthy();
+    expect(await findByText("Tailwind is referenced but not configured."))
+      .toBeTruthy();
+    expect(await findByText("Use existing CSS or configure Tailwind first."))
       .toBeTruthy();
   });
 
@@ -290,6 +357,19 @@ function jsonResponse(data: unknown, init?: ResponseInit): Response {
     headers: { "Content-Type": "application/json" },
     ...init,
   });
+}
+
+function emptyReadiness(ticketId: string) {
+  return {
+    ticket_id: ticketId,
+    available: false,
+    source: "",
+    generated_by: "",
+    client_profile: "",
+    is_next: false,
+    warning_count: 0,
+    warnings: [],
+  };
 }
 
 function traceSummary(id: string) {
