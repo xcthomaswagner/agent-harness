@@ -26,6 +26,7 @@ import asyncio
 import hmac
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -68,6 +69,33 @@ from learning_miner.pr_opener import (
 logger = structlog.get_logger()
 
 router = APIRouter()
+
+_LESSON_OPERATION_LOCKS: dict[str, asyncio.Lock] = {}
+_LESSON_OPERATION_LOCKS_GUARD = threading.Lock()
+
+
+def _settings() -> Any:
+    """Resolve settings through main when available.
+
+    Most L1 split-out routers use this pattern so tests and runtime code that
+    patch ``main.settings`` see the same values the endpoint uses.
+    """
+    try:
+        import main  # local import avoids module-load cycles
+
+        return main.settings
+    except Exception:
+        return settings
+
+
+def _lesson_operation_lock(lesson_id: str) -> asyncio.Lock:
+    """Return the per-lesson async lock for long-running write operations."""
+    with _LESSON_OPERATION_LOCKS_GUARD:
+        lock = _LESSON_OPERATION_LOCKS.get(lesson_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _LESSON_OPERATION_LOCKS[lesson_id] = lock
+        return lock
 
 
 def _candidate_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -228,11 +256,14 @@ async def _guard_learning_write_request(
     Learning triage writes, and avoids exposing the separate admin token to
     browser code.
     """
-    if settings.api_key and operator_api_key and hmac.compare_digest(
-        operator_api_key, settings.api_key
+    active_settings = _settings()
+    if (
+        active_settings.api_key
+        and operator_api_key
+        and hmac.compare_digest(operator_api_key, active_settings.api_key)
     ):
         body = await request.body()
-        if len(body) > settings.autonomy_internal_max_body_bytes:
+        if len(body) > active_settings.autonomy_internal_max_body_bytes:
             raise HTTPException(status_code=413, detail="Payload too large")
         if not autonomy_ingest._bucket.try_consume():
             raise HTTPException(status_code=429, detail="Rate limit exceeded")
@@ -587,24 +618,26 @@ async def post_approve(
     )
     payload = _parse_body(body, ApproveIn)
 
-    with autonomy_conn() as conn:
-        existing = get_lesson_by_id(conn, lesson_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="lesson not found")
+    async with _lesson_operation_lock(lesson_id):
+        with autonomy_conn() as conn:
+            existing = get_lesson_by_id(conn, lesson_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="lesson not found")
 
-    if str(existing["status"]) == "approved":
-        # Already approved (prior attempt failed at PR opener stage).
-        # Surface the existing record and re-run the opener.
-        approved = _candidate_to_dict(existing)
-    else:
-        approved = _transition(lesson_id, "approved", reason=payload.reason)
+        if str(existing["status"]) == "approved":
+            # Already approved (prior attempt failed at PR opener stage).
+            # Surface the existing record and re-run the opener.
+            approved = _candidate_to_dict(existing)
+        else:
+            approved = _transition(lesson_id, "approved", reason=payload.reason)
 
-    if not settings.learning_pr_opener_enabled:
-        approved["pr_opener_enabled"] = False
+        active_settings = _settings()
+        if not active_settings.learning_pr_opener_enabled:
+            approved["pr_opener_enabled"] = False
+            return approved
+        pr_outcome = await _open_pr_for_lesson(lesson_id, approved)
+        approved.update(pr_outcome)
         return approved
-    pr_outcome = await _open_pr_for_lesson(lesson_id, approved)
-    approved.update(pr_outcome)
-    return approved
 
 
 @router.post("/api/learning/candidates/{lesson_id}/draft")
@@ -623,6 +656,12 @@ async def post_draft(
     await _guard_learning_write_request(
         request, x_autonomy_admin_token, x_api_key
     )
+    async with _lesson_operation_lock(lesson_id):
+        return await _draft_locked(lesson_id)
+
+
+async def _draft_locked(lesson_id: str) -> dict[str, Any]:
+    """Draft a proposed lesson while the per-lesson operation lock is held."""
     row = await _load_proposed_lesson(lesson_id)
     proposed_delta = _row_proposed_delta(row)
     evidence_snippets = _load_evidence_snippets(lesson_id)

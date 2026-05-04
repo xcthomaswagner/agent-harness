@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from config import settings
 from learning_api import router as learning_api_router
@@ -618,6 +620,51 @@ class TestDraftEndpoint:
             f"/api/learning/candidates/{lid}/draft", json={}
         )
         assert r.status_code == 401
+
+    async def test_concurrent_draft_only_runs_drafter_once(
+        self, admin_app: FastAPI, admin_headers: dict[str, str]
+    ) -> None:
+        lid = self._seed_with_delta()
+        drafter_calls = 0
+
+        async def slow_drafter(*_args, **_kwargs):
+            nonlocal drafter_calls
+            drafter_calls += 1
+            await asyncio.sleep(0.05)
+            return DrafterResult(
+                success=True,
+                unified_diff="--- a/x\n+++ b/x\n@@\n+rule",
+            )
+
+        verdict = ConsistencyVerdict(contradicts=False, reasoning="ok")
+        transport = ASGITransport(app=admin_app)
+        with (
+            patch("learning_api._run_drafter", side_effect=slow_drafter),
+            patch(
+                "learning_api._run_consistency_check",
+                AsyncMock(return_value=verdict),
+            ),
+            patch("pathlib.Path.read_text", return_value="current"),
+        ):
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as ac:
+                responses = await asyncio.gather(
+                    ac.post(
+                        f"/api/learning/candidates/{lid}/draft",
+                        json={},
+                        headers=admin_headers,
+                    ),
+                    ac.post(
+                        f"/api/learning/candidates/{lid}/draft",
+                        json={},
+                        headers=admin_headers,
+                    ),
+                )
+
+        statuses = sorted(r.status_code for r in responses)
+        assert statuses == [200, 409]
+        assert drafter_calls == 1
 
     def test_absolute_target_path_rejected_before_read(
         self, client: TestClient, admin_headers: dict[str, str]
