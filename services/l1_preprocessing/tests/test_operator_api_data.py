@@ -800,6 +800,40 @@ def test_traces_status_filter(
     assert [r["id"] for r in queued] == ["HARN-Q"]
 
 
+def test_traces_status_filter_applies_before_pagination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    logs_dir = tmp_path / "logs"
+    import tracer as tracer_module
+
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    _write_trace(
+        logs_dir,
+        "HARN-DONE",
+        events=[("webhook", "webhook_received"), ("pipeline", "Pipeline complete")],
+    )
+    _write_trace(
+        logs_dir,
+        "HARN-Q",
+        events=[("webhook", "webhook_received")],
+    )
+
+    c = TestClient(_mk_app())
+    body = c.get("/api/operator/traces?status=done&limit=1").json()
+    assert body["count"] == 1
+    assert [r["id"] for r in body["traces"]] == ["HARN-DONE"]
+
+
 def test_traces_limit_caps_at_500(traces_client: TestClient) -> None:
     r = traces_client.get("/api/operator/traces?limit=9999")
     assert r.status_code == 200

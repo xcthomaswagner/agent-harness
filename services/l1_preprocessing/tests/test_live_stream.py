@@ -91,6 +91,31 @@ def _user_tool_result() -> dict[str, Any]:
     }
 
 
+def test_worktree_root_uses_trace_recorded_worktree_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    logs_dir = tmp_path / "logs"
+    import tracer as tracer_module
+
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+    monkeypatch.setattr(live_stream, "LOGS_DIR", logs_dir, raising=False)
+    worktree = tmp_path / "custom" / "worktrees" / "ai" / "LIVE-1"
+    harness_dir = worktree / ".harness"
+    harness_dir.mkdir(parents=True)
+    (harness_dir / "spawn-manifest.json").write_text(
+        json.dumps({"ticket_id": "LIVE-1", "worktree_path": str(worktree)})
+    )
+    tracer_module.append_trace(
+        "LIVE-1",
+        "trace-live",
+        "spawn",
+        "l2_spawn_started",
+        worktree_path=str(worktree),
+    )
+
+    assert live_stream._worktree_root_for_ticket("LIVE-1") == worktree.resolve()
+
+
 @pytest.fixture
 def fake_worktree_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect ``~/.harness/clients/worktrees/ai`` into tmp_path."""

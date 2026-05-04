@@ -54,16 +54,25 @@ class TestProcessTicketSync:
         mock_pipeline = MagicMock()
         mock_result = {"status": "enriched", "ticket_id": "Q-2"}
 
-        async def fake_process(ticket: TicketPayload) -> dict:
+        async def fake_process(ticket: TicketPayload, trace_id: str = "") -> dict:
+            assert trace_id
             return mock_result
 
         mock_pipeline.process = fake_process
 
-        with patch("queue_worker.Pipeline", return_value=mock_pipeline):
+        with (
+            patch("queue_worker.Pipeline", return_value=mock_pipeline),
+            patch("queue_worker.append_trace") as append_trace,
+            patch("queue_worker._release_ticket") as release_ticket,
+            patch("queue_worker._clear_trigger_state") as clear_trigger_state,
+        ):
             result = process_ticket_sync(ticket_data)
 
         assert result["status"] == "enriched"
         assert result["ticket_id"] == "Q-2"
+        assert append_trace.call_count == 2
+        release_ticket.assert_called_once_with("Q-2")
+        clear_trigger_state.assert_called_once_with("Q-2")
 
     def test_returns_error_on_invalid_ticket_data(self) -> None:
         """Invalid ticket data returns error dict instead of crashing."""

@@ -62,6 +62,7 @@ class Settings(BaseSettings):
 
     # Queue (optional — falls back to in-process background tasks if empty)
     redis_url: str = ""  # e.g., redis://localhost:6379/0
+    queue_job_timeout: str = "90m"
 
     # Seconds to keep a ticket claimed after /api/agent-complete fires. The
     # window absorbs self-triggered ADO webhooks from our own comment-post

@@ -854,7 +854,7 @@ def get_traces(
     """
     capped_limit = max(1, min(500, int(limit)))
     offset = max(0, int(offset))
-    raw = _list_traces(offset=offset, limit=capped_limit)
+    raw = _list_traces(offset=0, limit=0)
     conn = open_connection(_db_path_from_settings())
     try:
         ensure_schema(conn)
@@ -874,8 +874,9 @@ def get_traces(
         shaped = [t for t in shaped if not t["hidden"]]
     if status is not None:
         shaped = [t for t in shaped if t["status"] == status]
+    page = shaped[offset: offset + capped_limit]
     return {
-        "traces": shaped,
+        "traces": page,
         "count": len(shaped),
         "offset": offset,
         "limit": capped_limit,

@@ -483,7 +483,8 @@ class Pipeline:
             enriched.platform_profile = profile.platform_profile
             log.info("platform_profile_from_config", profile=profile.platform_profile)
         else:
-            detected = self._detect_platform_from_repo()
+            repo_path = profile.client_repo_path if profile else ""
+            detected = self._detect_platform_from_repo(repo_path or None)
             if detected:
                 enriched.platform_profile = detected
                 log.info("platform_profile_auto_detected", profile=detected)
@@ -545,7 +546,8 @@ class Pipeline:
 
         ticket_path = self._write_ticket_json(enriched)
         quick_label = profile.quick_label if profile else "ai-quick"
-        pipeline_mode = "quick" if quick_label in enriched.labels else "multi"
+        labels_lower = {label.lower() for label in enriched.labels}
+        pipeline_mode = "quick" if quick_label.lower() in labels_lower else "multi"
 
         client_repo = (
             (profile.client_repo_path if profile else "")
@@ -669,7 +671,7 @@ class Pipeline:
             "sub_ticket_count": len(decomp.sub_tickets),
         }
 
-    def _detect_platform_from_repo(self) -> str:
+    def _detect_platform_from_repo(self, repo_path: str | Path | None = None) -> str:
         """Auto-detect platform from repo files.
 
         Checks are run in order and the first match wins. Each check
@@ -678,8 +680,8 @@ class Pipeline:
         a one-line addition instead of another ``if`` branch with its
         own exception-handling shape.
         """
-        repo_path = Path(self._settings.default_client_repo)
-        if not repo_path.exists():
+        path = Path(repo_path or self._settings.default_client_repo)
+        if not path.exists():
             return ""
 
         checks: list[tuple[str, Callable[[Path], bool]]] = [
@@ -692,7 +694,7 @@ class Pipeline:
         ]
         for platform, predicate in checks:
             try:
-                if predicate(repo_path):
+                if predicate(path):
                     return platform
             except Exception:
                 # Any predicate that blows up (malformed package.json,
@@ -771,6 +773,7 @@ class Pipeline:
             return False
 
         branch_name = f"ai/{enriched.id}"
+        worktree_path = str(Path(client_repo).resolve().parent / "worktrees" / branch_name)
         cmd = [
             sys.executable, str(SPAWN_SCRIPT),
             "--client-repo", client_repo,
@@ -795,6 +798,18 @@ class Pipeline:
             branch=branch_name,
             client_repo=client_repo,
             pipeline_mode=pipeline_mode,
+        )
+        append_trace(
+            enriched.id,
+            trace_id or generate_trace_id(),
+            "spawn",
+            "l2_spawn_started",
+            branch=branch_name,
+            client_repo=client_repo,
+            worktree_path=worktree_path,
+            pipeline_mode=pipeline_mode,
+            platform_profile=enriched.platform_profile or "",
+            client_profile=client_profile_name,
         )
 
         # Redirect stderr to a temp file (not a PIPE): the child keeps

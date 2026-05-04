@@ -55,6 +55,10 @@ class TestTracePath:
             p = trace_path("SCRUM-1")
         assert p == Path("/tmp/test-logs/SCRUM-1.jsonl")
 
+    def test_rejects_path_like_ticket_id(self) -> None:
+        with pytest.raises(ValueError):
+            trace_path("../SCRUM-1")
+
 
 class TestAppendTrace:
     def test_appends_json_line(self, trace_dir: Path) -> None:
@@ -1353,6 +1357,9 @@ class TestDeriveTraceStatus:
 
     def test_complete(self) -> None:
         assert self._run(["webhook_received", "Pipeline complete"]) == "Complete"
+
+    def test_pr_merged_wins_over_pipeline_complete(self) -> None:
+        assert self._run(["Pipeline complete", "pr_merged"]) == "Merged"
 
     def test_ado_skip_does_not_override_running_pipeline(self) -> None:
         """Duplicate no-tag ADO webhooks after label removal are chatter."""

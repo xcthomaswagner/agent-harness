@@ -339,7 +339,7 @@ def main() -> None:
 
     with ticket_json.open() as f:
         try:
-            json.load(f)
+            ticket_data = json.load(f)
         except json.JSONDecodeError:
             print(f"Error: Invalid JSON in ticket file: {ticket_json}", file=sys.stderr)
             sys.exit(1)
@@ -576,13 +576,15 @@ def main() -> None:
             print(f"[spawn] WARNING: Client profile '{args.client_profile}' not found")
 
     # --- Step 3: Write ticket, mode, trace config, and copy attachments ---
-    shutil.copy2(ticket_json, worktree_dir / ".harness" / "ticket.json")
+    harness_dir = worktree_dir / ".harness"
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    with (harness_dir / "ticket.json").open("w") as f:
+        json.dump(ticket_data, f, indent=2)
     (worktree_dir / ".harness" / "pipeline-mode").write_text(pipeline_mode)
     print(f"[spawn] Ticket written to .harness/ticket.json (mode: {pipeline_mode})")
 
     # Write trace config so the file-watcher can report to L1
-    with ticket_json.open() as f:
-        _ticket_id = json.load(f).get("id", "")
+    _ticket_id = ticket_data.get("id", "")
     l1_url = os.environ.get("L1_SERVICE_URL", "http://localhost:8000")
     trace_config = {
         "ticket_id": _ticket_id,
@@ -594,9 +596,22 @@ def main() -> None:
         json.dump(trace_config, f, indent=2)
     print(f"[spawn] Trace config written (trace_id={args.trace_id[:12] or 'none'})")
 
+    spawn_manifest = {
+        "ticket_id": _ticket_id,
+        "trace_id": args.trace_id or "",
+        "client_repo": str(client_repo),
+        "worktree_path": str(worktree_dir),
+        "branch": branch_name,
+        "platform_profile": args.platform_profile,
+        "client_profile": args.client_profile,
+        "pipeline_mode": pipeline_mode,
+        "state": "runtime_ready",
+    }
+    with (harness_dir / "spawn-manifest.json").open("w") as f:
+        json.dump(spawn_manifest, f, indent=2)
+    print("[spawn] Spawn manifest written")
+
     # Copy downloaded image attachments into the worktree
-    with ticket_json.open() as f:
-        ticket_data = json.load(f)
     attachments_dir = worktree_dir / ".harness" / "attachments"
     copied_count = 0
     for att in ticket_data.get("attachments", []):

@@ -102,6 +102,10 @@ _RECURSE_SKIP_KEYS = frozenset({
     "billing",
     "status",
     "ticket_title",
+    "artifact_path",
+    "client_repo",
+    "worktree",
+    "worktree_path",
 })
 
 
@@ -213,6 +217,14 @@ def generate_trace_id() -> str:
 
 def trace_path(ticket_id: str) -> Path:
     """Get the path to a ticket's trace file."""
+    if (
+        not ticket_id
+        or "\x00" in ticket_id
+        or "/" in ticket_id
+        or "\\" in ticket_id
+        or ticket_id in {".", ".."}
+    ):
+        raise ValueError(f"Invalid ticket_id for trace path: {ticket_id!r}")
     return LOGS_DIR / f"{ticket_id}.jsonl"
 
 
@@ -238,6 +250,7 @@ def append_trace(
         **kwargs,
     }
     path = trace_path(ticket_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with _get_ticket_lock(ticket_id), path.open("a") as f:
         f.write(json.dumps(entry) + "\n")
 
@@ -449,12 +462,12 @@ def derive_trace_status(
         for ev in ("Pipeline complete", "l2_dispatched", "processing_completed")
     ):
         return "Failed"
-    if "Pipeline complete" in events:
-        return "Complete"
     if "pr_merged" in events:
         return "Merged"
     if "pr_closed" in events:
         return "Closed"
+    if "Pipeline complete" in events:
+        return "Complete"
     if pr_url and not any("Pipeline complete" in ev for ev in events):
         return "PR Created"
     if any("QA complete" in ev for ev in events):

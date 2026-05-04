@@ -209,7 +209,7 @@ def _enqueue_or_background(
 
     from queue_worker import enqueue_ticket
 
-    job_id = enqueue_ticket(ticket)
+    job_id = enqueue_ticket(ticket, trace_id=trace_id)
     if job_id:
         logger.info("ticket_queued", ticket_id=ticket.id, job_id=job_id)
         return "queued"

@@ -32,6 +32,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 
 from auth import _require_dashboard_auth_query_or_header
 from redaction import redact
+from tracer import read_trace
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -125,13 +126,29 @@ def _validate_ticket_id(ticket_id: str) -> str:
 
 
 def _worktree_root_for_ticket(ticket_id: str) -> Path | None:
-    """Resolve ``~/.harness/clients/worktrees/ai/<ticket_id>``.
+    """Resolve a ticket worktree from trace metadata, then legacy default path.
 
     Returns ``None`` when the directory doesn't exist (L2 never
     spawned for this ticket). The caller is responsible for
     degrading gracefully — a non-existent worktree is expected, not
     an error condition.
     """
+    for entry in reversed(read_trace(ticket_id)):
+        raw_path = entry.get("worktree_path") or entry.get("worktree")
+        if not isinstance(raw_path, str) or not raw_path:
+            continue
+        candidate = Path(raw_path).expanduser().resolve()
+        manifest = candidate / ".harness" / "spawn-manifest.json"
+        ticket_json = candidate / ".harness" / "ticket.json"
+        if not candidate.is_dir() or not (manifest.is_file() or ticket_json.is_file()):
+            continue
+        try:
+            data = _read_json_object(manifest) or _read_json_object(ticket_json) or {}
+            if data.get("ticket_id") == ticket_id or data.get("id") == ticket_id:
+                return candidate
+        except Exception:
+            continue
+
     base = Path(os.path.expanduser("~/.harness/clients/worktrees/ai"))
     candidate = (base / ticket_id).resolve()
     # Containment guard — the regex above already rejects ``..`` and

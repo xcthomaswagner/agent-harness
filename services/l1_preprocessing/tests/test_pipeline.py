@@ -283,6 +283,58 @@ class TestRouteEnriched:
         assert stderr_arg is not subprocess.PIPE
         assert hasattr(stderr_arg, "fileno")
 
+    async def test_enriched_uses_profile_repo_for_platform_detection(
+        self,
+        settings: Settings,
+        mock_analyst: AsyncMock,
+        mock_jira: AsyncMock,
+        sample_ticket: TicketPayload,
+        tmp_path: Path,
+    ) -> None:
+        from types import SimpleNamespace
+
+        default_repo = tmp_path / "default-salesforce"
+        default_repo.mkdir()
+        (default_repo / "sfdx-project.json").write_text("{}")
+        profile_repo = tmp_path / "profile-sitecore"
+        profile_repo.mkdir()
+        (profile_repo / "sitecore.json").write_text("{}")
+        settings.default_client_repo = str(default_repo)
+        pipe = Pipeline(
+            settings=settings, analyst=mock_analyst, jira_adapter=mock_jira
+        )
+        ticket_data = sample_ticket.model_dump()
+        ticket_data["labels"] = ["AI-QUICK"]
+        enriched = EnrichedTicket(
+            **ticket_data,
+            generated_acceptance_criteria=["AC"],
+            size_assessment=SizeAssessment(
+                classification=SizeClassification.SMALL,
+                estimated_units=1,
+                recommended_dev_count=1,
+            ),
+        )
+        mock_analyst.analyze.return_value = enriched
+        fake_profile = SimpleNamespace(
+            name="sitecore-profile",
+            done_status="Done",
+            in_progress_status="In Progress",
+            quick_label="ai-quick",
+            client_repo_path=str(profile_repo),
+            platform_profile="",
+            source_control={},
+        )
+
+        with (
+            patch("pipeline.Pipeline._load_client_profile", return_value=fake_profile),
+            patch("pipeline.Pipeline._trigger_l2", return_value=True) as trigger_l2,
+        ):
+            result = await pipe.process(sample_ticket)
+
+        assert result["spawn_triggered"] is True
+        assert enriched.platform_profile == "sitecore"
+        assert trigger_l2.call_args.kwargs["pipeline_mode"] == "quick"
+
     async def test_enriched_spawn_early_failure_reads_stderr_from_tempfile(
         self,
         settings: Settings,
