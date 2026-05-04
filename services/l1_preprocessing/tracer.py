@@ -444,7 +444,7 @@ def derive_trace_status(
         and any(ev.startswith("ado_webhook_skipped") for ev in events)
     ):
         return "Skipped"
-    if "manual_ticket_submitted" in events:
+    if not pipeline_started and "manual_ticket_submitted" in events:
         return "Submitted"
     if "Escalated" in events:
         return "Escalated"

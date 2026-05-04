@@ -835,6 +835,43 @@ def test_traces_status_filter(
     assert [r["id"] for r in queued] == ["HARN-Q"]
 
 
+def test_manual_ticket_with_l2_dispatch_is_in_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    logs_dir = tmp_path / "logs"
+    import tracer as tracer_module
+
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    _write_trace(
+        logs_dir,
+        "HARN-MANUAL",
+        events=[
+            ("manual", "manual_ticket_submitted"),
+            ("pipeline", "processing_started"),
+            ("pipeline", "l2_dispatched"),
+            ("pipeline", "processing_completed"),
+        ],
+        title="Manual ticket under active L2 work",
+    )
+
+    c = TestClient(_mk_app())
+    body = c.get("/api/operator/traces").json()
+    row = next(r for r in body["traces"] if r["id"] == "HARN-MANUAL")
+    assert row["raw_status"] == "Dispatched"
+    assert row["status"] == "in-flight"
+    assert body["status_counts"]["in-flight"] == 1
+
+
 def test_traces_status_filter_applies_before_pagination(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

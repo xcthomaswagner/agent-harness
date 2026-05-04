@@ -1374,6 +1374,18 @@ class TestDeriveTraceStatus:
     def test_ado_skip_terminal_when_pipeline_never_started(self) -> None:
         assert self._run(["ado_webhook_skipped_no_tag"]) == "Skipped"
 
+    def test_manual_submission_terminal_when_pipeline_never_started(self) -> None:
+        assert self._run(["manual_ticket_submitted"]) == "Submitted"
+
+    def test_manual_submission_does_not_mask_dispatched_pipeline(self) -> None:
+        events = [
+            "manual_ticket_submitted",
+            "processing_started",
+            "l2_dispatched",
+            "processing_completed",
+        ]
+        assert self._run(events) == "Dispatched"
+
     def test_pr_created_without_complete(self) -> None:
         assert (
             self._run(["webhook_received", "pr_created"], pr_url="https://x/pr/1")
