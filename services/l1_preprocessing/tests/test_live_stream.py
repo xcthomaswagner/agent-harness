@@ -323,6 +323,30 @@ class TestFilter:
         assert read_item["count"] == 2
         assert any("failed" in warning for warning in summary["warnings"])
 
+    def test_ticket_activity_highlights_skip_routine_file_reads(
+        self, tmp_path: Path
+    ) -> None:
+        stream = tmp_path / "session-stream.jsonl"
+        _write_stream(
+            stream,
+            [
+                *[
+                    _tool_use_event("Read", f"src/file-{idx}.tsx")
+                    for idx in range(20)
+                ],
+                _text_event("Implemented the hero banner and verified tests."),
+            ],
+        )
+
+        summary = live_stream.summarize_ticket_activity(
+            "HIGHLIGHT-1", [("developer-1", stream)]
+        )
+
+        messages = [item["message"] for item in summary["highlights"]]
+        assert messages == ["Implemented the hero banner and verified tests."]
+        teammate_actions = summary["teammates"][0]["actions"]
+        assert any(action["message"].startswith("Read:") for action in teammate_actions)
+
     def test_finished_activity_adds_review_judge_and_qa_without_streams(
         self, tmp_path: Path
     ) -> None:

@@ -842,6 +842,15 @@ _LOW_SIGNAL_RE = re.compile(
     r"^(read|ls|pwd|glob|grep|rg|find|tool|todo|notebookread):?\s*$",
     re.IGNORECASE,
 )
+_LOW_SIGNAL_TOOL_NAMES = {
+    "glob",
+    "grep",
+    "ls",
+    "notebookread",
+    "read",
+    "todowrite",
+    "todoread",
+}
 
 _CONTENTSTACK_TOKEN_RE = re.compile(
     r"\b(?:csa|cs|blt)[A-Za-z0-9]{18,}\b",
@@ -900,6 +909,17 @@ def _dedupe_activity_events(events: list[dict[str, Any]]) -> list[dict[str, Any]
             existing["last_at"] = item["last_at"]
             existing["event_id"] = item["event_id"]
     return [by_key[key] for key in order]
+
+
+def _is_low_signal_highlight(item: dict[str, Any]) -> bool:
+    """True for routine tool chatter that should not dominate highlights."""
+    message = str(item.get("message") or "")
+    if _WARNING_RE.search(message):
+        return False
+    if str(item.get("kind") or "") != "tool_use":
+        return False
+    tool = str(item.get("tool_name") or "").replace("_", "").replace("-", "").lower()
+    return tool in _LOW_SIGNAL_TOOL_NAMES
 
 
 def summarize_ticket_activity(
@@ -1005,11 +1025,16 @@ def summarize_ticket_activity(
         for item in deduped_all
         if _WARNING_RE.search(str(item.get("message") or ""))
     ]
-    highlights = [
+    highlight_candidates = [
         item
         for item in deduped_all
         if item.get("kind") in {"task_notification", "text", "tool_use"}
+    ]
+    highlights = [
+        item for item in highlight_candidates if not _is_low_signal_highlight(item)
     ][-12:]
+    if not highlights:
+        highlights = highlight_candidates[-12:]
     actor_count = len(teammates)
     deduped_count = len(deduped_all)
     summary = (
