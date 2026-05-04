@@ -573,7 +573,8 @@ def _synthetic_activity_event(
     timestamp: str,
     kind: str = "task_notification",
 ) -> dict[str, Any]:
-    return {
+    message = _truncate(_redact_live_text(message), 240)
+    event = {
         **_base_event(
             teammate=teammate,
             source_line=0,
@@ -582,8 +583,11 @@ def _synthetic_activity_event(
         ),
         "event_id": f"{teammate}:{source_id}",
         "kind": kind,
-        "summary": _truncate(_redact_live_text(message), 240),
+        "summary": message,
     }
+    if kind == "text":
+        event["text"] = message
+    return event
 
 
 def _read_json_object(path: Path) -> dict[str, Any] | None:
@@ -687,13 +691,17 @@ def _issue_summaries(items: Any, limit: int = 3) -> list[str]:
     return summaries
 
 
+def _json_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _collect_artifact_activity(logs_dir: Path) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
 
     review_path = logs_dir / "code-review.json"
     review = _read_json_object(review_path)
     if review:
-        issues = review.get("issues") if isinstance(review.get("issues"), list) else []
+        issues = _json_list(review.get("issues"))
         events.append(
             _synthetic_activity_event(
                 teammate="code-reviewer",
@@ -748,7 +756,7 @@ def _collect_artifact_activity(logs_dir: Path) -> list[dict[str, Any]]:
     qa_path = logs_dir / "qa-matrix.json"
     qa = _read_json_object(qa_path)
     if qa:
-        issues = qa.get("issues") if isinstance(qa.get("issues"), list) else []
+        issues = _json_list(qa.get("issues"))
         passed = sum(
             1
             for item in issues

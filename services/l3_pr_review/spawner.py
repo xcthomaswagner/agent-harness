@@ -17,7 +17,7 @@ import structlog
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from shared.env_sanitize import sanitized_env
-from shared.model_policy import resolve_model
+from shared.model_policy import claude_cli_model_args, resolve_model
 
 logger = structlog.get_logger()
 
@@ -502,8 +502,7 @@ class SessionSpawner:
         model_selection = resolve_model(role)
         model = model or model_selection.claude_code_model
         cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions"]
-        if model == "sonnet":
-            cmd.extend(["--model", model])
+        cmd.extend(claude_cli_model_args(model))
 
         log = logger.bind(
             session_type=session_type,

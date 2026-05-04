@@ -36,21 +36,30 @@ interface UseFeedOptions {
   intervalMs?: number;
   /** Disable the hook entirely (e.g., when the view is collapsed). */
   disabled?: boolean;
+  /** Clear stale data when the endpoint changes. */
+  clearOnUrlChange?: boolean;
 }
 
 export function useFeed<T>(
   url: string | null,
   opts: UseFeedOptions = {},
 ): FeedState<T> {
-  const { intervalMs = 10_000, disabled = false } = opts;
+  const { intervalMs = 10_000, disabled = false, clearOnUrlChange = false } = opts;
   const [data, setData] = useState<T | undefined>(undefined);
   const [status, setStatus] = useState<FeedStatus>("idle");
   const [error, setError] = useState<string | undefined>(undefined);
   const abortRef = useRef<AbortController | null>(null);
+  const urlRef = useRef<string | null>(null);
   // Manual-refresh trigger — bumping this reruns the effect.
   const [tick, setTick] = useState(0);
 
   useEffect(() => {
+    const urlChanged = clearOnUrlChange && urlRef.current !== url;
+    if (urlChanged) {
+      setData(undefined);
+      setError(undefined);
+    }
+    urlRef.current = url;
     if (disabled || !url) {
       setStatus("idle");
       return;
@@ -60,7 +69,7 @@ export function useFeed<T>(
     const controller = new AbortController();
     abortRef.current = controller;
 
-    setStatus((prev) => (prev === "ok" ? "refreshing" : "loading"));
+    setStatus((prev) => (urlChanged || prev !== "ok" ? "loading" : "refreshing"));
     let cancelled = false;
 
     fetch(url, {
@@ -95,7 +104,7 @@ export function useFeed<T>(
       controller.abort();
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [url, intervalMs, disabled, tick]);
+  }, [url, intervalMs, disabled, clearOnUrlChange, tick]);
 
   return {
     data,

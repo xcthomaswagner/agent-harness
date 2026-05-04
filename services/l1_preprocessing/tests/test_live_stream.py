@@ -379,6 +379,13 @@ class TestFilter:
         assert any(
             "QA complete" in item["message"] for item in summary["highlights"]
         )
+        messages = [
+            action["message"]
+            for teammate in summary["teammates"]
+            for action in teammate["actions"]
+        ]
+        assert "Review finding: Heading hierarchy fixed" in messages
+        assert "Validated issue: CTA guard confirmed" in messages
         qa = next(teammate for teammate in summary["teammates"] if teammate["role"] == "qa")
         assert qa["state"] == "completed"
         assert qa["deduped_event_count"] >= 2

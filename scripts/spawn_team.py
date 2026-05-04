@@ -31,7 +31,7 @@ sys.path.insert(0, str(SCRIPT_DIR.parent / "services"))
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from shared.env_sanitize import sanitized_env  # noqa: E402
-from shared.model_policy import resolve_model  # noqa: E402
+from shared.model_policy import claude_cli_model_args, resolve_model  # noqa: E402
 from shared.platform_profile_env import pass_through_vars  # noqa: E402
 from worktree_safety import safe_remove_worktree  # noqa: E402
 
@@ -612,8 +612,7 @@ def main() -> None:
                     "--output-format", "stream-json",
                     "--verbose",  # required by Claude Code headless when output-format=stream-json
                 ]
-                if model_selection.claude_code_model == "sonnet":
-                    claude_cmd.extend(["--model", model_selection.claude_code_model])
+                claude_cmd.extend(claude_cli_model_args(model_selection))
                 proc = subprocess.run(
                     claude_cmd,
                     cwd=str(worktree_dir),

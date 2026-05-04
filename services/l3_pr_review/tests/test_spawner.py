@@ -29,8 +29,8 @@ class TestSpawnPrReview:
         cmd = mock_popen.call_args[0][0]
         assert cmd[0] == "claude"
         assert "-p" in cmd
-        # PR review uses opus — no --model flag means default (opus)
-        assert "--model" not in cmd
+        model_idx = cmd.index("--model")
+        assert cmd[model_idx + 1] == "opus"
 
     def test_truncates_diff_to_1500_chars(self) -> None:
         spawner = SessionSpawner(repo_path="/tmp/repo")

@@ -1643,7 +1643,8 @@ def get_ticket_activity_summary(ticket_id: str) -> dict[str, Any]:
             "warnings": [],
         }
     streams = _find_session_streams(worktree)
-    if not streams:
+    finished_events = collect_finished_activity(worktree)
+    if not streams and not finished_events:
         return {
             "ticket_id": ticket_id,
             "summary": "No session-stream files are available for this ticket.",
@@ -1656,7 +1657,7 @@ def get_ticket_activity_summary(ticket_id: str) -> dict[str, Any]:
     return summarize_ticket_activity(
         ticket_id,
         streams,
-        finished_events=collect_finished_activity(worktree),
+        finished_events=finished_events,
     )
 
 
@@ -1854,13 +1855,13 @@ def get_lesson_counts() -> dict[str, Any]:
     dependencies=[Depends(_require_dashboard_auth)],
 )
 async def remove_trigger_label(ticket_id: str) -> dict[str, Any]:
-    """Remove the ai-implement trigger label from a ticket in ADO.
+    """Remove configured trigger labels from a ticket in ADO.
 
     Looks up the client profile for this ticket to find the configured
-    ai_label, then calls AdoAdapter.remove_label. Also writes a comment
+    trigger labels, then calls AdoAdapter.remove_label. Also writes a comment
     so the ADO work item history shows who removed it and why.
 
-    Returns {"removed": true, "label": "<label>"} on success.
+    Returns {"removed": true, "labels": ["<label>"]} on success.
     Raises 404 if no profile is found for the ticket's project prefix.
     Raises 502 if the ADO call fails.
     """
@@ -1873,14 +1874,21 @@ async def remove_trigger_label(ticket_id: str) -> dict[str, Any]:
     if profile is None:
         raise HTTPException(status_code=404, detail=f"No profile for project prefix '{prefix}'")
 
-    ai_label = profile.ai_label
+    labels = [
+        label
+        for label in dict.fromkeys([profile.ai_label, profile.quick_label])
+        if label
+    ]
     adapter = _get_ado_adapter()
 
     try:
-        await adapter.remove_label(ticket_id, ai_label)
+        for label in labels:
+            await adapter.remove_label(ticket_id, label)
+        label_text = ", ".join(f"`{label}`" for label in labels)
         await adapter.write_comment(
             ticket_id,
-            f"🤖 **Agentic Harness** — trigger label `{ai_label}` removed via operator dashboard. "
+            f"🤖 **Agentic Harness** — trigger label(s) {label_text} "
+            f"removed via operator dashboard. "
             f"Re-add the label to trigger a new run.",
         )
     except Exception as exc:
@@ -1893,7 +1901,12 @@ async def remove_trigger_label(ticket_id: str) -> dict[str, Any]:
         "operator",
         "trigger_label_removed",
         source="operator",
-        label=ai_label,
+        labels=labels,
     )
 
-    return {"removed": True, "label": ai_label, "ticket_id": ticket_id}
+    return {
+        "removed": True,
+        "label": labels[0] if labels else "",
+        "labels": labels,
+        "ticket_id": ticket_id,
+    }

@@ -121,6 +121,16 @@ class ModelSelection:
         return self.model
 
 
+def claude_cli_model_args(selection_or_model: ModelSelection | str) -> list[str]:
+    """Return explicit Claude Code CLI model args for harness sessions."""
+    model = (
+        selection_or_model.claude_code_model
+        if isinstance(selection_or_model, ModelSelection)
+        else selection_or_model
+    )
+    return ["--model", model] if model in {"opus", "sonnet"} else []
+
+
 def policy_path() -> Path:
     raw = os.getenv("HARNESS_MODEL_POLICY", "")
     return Path(raw).expanduser() if raw else DEFAULT_POLICY_PATH

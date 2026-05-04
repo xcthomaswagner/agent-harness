@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import yaml
@@ -1670,6 +1671,79 @@ def test_activity_summary_includes_finished_phase_artifacts(
     assert "team_lead" in roles
     assert "qa" in roles
     assert any("QA complete" in item["message"] for item in data["highlights"])
+
+
+def test_activity_summary_uses_finished_artifacts_without_session_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    worktree = tmp_path / "wt" / "HARN-NOSTREAM"
+    logs = worktree / ".harness" / "logs"
+    logs.mkdir(parents=True)
+    (logs / "pipeline.jsonl").write_text(
+        json.dumps(
+            {
+                "phase": "qa_validation",
+                "timestamp": "2026-05-03T22:21:56Z",
+                "event": "QA complete",
+                "overall": "PASS",
+                "criteria_passed": 2,
+                "criteria_total": 2,
+            }
+        )
+        + "\n"
+    )
+    (logs / "qa-matrix.json").write_text(
+        json.dumps(
+            {
+                "overall": "PASS",
+                "issues": [{"criterion": "Hero renders", "status": "PASS"}],
+            }
+        )
+    )
+
+    import operator_api_data as oad
+
+    monkeypatch.setattr(oad, "_worktree_root_for_ticket", lambda _tid: worktree)
+
+    c = TestClient(_mk_app())
+    data = c.get("/api/operator/tickets/HARN-NOSTREAM/activity-summary").json()
+    assert data["raw_event_count"] > 0
+    roles = {teammate["role"] for teammate in data["teammates"]}
+    assert "qa" in roles
+    assert any("QA complete" in item["message"] for item in data["highlights"])
+
+
+def test_operator_trigger_label_removal_clears_ai_and_quick_labels(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profiles_dir = tmp_path / "client-profiles"
+    _write_profile(profiles_dir, "HARN", project_key="HARN")
+    import client_profile as cp_module
+    import main
+
+    monkeypatch.setattr(cp_module, "PROFILES_DIR", profiles_dir)
+    adapter = type("FakeAdoAdapter", (), {})()
+    adapter.remove_label = AsyncMock()
+    adapter.write_comment = AsyncMock()
+
+    with patch.object(main, "_get_ado_adapter", return_value=adapter):
+        response = client.delete("/api/operator/tickets/HARN-123/trigger-label")
+
+    assert response.status_code == 200
+    assert response.json()["labels"] == ["ai-implement", "ai-quick"]
+    adapter.remove_label.assert_any_await("HARN-123", "ai-implement")
+    adapter.remove_label.assert_any_await("HARN-123", "ai-quick")
+    adapter.write_comment.assert_awaited_once()
 
 
 def test_pr_detail_surfaces_auto_merge_decision(

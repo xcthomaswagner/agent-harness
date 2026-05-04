@@ -65,3 +65,12 @@ def test_apply_model_policy_rewrites_injected_agent_frontmatter(
     assert "model: sonnet" in developer.read_text()
     assert "model: opus" in qa.read_text()
 
+
+def test_claude_cli_model_args_passes_explicit_opus_and_sonnet() -> None:
+    from shared.model_policy import ModelSelection, claude_cli_model_args
+
+    assert claude_cli_model_args(
+        ModelSelection("team_lead", "Team Lead", "opus", "high")
+    ) == ["--model", "opus"]
+    assert claude_cli_model_args("sonnet") == ["--model", "sonnet"]
+    assert claude_cli_model_args("claude-opus-4-20250514") == []

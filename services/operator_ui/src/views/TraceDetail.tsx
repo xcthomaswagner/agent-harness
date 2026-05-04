@@ -30,12 +30,15 @@ export function TraceDetailView({ id }: Props) {
   const [busy, setBusy] = useState(false);
   const feed = useFeed<TraceDetailResponse>(
     `/api/operator/traces/${encodeURIComponent(id)}`,
+    { clearOnUrlChange: true },
   );
   const roster = useFeed<AgentRosterResponse>(
     `/api/operator/tickets/${encodeURIComponent(id)}/agents`,
+    { clearOnUrlChange: true },
   );
   const activitySummary = useFeed<ActivitySummaryResponse>(
     `/api/operator/tickets/${encodeURIComponent(id)}/activity-summary`,
+    { clearOnUrlChange: true },
   );
 
   if (feed.status === "loading" && !feed.data) {

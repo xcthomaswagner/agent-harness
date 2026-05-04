@@ -187,9 +187,11 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
   const log = useLiveLog(row?.id ?? null);
   const roster = useFeed<AgentRosterResponse>(
     row ? `/api/operator/tickets/${encodeURIComponent(row.id)}/agents` : null,
+    { clearOnUrlChange: true },
   );
   const activitySummary = useFeed<ActivitySummaryResponse>(
     row ? `/api/operator/tickets/${encodeURIComponent(row.id)}/activity-summary` : null,
+    { clearOnUrlChange: true },
   );
   const [triggerState, setTriggerState] = useState<"idle" | "busy" | "done" | "error">("idle");
   const [liveFilter, setLiveFilter] = useState<LiveFilter>("all");
@@ -372,11 +374,23 @@ export function ActivitySummaryPanel({
     actorFilter === "all"
       ? data.teammates
       : data.teammates.filter((teammate) => teammate.teammate === actorFilter);
+  const filteredWarnings =
+    actorFilter === "all"
+      ? data.warnings
+      : visibleTeammates.flatMap((teammate) => teammate.warnings);
+  const visibleRawCount =
+    actorFilter === "all"
+      ? data.raw_event_count
+      : visibleTeammates.reduce((sum, teammate) => sum + teammate.raw_event_count, 0);
+  const visibleUniqueCount =
+    actorFilter === "all"
+      ? data.deduped_event_count
+      : visibleTeammates.reduce((sum, teammate) => sum + teammate.deduped_event_count, 0);
   return (
     <section class={compact ? "op-activity-summary is-compact" : "op-activity-summary"}>
       <SectionHeader
         label="Activity summary"
-        right={`${data.raw_event_count} raw · ${data.deduped_event_count} unique`}
+        right={`${visibleRawCount} raw · ${visibleUniqueCount} unique`}
       />
       <div class="op-summary-text">{data.summary}</div>
       {data.teammates.length > 1 && (
@@ -404,9 +418,9 @@ export function ActivitySummaryPanel({
           ))}
         </div>
       )}
-      {data.warnings.length > 0 && (
+      {filteredWarnings.length > 0 && (
         <div class="op-summary-warnings">
-          {data.warnings.slice(0, compact ? 3 : 8).map((warning, i) => (
+          {filteredWarnings.slice(0, compact ? 3 : 8).map((warning, i) => (
             <div key={`${warning}-${i}`}>{warning}</div>
           ))}
         </div>
