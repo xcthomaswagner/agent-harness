@@ -83,6 +83,33 @@ def test_archives_uncommitted_diff_then_removes() -> None:
         assert "README.md" in patch_text
 
 
+def test_archives_untracked_files_then_removes() -> None:
+    """Untracked files are not in git diff HEAD, so archive them separately."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        client_repo, wt_dir = _init_repo_and_worktree(tmp_path)
+
+        untracked = wt_dir / "notes" / "scratch.txt"
+        untracked.parent.mkdir()
+        untracked.write_text("important scratch\n")
+        archive_dir = tmp_path / "archive"
+
+        safe_remove_worktree(
+            wt_dir,
+            archive_dir=archive_dir,
+            client_repo=client_repo,
+        )
+
+        archive_target = archive_dir / wt_dir.name
+        assert (archive_target / "untracked-files.txt").read_text() == (
+            "notes/scratch.txt\n"
+        )
+        assert (
+            archive_target / "untracked" / "notes" / "scratch.txt"
+        ).read_text() == "important scratch\n"
+        assert not wt_dir.exists()
+
+
 def test_noop_when_worktree_missing() -> None:
     """Nonexistent worktree path should be a silent no-op."""
     with tempfile.TemporaryDirectory() as tmp:

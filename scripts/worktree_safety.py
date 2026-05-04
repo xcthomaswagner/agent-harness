@@ -70,6 +70,40 @@ def _status_porcelain(wt_path: Path, run_fn: _RunFn) -> list[str]:
     return [line for line in raw.splitlines() if line.strip()]
 
 
+def _untracked_files(wt_path: Path, run_fn: _RunFn) -> list[Path]:
+    """Return untracked file paths relative to ``wt_path``."""
+    result = run_fn(
+        ["git", "-C", str(wt_path), "ls-files", "--others", "--exclude-standard"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    raw = result.stdout if isinstance(result.stdout, str) else result.stdout.decode()
+    return [Path(line) for line in raw.splitlines() if line.strip()]
+
+
+def _archive_untracked_files(
+    wt_path: Path,
+    archive_target: Path,
+    untracked_files: list[Path],
+) -> None:
+    """Copy untracked files under archive_target/untracked."""
+    untracked_root = archive_target / "untracked"
+    for rel_path in untracked_files:
+        source = (wt_path / rel_path).resolve()
+        try:
+            source.relative_to(wt_path.resolve())
+        except ValueError:
+            continue
+        if not source.is_file():
+            continue
+        dest = untracked_root / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dest)
+
+
 def safe_remove_worktree(
     wt_path: Path,
     *,
@@ -133,13 +167,20 @@ def safe_remove_worktree(
         )
         if archive_dir is not None:
             patch_text = _run_git_diff(wt_path, run)
-            if patch_text:
+            untracked_files = _untracked_files(wt_path, run)
+            if patch_text or untracked_files:
                 archive_target = archive_dir / wt_path.name
                 archive_target.mkdir(parents=True, exist_ok=True)
-                (archive_target / "uncommitted.patch").write_text(patch_text)
+                if patch_text:
+                    (archive_target / "uncommitted.patch").write_text(patch_text)
+                if untracked_files:
+                    _archive_untracked_files(wt_path, archive_target, untracked_files)
+                    (archive_target / "untracked-files.txt").write_text(
+                        "\n".join(str(path) for path in untracked_files) + "\n"
+                    )
                 print(
-                    f"[safe_remove] Archived uncommitted diff to "
-                    f"{archive_target / 'uncommitted.patch'}"
+                    f"[safe_remove] Archived uncommitted work to "
+                    f"{archive_target}"
                 )
 
     # Step 4: git worktree remove --force.
