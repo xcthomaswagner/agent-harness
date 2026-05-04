@@ -1,6 +1,6 @@
 import { fireEvent, render, waitFor } from "@testing-library/preact";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { TicketsView } from "../Tickets";
+import { ActivitySummaryPanel, TeamActivity, TicketsView } from "../Tickets";
 
 class FakeEventSource {
   onopen: ((event: Event) => void) | null = null;
@@ -195,6 +195,28 @@ describe("TicketsView", () => {
     fireEvent.click(await findByText("Remove Trigger"));
 
     expect(await findByText(/Remove trigger failed: Adapter token expired/))
+      .toBeTruthy();
+  });
+
+  it("distinguishes panel fetch errors from empty activity", () => {
+    const { getByText } = render(
+      <div>
+        <ActivitySummaryPanel
+          data={undefined}
+          state="error"
+          error="500: summary unavailable"
+        />
+        <TeamActivity
+          agents={undefined}
+          state="error"
+          error="500: roster unavailable"
+        />
+      </div>,
+    );
+
+    expect(getByText("Failed to load activity summary: 500: summary unavailable"))
+      .toBeTruthy();
+    expect(getByText("Failed to load team activity: 500: roster unavailable"))
       .toBeTruthy();
   });
 });

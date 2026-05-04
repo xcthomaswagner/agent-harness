@@ -341,12 +341,18 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
         </div>
       )}
 
-      <TeamActivity agents={roster.data?.agents} state={roster.status} compact />
+      <TeamActivity
+        agents={roster.data?.agents}
+        state={roster.status}
+        error={roster.error}
+        compact
+      />
 
       {row.status !== "in-flight" && (
         <ActivitySummaryPanel
           data={activitySummary.data}
           state={activitySummary.status}
+          error={activitySummary.error}
           compact
         />
       )}
@@ -416,10 +422,12 @@ function LogLine({ entry }: { entry: LiveLogEntry }) {
 export function ActivitySummaryPanel({
   data,
   state,
+  error,
   compact = false,
 }: {
   data: ActivitySummaryResponse | undefined;
   state: string;
+  error?: string;
   compact?: boolean;
 }) {
   const [actorFilter, setActorFilter] = useState<string>("all");
@@ -430,6 +438,13 @@ export function ActivitySummaryPanel({
 
   if (state === "loading" && !data) {
     return <div class="op-rail-log-conn">Loading activity summary...</div>;
+  }
+  if (state === "error" && !data) {
+    return (
+      <div class="op-error">
+        Failed to load activity summary{error ? `: ${error}` : ""}
+      </div>
+    );
   }
   if (!data || data.raw_event_count === 0) {
     return <div class="op-rail-log-conn">No finished activity summary available.</div>;
@@ -544,14 +559,23 @@ function SummaryItem({ item }: { item: ActivitySummaryItem }) {
 export function TeamActivity({
   agents,
   state,
+  error,
   compact = false,
 }: {
   agents: readonly AgentRosterEntry[] | undefined;
   state: string;
+  error?: string;
   compact?: boolean;
 }) {
   if (state === "loading" && !agents) {
     return <div class="op-rail-log-conn">Loading team activity...</div>;
+  }
+  if (state === "error" && !agents) {
+    return (
+      <div class="op-error">
+        Failed to load team activity{error ? `: ${error}` : ""}
+      </div>
+    );
   }
   if (!agents || agents.length === 0) {
     return <div class="op-rail-log-conn">No agents spawned for this ticket.</div>;

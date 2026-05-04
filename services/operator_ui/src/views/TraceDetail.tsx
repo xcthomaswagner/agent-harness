@@ -180,6 +180,7 @@ export function TraceDetailView({ id }: Props) {
         <ActivitySummaryPanel
           data={activitySummary.data}
           state={activitySummary.status}
+          error={activitySummary.error}
         />
       </section>
 
@@ -192,7 +193,11 @@ export function TraceDetailView({ id }: Props) {
               : roster.status.toUpperCase()
           }
         />
-        <TeamActivity state={roster.status} agents={roster.data?.agents} />
+        <TeamActivity
+          state={roster.status}
+          error={roster.error}
+          agents={roster.data?.agents}
+        />
       </section>
 
       <section class="op-section">
