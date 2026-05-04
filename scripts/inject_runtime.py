@@ -62,6 +62,21 @@ def _inject_skill_dir(src_skill: Path, skills_dest: Path, label: str) -> None:
     print(f"[inject] {label}: {skill_name}")
 
 
+def _injected_skill_dir(skills_dest: Path, skill_name: str) -> Path | None:
+    """Return the harness-owned target directory for a base skill.
+
+    Client repos can already have a skill named ``implement`` or
+    ``code-review``. In that case _inject_skill_dir preserves the client
+    directory and copies the harness skill to ``harness-<name>``. Platform
+    supplements must follow the harness-owned copy, not mutate the
+    client's skill.
+    """
+    for candidate in (skills_dest / skill_name, skills_dest / f"harness-{skill_name}"):
+        if (candidate / ".harness-injected").exists():
+            return candidate
+    return None
+
+
 def expand_env_vars(value: Any) -> Any:
     """Recursively expand ${VAR} and ${VAR:-default} in strings within a JSON-like structure."""
     if isinstance(value, str):
@@ -129,7 +144,8 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
                 print(f"[inject] WARNING: Unknown supplement {supplement.name} — skipping")
                 continue
 
-            skill_file = skills_dest / target_skill_name / "SKILL.md"
+            skill_dir = _injected_skill_dir(skills_dest, target_skill_name)
+            skill_file = skill_dir / "SKILL.md" if skill_dir else Path()
             if skill_file.exists():
                 with skill_file.open("a") as f:
                     f.write(f"\n\n---\n# Platform Supplement: {platform_profile}\n\n")
@@ -141,15 +157,20 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
         # Copy CONVENTIONS.md if it exists
         conventions = profile_dir / "CONVENTIONS.md"
         if conventions.exists():
-            shutil.copy2(conventions, skills_dest / "implement" / "CONVENTIONS.md")
-            print("[inject] Platform conventions copied")
+            implement_dir = _injected_skill_dir(skills_dest, "implement")
+            if implement_dir is not None:
+                shutil.copy2(conventions, implement_dir / "CONVENTIONS.md")
+                print("[inject] Platform conventions copied")
+            else:
+                print("[inject] WARNING: implement skill not found — skipping CONVENTIONS.md")
 
         # Append REFERENCE_URLS.md to all three skills (implement, code-review, qa-validation)
         ref_urls = profile_dir / "REFERENCE_URLS.md"
         if ref_urls.exists():
             ref_content = ref_urls.read_text()
             for skill_name in ("implement", "code-review", "qa-validation"):
-                skill_file = skills_dest / skill_name / "SKILL.md"
+                skill_dir = _injected_skill_dir(skills_dest, skill_name)
+                skill_file = skill_dir / "SKILL.md" if skill_dir else Path()
                 if skill_file.exists():
                     with skill_file.open("a") as f:
                         f.write(f"\n\n---\n\n{ref_content}")

@@ -209,6 +209,29 @@ def test_salesforce_profile_skills_copied() -> None:
         assert (dev_loop / ".harness-injected").exists()
 
 
+def test_profile_supplements_do_not_mutate_client_owned_skill() -> None:
+    """When a client owns implement, platform supplements follow harness-implement."""
+    with tempfile.TemporaryDirectory() as tmp:
+        client = Path(tmp) / "client-owned-implement"
+        client.mkdir()
+        client_skill = client / ".claude" / "skills" / "implement"
+        client_skill.mkdir(parents=True)
+        client_skill_file = client_skill / "SKILL.md"
+        client_skill_file.write_text("# Client Implement\nKeep this untouched.")
+
+        result = run_inject(str(client), platform_profile="contentstack")
+        assert result.returncode == 0, result.stderr
+
+        client_content = client_skill_file.read_text()
+        harness_content = (
+            client / ".claude" / "skills" / "harness-implement" / "SKILL.md"
+        ).read_text()
+        assert "Platform Supplement: contentstack" not in client_content
+        assert "Reference URLs" not in client_content
+        assert "Platform Supplement: contentstack" in harness_content
+        assert (client / ".claude" / "skills" / "harness-implement" / "CONVENTIONS.md").exists()
+
+
 def test_non_salesforce_profile_skill_not_leaked() -> None:
     """Without --platform-profile, profile-local skills must NOT be copied."""
     with tempfile.TemporaryDirectory() as tmp:
