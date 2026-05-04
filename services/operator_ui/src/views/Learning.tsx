@@ -70,6 +70,7 @@ export function LearningView() {
   const statusQuery = filter === "all" ? "" : `&status=${encodeURIComponent(filter)}`;
   const feed = useFeed<LessonCandidatesResponse>(
     `/api/learning/candidates?limit=${PAGE_SIZE}&offset=${offset}${statusQuery}`,
+    { clearOnUrlChange: true },
   );
   const lessonCounts = useFeed<LessonCountsResponse>("/api/operator/lessons/counts");
 

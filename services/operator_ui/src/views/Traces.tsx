@@ -41,6 +41,7 @@ export function TracesView() {
   const statusQuery = filter === "all" ? "" : `&status=${encodeURIComponent(filter)}`;
   const feed = useFeed<TracesResponse>(
     `/api/operator/traces?limit=${PAGE_SIZE}&offset=${offset}&include_hidden=${includeHidden ? "true" : "false"}${statusQuery}`,
+    { clearOnUrlChange: true },
   );
 
   const counts = useMemo(() => {
