@@ -1632,9 +1632,12 @@ def _last_event_time(path: Path) -> datetime | None:
     if not isinstance(ts, str):
         return None
     try:
-        return datetime.fromisoformat(ts)
+        parsed = datetime.fromisoformat(ts)
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 def _roster_state(last: datetime | None) -> str:
@@ -1693,6 +1696,8 @@ def get_ticket_agents(ticket_id: str) -> dict[str, Any]:
     for teammate, path in streams:
         summary = summarize_session_stream(teammate, path)
         last = _parse_roster_time(summary.get("last_at"))
+        if last is not None:
+            summary["last_at"] = last.isoformat()
         # Fall back to the older raw-tail timestamp path for streams
         # that have timestamps but no displayable assistant/system rows.
         if last is None:

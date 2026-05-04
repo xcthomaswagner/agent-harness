@@ -1787,6 +1787,38 @@ def test_agents_lists_teammates_with_state(
     assert "latest_events" in main
 
 
+def test_agents_handles_naive_fallback_timestamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    worktree = tmp_path / "wt" / "HARN-NAIVE"
+    stream = worktree / ".harness" / "logs" / "session-stream.jsonl"
+    stream.parent.mkdir(parents=True)
+    # A system-only stream falls back to _last_event_time; pin that
+    # timezone-naive ISO values don't crash UTC age comparison.
+    stream.write_text(
+        json.dumps({"timestamp": "2026-05-04T12:00:00", "type": "system"}) + "\n"
+    )
+
+    import operator_api_data as oad
+
+    monkeypatch.setattr(oad, "_worktree_root_for_ticket", lambda _tid: worktree)
+
+    c = TestClient(_mk_app())
+    r = c.get("/api/operator/tickets/HARN-NAIVE/agents")
+    assert r.status_code == 200
+    assert r.json()["agents"][0]["last_at"] == "2026-05-04T12:00:00+00:00"
+
+
 def test_activity_summary_returns_deduped_ticket_activity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
