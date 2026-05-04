@@ -896,7 +896,7 @@ def _dedupe_activity_events(events: list[dict[str, Any]]) -> list[dict[str, Any]
         if item is None:
             continue
         key = (
-            str(item["role_group"]),
+            str(item["role"]),
             str(item["kind"]),
             _normalize_activity_message(str(item["message"])),
         )

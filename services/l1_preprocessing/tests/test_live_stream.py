@@ -347,6 +347,30 @@ class TestFilter:
         teammate_actions = summary["teammates"][0]["actions"]
         assert any(action["message"].startswith("Read:") for action in teammate_actions)
 
+    def test_ticket_activity_keeps_distinct_review_roles(
+        self, tmp_path: Path
+    ) -> None:
+        reviewer = live_stream._synthetic_activity_event(
+            teammate="code-reviewer",
+            source_id="review:1",
+            message="Accepted with no blocking issues",
+            timestamp="2026-05-04T10:00:00Z",
+        )
+        judge = live_stream._synthetic_activity_event(
+            teammate="judge",
+            source_id="judge:1",
+            message="Accepted with no blocking issues",
+            timestamp="2026-05-04T10:01:00Z",
+        )
+
+        summary = live_stream.summarize_ticket_activity(
+            "REVIEW-ROLES-1", [], finished_events=[reviewer, judge]
+        )
+
+        assert summary["deduped_event_count"] == 2
+        roles = {item["role"] for item in summary["highlights"]}
+        assert {"code_reviewer", "judge"}.issubset(roles)
+
     def test_finished_activity_adds_review_judge_and_qa_without_streams(
         self, tmp_path: Path
     ) -> None:
