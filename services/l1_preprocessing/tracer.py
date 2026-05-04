@@ -470,12 +470,45 @@ def derive_trace_status(
         return "Complete"
     if pr_url and not any("Pipeline complete" in ev for ev in events):
         return "PR Created"
+    last_active_event = ""
+    for entry in reversed(entries):
+        if entry.get("phase") == "artifact":
+            continue
+        last_active_event = str(entry.get("event") or "")
+        break
+    for entry in reversed(entries):
+        if entry.get("phase") == "artifact":
+            continue
+        if entry.get("event") != "phase_started":
+            break
+        phase = str(entry.get("phase") or "")
+        if phase == "implementation":
+            return "Implementing"
+        if phase == "qa_validation":
+            return "QA Running"
+        if phase in {"security_scan", "code_review", "judge", "simplify", "reflection"}:
+            return "Reviewing"
+        break
+    if any(
+        marker in last_active_event
+        for marker in (
+            "Implementation complete",
+            "Security scan complete",
+            "Simplify complete",
+            "Reflection complete",
+        )
+    ):
+        return "Reviewing" if "Implementation complete" not in last_active_event else "Implementing"
     if any("QA complete" in ev for ev in events):
-        return "QA Done"
+        return "QA Done" if "QA complete" in last_active_event else "Reviewing"
     if any(ev in ("review_approved", "review_changes_requested") for ev in events):
-        return "Review Done"
+        return (
+            "Review Done"
+            if last_active_event in {"review_approved", "review_changes_requested"}
+            else "Reviewing"
+        )
     if any("Review complete" in ev for ev in events):
-        return "Review Done"
+        return "Review Done" if "Review complete" in last_active_event else "Reviewing"
     if any("Merge complete" in ev for ev in events):
         return "Merged"
     if any("unit-" in ev and "complete" in ev for ev in events):

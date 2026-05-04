@@ -1392,6 +1392,36 @@ class TestDeriveTraceStatus:
             == "PR Created"
         )
 
+    def test_phase_started_after_review_keeps_trace_in_flight(self) -> None:
+        entries = [
+            {"event": "processing_started"},
+            {"event": "l2_dispatched"},
+            {"event": "Review complete", "phase": "code_review"},
+            {"event": "phase_started", "phase": "qa_validation"},
+        ]
+        events = [e["event"] for e in entries]
+        assert derive_trace_status(entries, events, "") == "QA Running"
+
+    def test_simplify_after_qa_keeps_trace_in_flight(self) -> None:
+        entries = [
+            {"event": "processing_started"},
+            {"event": "l2_dispatched"},
+            {"event": "QA complete", "phase": "qa_validation"},
+            {"event": "Simplify complete", "phase": "simplify"},
+        ]
+        events = [e["event"] for e in entries]
+        assert derive_trace_status(entries, events, "") == "Reviewing"
+
+    def test_review_phase_started_is_not_terminal_review_done(self) -> None:
+        entries = [
+            {"event": "processing_started"},
+            {"event": "l2_dispatched"},
+            {"event": "Security scan complete", "phase": "security_scan"},
+            {"event": "phase_started", "phase": "code_review"},
+        ]
+        events = [e["event"] for e in entries]
+        assert derive_trace_status(entries, events, "") == "Reviewing"
+
     def test_merged_and_implementing_and_planned_and_ci_fix(self) -> None:
         # These four statuses were MISSING from the old _build_summary
         # chain — the whole point of the consolidation.

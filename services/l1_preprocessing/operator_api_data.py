@@ -704,6 +704,8 @@ _STATUS_TO_BUCKET: dict[str, str] = {
     "Dispatched": "in-flight",
     "Planned": "in-flight",
     "Implementing": "in-flight",
+    "Reviewing": "in-flight",
+    "QA Running": "in-flight",
 }
 
 # Tickets whose derived status is still "in-flight" after this long with
