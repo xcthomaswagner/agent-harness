@@ -670,6 +670,7 @@ _STATUS_TO_BUCKET: dict[str, str] = {
     # Stuck — the pipeline is alive but can't progress without help.
     "CI Fix": "stuck",
     "Agent Done (no PR)": "stuck",
+    "Escalated": "stuck",
     "Stale": "stuck",
     # Queued — before anything started.
     "Received": "queued",
@@ -989,38 +990,53 @@ _CANONICAL_PHASES: tuple[tuple[str, str], ...] = (
 )
 
 _PHASE_ALIASES: dict[str, str] = {
+    "analyst": "planning",
     "plan": "planning",
     "planner": "planning",
+    "pipeline": "scaffolding",
     "worktree": "scaffolding",
     "spawn": "scaffolding",
     "develop": "implementing",
     "developer": "implementing",
     "implement": "implementing",
+    "implementation": "implementing",
+    "security_scan": "reviewing",
+    "code_review": "reviewing",
     "review": "reviewing",
     "reviewer": "reviewing",
     "judge": "reviewing",
     "qa": "reviewing",
+    "qa_validation": "reviewing",
+    "simplify": "reviewing",
+    "reflection": "reviewing",
     "pr_review_spawned": "reviewing",
+    "l3_pr_review": "reviewing",
+    "l3_changes_requested": "reviewing",
     "l3_review": "reviewing",
     "l3_approval": "reviewing",
     "merge": "merging",
     "merge_coordinator": "merging",
     "pr": "merging",
+    "pr_created": "merging",
+    "complete": "merging",
 }
 
 
 def _canonical_phase(phase: str) -> str | None:
     """Map an agent phase label to one of the 5 canonical buckets, or
-    None when the phase is outside the L2 pipeline (webhook, pipeline,
-    ticket_read — infrastructure phases the design doesn't render).
+    None when the phase is outside the rendered pipeline (webhook,
+    ticket_read, operator, artifact, completion).
     """
-    p = phase.lower()
-    if not p or p in ("webhook", "pipeline", "ticket_read"):
+    p = phase.lower().replace("-", "_")
+    if not p or p in ("webhook", "ticket_read", "operator", "artifact", "completion"):
         return None
+    alias = _PHASE_ALIASES.get(p)
+    if alias:
+        return alias
     for canon, _label in _CANONICAL_PHASES:
         if canon in p:
             return canon
-    return _PHASE_ALIASES.get(p)
+    return None
 
 
 def _shape_trace_detail(
@@ -1103,16 +1119,14 @@ def _shape_trace_detail(
     for i, (key, label) in enumerate(_CANONICAL_PHASES):
         if key in fail_phases:
             state = "fail"
-        elif key == current_canon:
+        elif key == current_canon and bucket not in {"done", "hidden"}:
             state = "active"
         elif per_bucket_events[key] > 0:
             later_active = any(
                 per_bucket_events[phase_order[j]] > 0
                 for j in range(i + 1, len(phase_order))
             )
-            state = "done" if later_active or (
-                raw_status in ("Complete", "Merged", "Suppressed", "Misfire")
-            ) else "active"
+            state = "done" if later_active or bucket in {"done", "hidden"} else "active"
         else:
             state = "pending"
         phases_out.append(

@@ -601,26 +601,42 @@ def _find_run_start_idx(entries: list[dict[str, Any]]) -> int:
     live trace) or L1 processing_started. Webhooks that were dedup-skipped
     (no subsequent processing) are NOT run boundaries.
     """
-    # Candidate boundary indices
-    candidates: list[int] = []
+    # Prefer the L1 accepted webhook as the run boundary so trace detail
+    # includes analyst + dispatch phases. The later agent-written
+    # "Pipeline started" event is only a fallback for archived traces
+    # where the accepted webhook was unavailable.
+    webhook_candidates: list[int] = []
+    pipeline_candidates: list[int] = []
     for i, e in enumerate(entries):
         ev = e.get("event", "")
-        if "Pipeline started" in ev or "webhook_received" in ev:
-            candidates.append(i)
+        if "webhook_received" in ev:
+            webhook_candidates.append(i)
+        elif "Pipeline started" in ev:
+            pipeline_candidates.append(i)
 
+    candidates = webhook_candidates + pipeline_candidates
     if not candidates:
         return 0
 
-    # Walk candidates from latest to earliest, pick the first one that has
-    # agent entries OR processing_started/Pipeline complete after it
-    for idx in reversed(candidates):
+    def _has_run_activity_after(idx: int) -> bool:
         for j in range(idx + 1, len(entries)):
             after = entries[j]
             if after.get("source") == "agent":
-                return idx
+                return True
             ev = after.get("event", "")
             if ev == "processing_started" or "Pipeline" in ev:
-                return idx
+                return True
+        return False
+
+    # Walk accepted webhooks from latest to earliest, then fall back to
+    # agent pipeline starts. This preserves full run context without
+    # regressing archived agent-only traces.
+    for idx in reversed(webhook_candidates):
+        if _has_run_activity_after(idx):
+            return idx
+    for idx in reversed(pipeline_candidates):
+        if _has_run_activity_after(idx):
+            return idx
     # Fallback: use newest candidate (most likely the current run)
     return candidates[-1]
 

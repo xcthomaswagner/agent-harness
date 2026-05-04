@@ -1309,7 +1309,52 @@ def test_trace_detail_maps_l3_only_phases_to_reviewing(
     data = c.get("/api/operator/traces/HARN-L3").json()
     reviewing = next(p for p in data["phases"] if p["key"] == "reviewing")
     assert reviewing["event_count"] >= 2
-    assert reviewing["state"] == "active"
+    assert reviewing["state"] == "done"
+
+
+def test_trace_detail_maps_runtime_phase_names_to_timeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    logs_dir = tmp_path / "logs"
+    import tracer as tracer_module
+
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    _write_rich_trace(
+        logs_dir,
+        "HARN-RUNTIME",
+        phases_events=[
+            ("analyst", "analyst_completed", "Analyst completed"),
+            ("pipeline", "l2_dispatched", "L2 dispatched"),
+            ("implementation", "Implementation complete", "Implementation complete"),
+            ("security_scan", "Security scan complete", "Security scan complete"),
+            ("judge", "Judge complete", "Judge complete"),
+            ("code_review", "Review complete", "Review complete"),
+            ("qa_validation", "QA complete", "QA complete"),
+            ("pr_created", "PR created", "PR created"),
+            ("complete", "Pipeline complete", "Pipeline complete"),
+        ],
+    )
+
+    c = TestClient(_mk_app())
+    data = c.get("/api/operator/traces/HARN-RUNTIME").json()
+    phases = {p["key"]: p for p in data["phases"]}
+
+    assert phases["planning"]["event_count"] >= 1
+    assert phases["scaffolding"]["event_count"] >= 1
+    assert phases["implementing"]["event_count"] >= 1
+    assert phases["reviewing"]["event_count"] >= 4
+    assert phases["merging"]["event_count"] >= 2
+    assert all(p["state"] == "done" for p in phases.values())
 
 
 # ---------- /api/operator/autonomy/{profile} ----------

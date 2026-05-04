@@ -1231,6 +1231,33 @@ class TestRunStartIdxKwarg:
         # Latest run starts at index 3 (the second webhook_received).
         assert find_run_start_idx(entries) == 3
 
+    def test_find_run_start_idx_keeps_l1_context_before_agent_pipeline_start(
+        self,
+    ) -> None:
+        entries = [
+            {"phase": "webhook", "event": "ado_webhook_received", "source": "ado"},
+            {"phase": "pipeline", "event": "processing_started", "source": "ado"},
+            {"phase": "analyst", "event": "analyst_completed"},
+            {"phase": "pipeline", "event": "l2_dispatched"},
+            {
+                "phase": "webhook",
+                "event": "ado_webhook_skipped_no_tag",
+                "source": "ado",
+            },
+            {
+                "phase": "ticket_read",
+                "event": "Pipeline started, simple mode",
+                "source": "agent",
+            },
+            {
+                "phase": "implementation",
+                "event": "Implementation complete",
+                "source": "agent",
+            },
+        ]
+
+        assert find_run_start_idx(entries) == 0
+
     def test_extract_diagnostic_info_honors_forced_kwarg(self) -> None:
         entries = self._two_run_entries()
         # Default: picks up run 2's error.
