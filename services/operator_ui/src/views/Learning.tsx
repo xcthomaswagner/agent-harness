@@ -96,7 +96,7 @@ export function LearningView() {
       base.rejected = raw.rejected;
       base.all = Object.values(raw).reduce((sum, value) => sum + value, 0);
     } else if (feed.data) {
-      base.all = feed.data.total ?? feed.data.count;
+      base.all = feed.data.total ?? feed.data.count ?? feed.data.candidates.length;
     }
     return base;
   }, [feed.data, lessonCounts.data]);
@@ -116,6 +116,9 @@ export function LearningView() {
   }, [feed.data]);
 
   const awaitingTriage = counts.proposed + counts.draft_ready;
+  const pageCount = feed.data?.count ?? feed.data?.candidates.length ?? 0;
+  const pageTotal = feed.data?.total ?? counts[filter] ?? pageCount;
+  const pageOffset = feed.data?.offset ?? offset;
 
   const doTransition = useCallback(
     async (lessonId: string, action: LearningAction) => {
@@ -216,7 +219,7 @@ export function LearningView() {
         <>
           <div class="op-table-tools">
             <span class="op-muted">
-              Showing {feed.data.count} of {feed.data.total} · offset {feed.data.offset}
+              Showing {pageCount} of {pageTotal} · offset {pageOffset}
             </span>
             <div style={{ display: "flex", gap: "8px" }}>
               <Button
@@ -228,7 +231,7 @@ export function LearningView() {
               </Button>
               <Button
                 size="sm"
-                disabled={offset + PAGE_SIZE >= feed.data.total}
+                disabled={offset + PAGE_SIZE >= pageTotal}
                 onClick={() => setOffset(offset + PAGE_SIZE)}
               >
                 Next

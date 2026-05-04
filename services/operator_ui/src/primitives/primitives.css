@@ -435,9 +435,9 @@
 .op-wordmark {
   font-family: var(--font-mono);
   font-size: 11px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  letter-spacing: 0.08em;
   color: var(--ink-900);
+  white-space: nowrap;
 }
 
 .op-wordmark b {

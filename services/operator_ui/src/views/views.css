@@ -494,6 +494,21 @@
   min-width: 0;
 }
 
+.op-tickets-list .op-table-tools {
+  margin: 0;
+  padding: 10px 12px;
+  border-bottom: var(--rule-dim);
+  justify-content: flex-start;
+}
+
+.op-tickets-list .op-table-tools > div {
+  margin-left: 4px;
+}
+
+.op-tickets-list .op-tbl thead th {
+  border-top: 0;
+}
+
 .op-tickets-rail {
   padding: 20px;
   display: flex;

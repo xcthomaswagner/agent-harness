@@ -17,6 +17,7 @@ import type {
 } from "../api/types";
 import { href } from "../router";
 import { readableErrorText } from "../api/errors";
+import { traceCountsFromResponse } from "./format";
 
 type StatusFilter = TraceStatus | "all";
 type LiveFilter = "all" | "team_lead" | "dev" | "review" | "qa" | "other";
@@ -58,19 +59,14 @@ export function TicketsView() {
     `/api/operator/traces?limit=${PAGE_SIZE}&offset=${offset}&include_hidden=${includeHidden ? "true" : "false"}${statusQuery}`,
     { clearOnUrlChange: true },
   );
+  const countFeed = useFeed<TracesResponse>(
+    `/api/operator/traces?limit=500&offset=0&include_hidden=${includeHidden ? "true" : "false"}`,
+  );
 
   const counts = useMemo(() => {
-    const base: Record<StatusFilter, number> = {
-      all: 0,
-      "in-flight": 0,
-      stuck: 0,
-      queued: 0,
-      done: 0,
-      hidden: 0,
-    };
-    if (feed.data) Object.assign(base, feed.data.status_counts);
-    return base;
-  }, [feed.data]);
+    const source = countFeed.data ?? (filter === "all" ? feed.data : undefined);
+    return traceCountsFromResponse(source);
+  }, [countFeed.data, feed.data, filter]);
 
   const selectedRow = useMemo(
     () => feed.data?.traces.find((t) => t.id === selected) ?? null,

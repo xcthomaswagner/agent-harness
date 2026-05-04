@@ -12,8 +12,8 @@ export function BrandGlyph() {
 
 export function Wordmark() {
   return (
-    <span class="op-wordmark">
-      <b>AGENTIC</b>HARNESS
+    <span class="op-wordmark" aria-label="Agentic Harness">
+      <b>Agentic</b> <span>Harness</span>
     </span>
   );
 }

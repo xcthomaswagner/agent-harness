@@ -76,6 +76,39 @@ describe("LearningView", () => {
       ).toHaveLength(2);
     });
   });
+
+  it("falls back to row and count metadata when candidates response omits pagination fields", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith("/api/learning/candidates")) {
+          return jsonResponse({
+            candidates: [candidate],
+          });
+        }
+        if (url.startsWith("/api/operator/lessons/counts")) {
+          return jsonResponse({
+            counts: {
+              proposed: 0,
+              draft_ready: 0,
+              approved: 0,
+              applied: 0,
+              snoozed: 1,
+              rejected: 0,
+              reverted: 0,
+              stale: 0,
+            },
+          });
+        }
+        return jsonResponse({}, { status: 404 });
+      }),
+    );
+
+    const { findByText } = render(<LearningView />);
+
+    expect(await findByText("Showing 1 of 1 · offset 0")).toBeTruthy();
+  });
 });
 
 function jsonResponse(data: unknown, init?: ResponseInit): Response {

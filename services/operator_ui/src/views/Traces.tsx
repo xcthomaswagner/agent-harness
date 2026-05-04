@@ -8,6 +8,7 @@ import type { TraceStatus, TraceSummary, TracesResponse } from "../api/types";
 import { href, navigate } from "../router";
 import { readableErrorText } from "./actionFeedback";
 import type { ActionNotice } from "./actionFeedback";
+import { traceCountsFromResponse } from "./format";
 
 type StatusFilter = TraceStatus | "all";
 type TraceLifecycleAction = "suppressed" | "misfire" | "stale" | "open";
@@ -42,20 +43,14 @@ export function TracesView() {
     `/api/operator/traces?limit=${PAGE_SIZE}&offset=${offset}&include_hidden=${includeHidden ? "true" : "false"}${statusQuery}`,
     { clearOnUrlChange: true },
   );
+  const countFeed = useFeed<TracesResponse>(
+    `/api/operator/traces?limit=500&offset=0&include_hidden=${includeHidden ? "true" : "false"}`,
+  );
 
   const counts = useMemo(() => {
-    const base: Record<StatusFilter, number> = {
-      all: 0,
-      "in-flight": 0,
-      stuck: 0,
-      queued: 0,
-      done: 0,
-      hidden: 0,
-    };
-    if (!feed.data) return base;
-    Object.assign(base, feed.data.status_counts);
-    return base;
-  }, [feed.data]);
+    const source = countFeed.data ?? (filter === "all" ? feed.data : undefined);
+    return traceCountsFromResponse(source);
+  }, [countFeed.data, feed.data, filter]);
 
   return (
     <>

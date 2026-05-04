@@ -95,7 +95,7 @@ export interface TraceSummary {
 export interface TracesResponse {
   traces: TraceSummary[];
   count: number;
-  status_counts: Record<TraceStatus | "all", number>;
+  status_counts?: Record<TraceStatus | "all", number>;
   offset: number;
   limit: number;
   include_hidden: boolean;
@@ -193,10 +193,10 @@ export interface LessonCandidate {
 
 export interface LessonCandidatesResponse {
   candidates: LessonCandidate[];
-  count: number;
-  total: number;
-  limit: number;
-  offset: number;
+  count?: number;
+  total?: number;
+  limit?: number;
+  offset?: number;
 }
 
 // PR drilldown — matches operator_api_data.get_pr_detail

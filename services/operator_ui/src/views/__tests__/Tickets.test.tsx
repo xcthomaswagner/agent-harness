@@ -1,6 +1,11 @@
 import { fireEvent, render, waitFor } from "@testing-library/preact";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ActivitySummaryPanel, TeamActivity, TicketsView } from "../Tickets";
+import {
+  ActivitySummaryPanel,
+  TeamActivity,
+  TicketsView,
+} from "../Tickets";
+import { traceCountsFromResponse } from "../format";
 
 class FakeEventSource {
   onopen: ((event: Event) => void) | null = null;
@@ -133,6 +138,64 @@ describe("TicketsView", () => {
     });
   });
 
+  it("derives status counts when the backend omits status_counts", async () => {
+    const counts = traceCountsFromResponse({
+      traces: [
+        { ...traceSummary("HARN-1"), status: "done" },
+        { ...traceSummary("HARN-2"), status: "stuck" },
+        { ...traceSummary("HARN-3"), status: "done" },
+      ],
+      count: 3,
+      offset: 0,
+      limit: 500,
+      include_hidden: false,
+    });
+
+    expect(counts.all).toBe(3);
+    expect(counts.done).toBe(2);
+    expect(counts.stuck).toBe(1);
+    expect(counts["in-flight"]).toBe(0);
+  });
+
+  it("uses the unfiltered response for filter chip counts", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/operator/traces") && url.includes("status=in-flight")) {
+        return jsonResponse({
+          traces: [],
+          count: 0,
+          offset: 0,
+          limit: 200,
+          include_hidden: false,
+        });
+      }
+      if (url.startsWith("/api/operator/traces")) {
+        return jsonResponse({
+          traces: [
+            { ...traceSummary("HARN-1"), status: "done" },
+            { ...traceSummary("HARN-2"), status: "stuck" },
+            { ...traceSummary("HARN-3"), status: "done" },
+          ],
+          count: 3,
+          offset: 0,
+          limit: 500,
+          include_hidden: false,
+        });
+      }
+      return jsonResponse({}, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { findByText } = render(<TicketsView />);
+
+    expect(await findByText("All")).toBeTruthy();
+    expect(await findByText("3")).toBeTruthy();
+    expect(await findByText("Done")).toBeTruthy();
+    expect(await findByText("2")).toBeTruthy();
+    expect(await findByText("Stuck")).toBeTruthy();
+    expect(await findByText("1")).toBeTruthy();
+  });
+
   it("shows backend detail when trigger removal fails", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -227,4 +290,24 @@ function jsonResponse(data: unknown, init?: ResponseInit): Response {
     headers: { "Content-Type": "application/json" },
     ...init,
   });
+}
+
+function traceSummary(id: string) {
+  return {
+    id,
+    title: "Test ticket",
+    status: "in-flight",
+    raw_status: "In Flight",
+    hidden: false,
+    lifecycle_state: "",
+    state_reason: "",
+    run_id: `trace-${id}`,
+    phase: "implementing",
+    elapsed: "1m",
+    started_at: "2026-05-04T12:00:00+00:00",
+    pr_url: null,
+    pipeline_mode: "",
+    review_verdict: "",
+    qa_result: "",
+  };
 }
