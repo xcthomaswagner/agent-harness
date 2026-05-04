@@ -12,6 +12,8 @@ import type {
   TraceStatus,
 } from "../api/types";
 import { ActivitySummaryPanel, TeamActivity } from "./Tickets";
+import { readableErrorText } from "./actionFeedback";
+import type { ActionNotice } from "./actionFeedback";
 
 const STATUS_TONE: Record<TraceStatus, PillTone> = {
   "in-flight": "active",
@@ -28,6 +30,7 @@ interface Props {
 
 export function TraceDetailView({ id }: Props) {
   const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<ActionNotice | null>(null);
   const feed = useFeed<TraceDetailResponse>(
     `/api/operator/traces/${encodeURIComponent(id)}`,
     { clearOnUrlChange: true },
@@ -89,6 +92,7 @@ export function TraceDetailView({ id }: Props) {
                   t.hidden ? "open" : "suppressed",
                   feed.refresh,
                   setBusy,
+                  setNotice,
                 );
               }}
             >
@@ -100,7 +104,7 @@ export function TraceDetailView({ id }: Props) {
                 variant="danger"
                 disabled={busy}
                 onClick={() => {
-                  void markTrace(id, "misfire", feed.refresh, setBusy);
+                  void markTrace(id, "misfire", feed.refresh, setBusy, setNotice);
                 }}
               >
                 Misfire
@@ -111,7 +115,7 @@ export function TraceDetailView({ id }: Props) {
                 size="sm"
                 disabled={busy}
                 onClick={() => {
-                  void markTrace(id, "open", feed.refresh, setBusy);
+                  void markTrace(id, "open", feed.refresh, setBusy, setNotice);
                 }}
               >
                 Mark Active
@@ -122,7 +126,7 @@ export function TraceDetailView({ id }: Props) {
                 size="sm"
                 disabled={busy}
                 onClick={() => {
-                  void markTrace(id, "stale", feed.refresh, setBusy);
+                  void markTrace(id, "stale", feed.refresh, setBusy, setNotice);
                 }}
               >
                 Stale
@@ -153,6 +157,12 @@ export function TraceDetailView({ id }: Props) {
           </Pill>
         )}
       </div>
+
+      {notice && (
+        <div class={`op-action-notice is-${notice.tone}`} role="status">
+          {notice.text}
+        </div>
+      )}
 
       <section class="op-section">
         <SectionHeader
@@ -211,6 +221,7 @@ async function markTrace(
   state: TraceLifecycleAction,
   refresh: () => void,
   setBusy: (value: boolean) => void,
+  setNotice: (notice: ActionNotice) => void,
 ) {
   const fallbackReason =
     state === "misfire"
@@ -223,6 +234,7 @@ async function markTrace(
   const reason = window.prompt("Reason", fallbackReason) ?? "";
   if (!reason.trim()) return;
   setBusy(true);
+  setNotice({ tone: "warn", text: `Updating ${ticketId}...` });
   try {
     const res = await fetch(
       `/api/operator/traces/${encodeURIComponent(ticketId)}/state`,
@@ -240,8 +252,15 @@ async function markTrace(
         }),
       },
     );
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`${res.status}: ${readableErrorText(text)}`);
+    }
+    setNotice({ tone: "ok", text: `Updated ${ticketId}.` });
     refresh();
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    setNotice({ tone: "err", text: `Failed to update ${ticketId}: ${detail}` });
   } finally {
     setBusy(false);
   }

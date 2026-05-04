@@ -6,6 +6,8 @@ import type { PillTone } from "../primitives";
 import { useFeed } from "../hooks/useFeed";
 import type { TraceStatus, TraceSummary, TracesResponse } from "../api/types";
 import { href, navigate } from "../router";
+import { readableErrorText } from "./actionFeedback";
+import type { ActionNotice } from "./actionFeedback";
 
 type StatusFilter = TraceStatus | "all";
 type TraceLifecycleAction = "suppressed" | "misfire" | "stale" | "open";
@@ -34,10 +36,7 @@ export function TracesView() {
   const [includeHidden, setIncludeHidden] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [cleanupBusy, setCleanupBusy] = useState(false);
-  const [notice, setNotice] = useState<{
-    tone: "ok" | "warn" | "err";
-    text: string;
-  } | null>(null);
+  const [notice, setNotice] = useState<ActionNotice | null>(null);
   const statusQuery = filter === "all" ? "" : `&status=${encodeURIComponent(filter)}`;
   const feed = useFeed<TracesResponse>(
     `/api/operator/traces?limit=${PAGE_SIZE}&offset=${offset}&include_hidden=${includeHidden ? "true" : "false"}${statusQuery}`,
@@ -318,7 +317,7 @@ async function markTrace(
   state: TraceLifecycleAction,
   refresh: () => void,
   setBusyId: (id: string | null) => void,
-  setNotice: (notice: { tone: "ok" | "warn" | "err"; text: string }) => void,
+  setNotice: (notice: ActionNotice) => void,
 ) {
   const fallbackReason =
     state === "misfire"
@@ -351,7 +350,7 @@ async function markTrace(
     );
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`${res.status}: ${readableError(text)}`);
+      throw new Error(`${res.status}: ${readableErrorText(text)}`);
     }
     setNotice({ tone: "ok", text: `Updated ${ticketId}.` });
     refresh();
@@ -366,7 +365,7 @@ async function markTrace(
 async function reconcileStaleRuns(
   refresh: () => void,
   setCleanupBusy: (value: boolean) => void,
-  setNotice?: (notice: { tone: "ok" | "warn" | "err"; text: string }) => void,
+  setNotice?: (notice: ActionNotice) => void,
 ) {
   const raw = window.prompt("Stale after hours", "168") ?? "";
   const staleAfterHours = Number.parseInt(raw.trim(), 10);
@@ -388,7 +387,7 @@ async function reconcileStaleRuns(
     });
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`${res.status}: ${readableError(text)}`);
+      throw new Error(`${res.status}: ${readableErrorText(text)}`);
     }
     const data = await res.json();
     setNotice?.({
@@ -402,17 +401,4 @@ async function reconcileStaleRuns(
   } finally {
     setCleanupBusy(false);
   }
-}
-
-function readableError(text: string): string {
-  try {
-    const value = JSON.parse(text);
-    if (value && typeof value === "object") {
-      const detail = (value as Record<string, unknown>)["detail"];
-      if (detail) return String(detail).slice(0, 300);
-    }
-  } catch {
-    // Fall through to plain text below.
-  }
-  return (text || "request failed").slice(0, 300);
 }

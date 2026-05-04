@@ -10,6 +10,8 @@ import type {
   LessonStatus,
 } from "../api/types";
 import { fetchHeaders } from "../api/key";
+import { parseJsonObject, readableError } from "./actionFeedback";
+import type { ActionNotice } from "./actionFeedback";
 
 // Filter chips cover the 6 operator-relevant states the design shows.
 // ``reverted`` and ``stale`` are lifecycle-only — they get a pill tone
@@ -64,7 +66,7 @@ export function LearningView() {
   const [offset, setOffset] = useState(0);
   const [pendingLessonId, setPendingLessonId] = useState<string | null>(null);
   const [notice, setNotice] = useState<{
-    tone: "ok" | "warn" | "err";
+    tone: ActionNotice["tone"];
     text: string;
   } | null>(null);
   const statusQuery = filter === "all" ? "" : `&status=${encodeURIComponent(filter)}`;
@@ -140,7 +142,6 @@ export function LearningView() {
             tone: "err",
             text: `${actionLabel(action)} failed (${res.status}): ${detail}`,
           });
-          alert(`Transition failed (${res.status}): ${detail}`);
           return;
         }
         if (action === "draft" && body && body["status"] === "proposed") {
@@ -399,29 +400,6 @@ function formatReviewDate(iso: string): string {
     day: "numeric",
     year: "numeric",
   });
-}
-
-function parseJsonObject(text: string): Record<string, unknown> | null {
-  try {
-    const value = JSON.parse(text);
-    return value && typeof value === "object" && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function readableError(
-  body: Record<string, unknown> | null,
-  fallback: string,
-): string {
-  const raw =
-    body?.["error"] ??
-    body?.["detail"] ??
-    body?.["status_reason"] ??
-    fallback;
-  return String(raw).slice(0, 300);
 }
 
 function lessonImpact(candidate: LessonCandidate): LessonImpactInfo {
