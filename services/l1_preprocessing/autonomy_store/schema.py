@@ -150,6 +150,15 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
             )
         version = 7
         logger.info("autonomy_schema_migrated", version=version)
+    if version < 8:
+        with conn:
+            _migrate_to_v8(conn)
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (8, _now_iso()),
+            )
+        version = 8
+        logger.info("autonomy_schema_migrated", version=version)
     return version
 
 
@@ -184,6 +193,14 @@ def _migrate_to_v1(conn: sqlite3.Connection) -> None:
             merged INTEGER NOT NULL DEFAULT 0,
             escalated INTEGER NOT NULL DEFAULT 0,
             backfilled INTEGER NOT NULL DEFAULT 0,
+            state TEXT NOT NULL DEFAULT 'open',
+            state_reason TEXT NOT NULL DEFAULT '',
+            terminal_at TEXT NOT NULL DEFAULT '',
+            suppressed_at TEXT NOT NULL DEFAULT '',
+            suppressed_reason TEXT NOT NULL DEFAULT '',
+            excluded_from_metrics INTEGER NOT NULL DEFAULT 0,
+            last_observed_at TEXT NOT NULL DEFAULT '',
+            run_id TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             UNIQUE (repo_full_name, pr_number, head_sha)
@@ -196,6 +213,14 @@ def _migrate_to_v1(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX idx_pr_runs_client_profile_opened_at "
         "ON pr_runs (client_profile, opened_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pr_runs_profile_state "
+        "ON pr_runs (client_profile, state)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pr_runs_last_observed "
+        "ON pr_runs (last_observed_at)"
     )
 
     conn.execute(
@@ -520,6 +545,106 @@ def _migrate_to_v7(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         )
         """
+    )
+
+
+def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, name: str, definition: str
+) -> None:
+    if name in _column_names(conn, table):
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
+def _migrate_to_v8(conn: sqlite3.Connection) -> None:
+    """v8: first-class dashboard lifecycle state + suppression audit.
+
+    ``merged`` alone cannot answer whether a run is actually active.
+    Closed-but-unmerged PRs, stale experiments, and operator-marked
+    misfires need durable state that metrics and dashboard cards can
+    filter consistently.
+    """
+    _add_column_if_missing(conn, "pr_runs", "state", "TEXT NOT NULL DEFAULT 'open'")
+    _add_column_if_missing(
+        conn, "pr_runs", "state_reason", "TEXT NOT NULL DEFAULT ''"
+    )
+    _add_column_if_missing(conn, "pr_runs", "terminal_at", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(
+        conn, "pr_runs", "suppressed_at", "TEXT NOT NULL DEFAULT ''"
+    )
+    _add_column_if_missing(
+        conn, "pr_runs", "suppressed_reason", "TEXT NOT NULL DEFAULT ''"
+    )
+    _add_column_if_missing(
+        conn,
+        "pr_runs",
+        "excluded_from_metrics",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    _add_column_if_missing(
+        conn, "pr_runs", "last_observed_at", "TEXT NOT NULL DEFAULT ''"
+    )
+    _add_column_if_missing(conn, "pr_runs", "run_id", "TEXT NOT NULL DEFAULT ''")
+
+    conn.execute(
+        """
+        UPDATE pr_runs
+        SET state = CASE
+                WHEN merged = 1 THEN 'merged'
+                WHEN closed_at != '' THEN 'closed'
+                WHEN escalated = 1 THEN 'escalated'
+                ELSE COALESCE(NULLIF(state, ''), 'open')
+            END,
+            terminal_at = CASE
+                WHEN merged = 1 AND terminal_at = '' THEN merged_at
+                WHEN closed_at != '' AND terminal_at = '' THEN closed_at
+                ELSE terminal_at
+            END,
+            last_observed_at = CASE
+                WHEN last_observed_at != '' THEN last_observed_at
+                WHEN updated_at != '' THEN updated_at
+                ELSE opened_at
+            END
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pr_runs_profile_state "
+        "ON pr_runs (client_profile, state)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pr_runs_last_observed "
+        "ON pr_runs (last_observed_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pr_runs_excluded "
+        "ON pr_runs (excluded_from_metrics)"
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dashboard_suppressions (
+            id INTEGER PRIMARY KEY,
+            target_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            active INTEGER NOT NULL DEFAULT 1,
+            expires_at TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            created_by TEXT NOT NULL DEFAULT 'operator',
+            cleared_at TEXT NOT NULL DEFAULT '',
+            cleared_by TEXT NOT NULL DEFAULT '',
+            clear_reason TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dashboard_suppressions_target "
+        "ON dashboard_suppressions (target_type, target_id, active)"
     )
 
 

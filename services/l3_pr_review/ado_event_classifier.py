@@ -98,9 +98,8 @@ def classify_ado_event(payload: dict[str, Any]) -> EventType:
         if status == "completed":
             return EventType.PR_MERGED
 
-        # PR abandoned (closed without merge) — ignore
         if status == "abandoned":
-            return EventType.IGNORED
+            return EventType.PR_CLOSED
 
         reviewers: list[dict[str, Any]] = resource.get("reviewers", [])
         vote_event = _classify_reviewer_votes(reviewers)

@@ -4,6 +4,7 @@
 #
 # Aligned with the setup guide at:
 #   ~/SecondBrain/50-Research/Harness Demo For ContentStack/docs/contentstack-harness-setup.docx
+# Frontend assumption: Next.js App Router + TypeScript, not Spartacus.
 
 client: "cstk-demo"
 platform_profile: "contentstack"
@@ -30,9 +31,7 @@ source_control:
   github_repo: "xcthomaswagner/cstk-demo"
 
 ci_pipeline:
-  # Defaults assume a Next.js + pnpm client repo. Adjust once the repo's
-  # actual stack is in place (the cstk-demo repo is currently empty besides
-  # the README — these commands will become real when the repo is scaffolded).
+  # Defaults assume a Next.js App Router + pnpm client repo.
   test_command: "pnpm test"
   lint_command: "pnpm lint"
   build_command: "pnpm build"
@@ -63,6 +62,12 @@ autonomy:
 #   CONTENTSTACK_REGION=NA          # confirmed: NA region
 #   CONTENTSTACK_ENVIRONMENT=development
 #   CONTENTSTACK_BRANCH=ai          # all harness writes go to the `ai` branch
+#
+# The official @contentstack/mcp package requires OAuth for CMA tools. Run:
+#   npx @contentstack/mcp --auth
+# before the first schema/content ticket so
+# ~/Library/Application Support/ContentstackMCP/oauth-config.json exists.
+# The harness enables GROUPS=cma,cda; do not use GROUPS=all for this profile.
 #
 # Smoke-test before first run:
 #   ./scripts/smoke-test-contentstack-mcp.sh

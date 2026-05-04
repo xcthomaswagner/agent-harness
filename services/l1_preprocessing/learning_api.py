@@ -14,17 +14,16 @@ Approve / reject / snooze drive ``update_lesson_status`` with its
 full transition-table validation. Invalid transitions return 409.
 Unknown lesson ids return 404.
 
-Admin token auth mirrors the existing autonomy admin endpoints
-(``_guard_admin_request``) — these actions change harness-owned
-state and should not be exposed unauthenticated. When
-``autonomy_admin_token`` is unset, the endpoints return 503 to
-make the deployment-is-not-configured case obvious rather than
-failing open.
+Write auth accepts either the autonomy admin token used by scripts or
+the operator dashboard API key used by the SPA. These actions change
+harness-owned state and should not be exposed unauthenticated. When
+neither configured token is presented, the endpoints fail closed.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -36,6 +35,7 @@ import structlog
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, ValidationError, field_validator
 
+import autonomy_ingest
 from autonomy_ingest import _guard_admin_request
 from autonomy_store import (
     autonomy_conn,
@@ -213,6 +213,31 @@ def _transition(
             reason=reason,
         )
         return _candidate_to_dict(updated)
+
+
+async def _guard_learning_write_request(
+    request: Request,
+    autonomy_admin_token: str | None,
+    operator_api_key: str | None,
+) -> bytes:
+    """Authorize a Learning mutation from either admin API or operator UI.
+
+    ``X-Autonomy-Admin-Token`` remains the script/internal automation
+    contract. The Preact operator dashboard already carries ``X-API-Key``;
+    in the current single-operator deployment that key is sufficient for
+    Learning triage writes, and avoids exposing the separate admin token to
+    browser code.
+    """
+    if settings.api_key and operator_api_key and hmac.compare_digest(
+        operator_api_key, settings.api_key
+    ):
+        body = await request.body()
+        if len(body) > settings.autonomy_internal_max_body_bytes:
+            raise HTTPException(status_code=413, detail="Payload too large")
+        if not autonomy_ingest._bucket.try_consume():
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        return body
+    return await _guard_admin_request(request, autonomy_admin_token)
 
 
 def _parse_body(body: bytes, model: type[BaseModel]) -> Any:
@@ -542,6 +567,7 @@ async def post_approve(
     lesson_id: str,
     request: Request,
     x_autonomy_admin_token: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
 ) -> dict[str, Any]:
     """Approve a ``draft_ready`` lesson and open its PR.
 
@@ -556,7 +582,9 @@ async def post_approve(
     skips the transition and retries the PR opener. This is the
     sanctioned recovery path — no separate /retry-pr endpoint needed.
     """
-    body = await _guard_admin_request(request, x_autonomy_admin_token)
+    body = await _guard_learning_write_request(
+        request, x_autonomy_admin_token, x_api_key
+    )
     payload = _parse_body(body, ApproveIn)
 
     with autonomy_conn() as conn:
@@ -584,6 +612,7 @@ async def post_draft(
     lesson_id: str,
     request: Request,
     x_autonomy_admin_token: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
 ) -> dict[str, Any]:
     """Run the Markdown drafter + consistency check on a proposed lesson.
 
@@ -591,7 +620,9 @@ async def post_draft(
     or consistency contradiction) leaves the lesson at ``proposed``
     with ``status_reason`` set so the dashboard surfaces it.
     """
-    await _guard_admin_request(request, x_autonomy_admin_token)
+    await _guard_learning_write_request(
+        request, x_autonomy_admin_token, x_api_key
+    )
     row = await _load_proposed_lesson(lesson_id)
     proposed_delta = _row_proposed_delta(row)
     evidence_snippets = _load_evidence_snippets(lesson_id)
@@ -699,8 +730,11 @@ async def post_reject(
     lesson_id: str,
     request: Request,
     x_autonomy_admin_token: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    body = await _guard_admin_request(request, x_autonomy_admin_token)
+    body = await _guard_learning_write_request(
+        request, x_autonomy_admin_token, x_api_key
+    )
     payload = _parse_body(body, RejectIn)
     return _transition(lesson_id, "rejected", reason=payload.reason)
 
@@ -710,8 +744,11 @@ async def post_snooze(
     lesson_id: str,
     request: Request,
     x_autonomy_admin_token: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    body = await _guard_admin_request(request, x_autonomy_admin_token)
+    body = await _guard_learning_write_request(
+        request, x_autonomy_admin_token, x_api_key
+    )
     payload = _parse_body(body, SnoozeIn)
     return _transition(
         lesson_id,
@@ -726,6 +763,7 @@ async def post_revert(
     lesson_id: str,
     request: Request,
     x_autonomy_admin_token: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
 ) -> dict[str, Any]:
     """Open a revert PR for an applied lesson with a bad outcome.
 
@@ -743,7 +781,9 @@ async def post_revert(
     at ``applied`` preserves the retry path. Mirrors the approve
     flow's dry-run semantics.
     """
-    body = await _guard_admin_request(request, x_autonomy_admin_token)
+    body = await _guard_learning_write_request(
+        request, x_autonomy_admin_token, x_api_key
+    )
     payload = _parse_body(body, RevertIn)
 
     with autonomy_conn() as conn:
@@ -839,5 +879,3 @@ async def post_revert(
         "branch": result.branch,
         "commit_sha": result.commit_sha,
     }
-
-

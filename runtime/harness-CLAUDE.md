@@ -24,6 +24,32 @@ Before you spawn any sub-agent, detect what platform the repo is. This determine
 ```bash
 # Salesforce detection
 test -f sfdx-project.json && echo "PLATFORM=salesforce"
+
+# Contentstack detection
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+ticket = Path(".harness/ticket.json")
+if ticket.exists():
+    try:
+        data = json.loads(ticket.read_text())
+        if data.get("platform_profile") == "contentstack":
+            print("PLATFORM=contentstack")
+            raise SystemExit(0)
+    except json.JSONDecodeError:
+        pass
+
+package_json = Path("package.json")
+mcp_json = Path(".mcp.json")
+if package_json.exists():
+    package = package_json.read_text()
+    has_contentstack_dep = "@contentstack/" in package or '"contentstack"' in package
+    has_next = '"next"' in package
+    has_contentstack_mcp = mcp_json.exists() and '"contentstack"' in mcp_json.read_text()
+    if has_contentstack_dep or (has_next and has_contentstack_mcp):
+        print("PLATFORM=contentstack")
+PY
 ```
 
 **If `sfdx-project.json` exists, the platform is Salesforce.** This is non-negotiable regardless of what other tooling the repo has (Node.js scaffolding, Python scripts, etc.). Every developer agent you spawn MUST be told:
@@ -46,6 +72,39 @@ via mcp__salesforce__sf_scratch_create BEFORE any deploy or test step.
 Never target DevHub directly — read SCRATCH_ORG_LIFECYCLE.md.
 ```
 
+**If `PLATFORM=contentstack` is detected**, the platform is Contentstack with
+Next.js as the default frontend target. Every developer agent you spawn MUST be
+told:
+
+1. To read the `/implement` skill and Contentstack platform supplement before
+   touching Contentstack schema, Contentstack integration code, or Next.js
+   routes/components that consume Contentstack data.
+2. To use the `mcp__contentstack__*` MCP tools for live Contentstack schema and
+   content reads/writes. Schema/content AC cannot be fulfilled by a migration
+   note alone.
+3. To verify the `contentstack` MCP is connected and has the required
+   `CONTENTSTACK_*` credentials before any CMA write. If the MCP is unavailable,
+   they must stop and report the blocker.
+4. To target `CONTENTSTACK_BRANCH` and `CONTENTSTACK_ENVIRONMENT` explicitly.
+5. To keep Next.js server/client boundaries intact: Contentstack reads and
+   non-public credentials stay in App Router server code or server-side libs;
+   components receive typed props.
+
+Embed the following block **verbatim** in the prompt of every developer agent
+you spawn when the platform is Contentstack (Simple pipeline, Full pipeline
+parallel devs, post-review fix devs, QA-fix devs):
+
+```
+PLATFORM: CONTENTSTACK. The client profile/repo uses the Contentstack platform profile.
+The frontend target is Next.js App Router + TypeScript unless the ticket explicitly says otherwise.
+You MUST read the /implement skill and Contentstack platform supplement before changing Contentstack schema, integration code, or Next.js routes/components.
+You MUST use mcp__contentstack__* tools for live Contentstack schema/content reads and writes.
+If the ticket requires schema/content changes and the contentstack MCP is missing, failed, or missing CONTENTSTACK_* credentials, STOP and report the blocker. Do NOT replace the live change with "human applies CMS change later" unless the ticket is explicitly docs-only.
+You MUST pass CONTENTSTACK_BRANCH and CONTENTSTACK_ENVIRONMENT explicitly for platform reads/writes and never target production/main without human approval.
+Next.js rule: Contentstack reads and non-public credentials stay in App Router server code or server-side libs. Components receive typed props; Client Components do not import server-only Contentstack clients.
+Schema/content changes require convergence evidence: read current shape, write via CMA, refetch same branch, then update Next.js types/routes/tests.
+```
+
 **If no platform-specific tooling is detected**, proceed with the generic developer prompt as before.
 
 ## Simple Pipeline (Single Unit)
@@ -64,11 +123,12 @@ Log: `{"phase": "ticket_read", "ticket_id": "<id>", "timestamp": "<ISO>", "event
 
 Log start: `{"phase": "implementation", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "phase_started"}`
 
-Spawn one developer. **If the Platform Detection step identified Salesforce, inject the PLATFORM: SALESFORCE block (verbatim, from the Platform Detection section above) into the prompt before the rest of the instructions.**
+Spawn one developer. **If the Platform Detection step identified Salesforce or Contentstack, inject the matching PLATFORM block (verbatim, from the Platform Detection section above) into the prompt before the rest of the instructions.**
 
 ```
 Agent(
   prompt="[IF PLATFORM=salesforce, insert the verbatim PLATFORM: SALESFORCE block here]
+         [IF PLATFORM=contentstack, insert the verbatim PLATFORM: CONTENTSTACK block here]
 
          You are a developer. Read the enriched ticket at .harness/ticket.json.
          Implement the required changes following the project's conventions in CLAUDE.md.
@@ -189,13 +249,14 @@ Read the approved plan. Build the dependency graph and identify independent unit
 
 **Branch naming convention:** Each worktree dev creates a branch named `ai/<ticket-id>/unit-<N>` (e.g., `ai/PROJ-42/unit-1`). This naming is critical -- the merge coordinator uses it to find and merge unit branches.
 
-**Spawn developer agents in parallel.** Use multiple Agent calls in a SINGLE message so they run concurrently. Each dev gets `isolation: "worktree"` for its own git copy. **If the Platform Detection step identified Salesforce, inject the PLATFORM: SALESFORCE block (verbatim) at the top of EVERY developer prompt.**
+**Spawn developer agents in parallel.** Use multiple Agent calls in a SINGLE message so they run concurrently. Each dev gets `isolation: "worktree"` for its own git copy. **If the Platform Detection step identified Salesforce or Contentstack, inject the matching PLATFORM block (verbatim) at the top of EVERY developer prompt.**
 
 ```
 # In ONE message, spawn all independent devs:
 
 Agent(
   prompt="[IF PLATFORM=salesforce, insert the PLATFORM: SALESFORCE block here]
+         [IF PLATFORM=contentstack, insert the PLATFORM: CONTENTSTACK block here]
 
          You are a developer assigned to unit-1: <unit description>.
          Read the full plan at .harness/plans/plan-v<N>.json for context.
@@ -213,6 +274,7 @@ Agent(
 
 Agent(
   prompt="[IF PLATFORM=salesforce, insert the PLATFORM: SALESFORCE block here]
+         [IF PLATFORM=contentstack, insert the PLATFORM: CONTENTSTACK block here]
 
          You are a developer assigned to unit-2: <unit description>.
          ...(same pattern, different unit, branch: ai/<ticket-id>/unit-2)...",

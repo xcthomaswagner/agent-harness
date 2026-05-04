@@ -1,32 +1,41 @@
+import { useState } from "preact/hooks";
 import { ViewHead } from "../chrome";
 import { Button, PhaseDots, Pill, SectionHeader } from "../primitives";
+import { fetchHeaders } from "../api/key";
 import type { PhaseState, PillTone } from "../primitives";
 import { useFeed } from "../hooks/useFeed";
 import type {
-  AgentRosterEntry,
+  ActivitySummaryResponse,
   AgentRosterResponse,
   TraceDetailResponse,
   TracePhase,
   TraceStatus,
 } from "../api/types";
+import { ActivitySummaryPanel, TeamActivity } from "./Tickets";
 
 const STATUS_TONE: Record<TraceStatus, PillTone> = {
   "in-flight": "active",
   stuck: "warn",
   queued: "cool",
   done: "ok",
+  hidden: "err",
 };
+type TraceLifecycleAction = "suppressed" | "misfire" | "stale" | "open";
 
 interface Props {
   id: string;
 }
 
 export function TraceDetailView({ id }: Props) {
+  const [busy, setBusy] = useState(false);
   const feed = useFeed<TraceDetailResponse>(
     `/api/operator/traces/${encodeURIComponent(id)}`,
   );
   const roster = useFeed<AgentRosterResponse>(
     `/api/operator/tickets/${encodeURIComponent(id)}/agents`,
+  );
+  const activitySummary = useFeed<ActivitySummaryResponse>(
+    `/api/operator/tickets/${encodeURIComponent(id)}/activity-summary`,
   );
 
   if (feed.status === "loading" && !feed.data) {
@@ -68,12 +77,54 @@ export function TraceDetailView({ id }: Props) {
                 </Button>
               </a>
             )}
+            <Button
+              size="sm"
+              disabled={busy}
+              onClick={() => {
+                void markTrace(
+                  id,
+                  t.hidden ? "open" : "suppressed",
+                  feed.refresh,
+                  setBusy,
+                );
+              }}
+            >
+              {t.hidden ? "Restore" : "Hide"}
+            </Button>
+            {!t.hidden && (
+              <Button
+                size="sm"
+                variant="danger"
+                disabled={busy}
+                onClick={() => {
+                  void markTrace(id, "misfire", feed.refresh, setBusy);
+                }}
+              >
+                Misfire
+              </Button>
+            )}
+            {!t.hidden && t.lifecycle_state !== "stale" && t.status !== "done" && (
+              <Button
+                size="sm"
+                disabled={busy}
+                onClick={() => {
+                  void markTrace(id, "stale", feed.refresh, setBusy);
+                }}
+              >
+                Stale
+              </Button>
+            )}
           </div>
         }
       />
 
       <div class="op-meta-row">
         <Pill tone={STATUS_TONE[t.status]}>{t.raw_status}</Pill>
+        {t.state_reason && (
+          <span title={t.state_reason}>
+            <Pill tone="warn">state · {t.state_reason.slice(0, 48)}</Pill>
+          </span>
+        )}
         {t.pipeline_mode && (
           <Pill tone="cool">mode · {t.pipeline_mode}</Pill>
         )}
@@ -102,6 +153,13 @@ export function TraceDetailView({ id }: Props) {
       </section>
 
       <section class="op-section">
+        <ActivitySummaryPanel
+          data={activitySummary.data}
+          state={activitySummary.status}
+        />
+      </section>
+
+      <section class="op-section">
         <SectionHeader
           label="Session panels"
           right={
@@ -110,10 +168,7 @@ export function TraceDetailView({ id }: Props) {
               : roster.status.toUpperCase()
           }
         />
-        <AgentRoster
-          state={roster.status}
-          agents={roster.data?.agents}
-        />
+        <TeamActivity state={roster.status} agents={roster.data?.agents} />
       </section>
 
       <section class="op-section">
@@ -135,6 +190,47 @@ export function TraceDetailView({ id }: Props) {
       </section>
     </>
   );
+}
+
+async function markTrace(
+  ticketId: string,
+  state: TraceLifecycleAction,
+  refresh: () => void,
+  setBusy: (value: boolean) => void,
+) {
+  const fallbackReason =
+    state === "misfire"
+      ? "Marked as misfire from operator dashboard"
+      : state === "suppressed"
+        ? "Hidden from operator dashboard"
+        : state === "stale"
+          ? "Marked stale from operator dashboard"
+          : "Restored from operator dashboard";
+  const reason = window.prompt("Reason", fallbackReason) ?? "";
+  if (!reason.trim()) return;
+  setBusy(true);
+  try {
+    const res = await fetch(
+      `/api/operator/traces/${encodeURIComponent(ticketId)}/state`,
+      {
+        method: "POST",
+        headers: fetchHeaders({
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        }),
+        credentials: "same-origin",
+        body: JSON.stringify({
+          state,
+          reason,
+          exclude_metrics: state === "misfire" || state === "suppressed",
+        }),
+      },
+    );
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    refresh();
+  } finally {
+    setBusy(false);
+  }
 }
 
 function PhaseRow({ phase, index }: { phase: TracePhase; index: number }) {
@@ -196,49 +292,4 @@ function formatTime(iso: string): string {
   // "2026-04-18T12:00:42+00:00" → "12:00:42"
   const match = /T(\d\d:\d\d:\d\d)/.exec(iso);
   return match ? (match[1] ?? iso) : iso;
-}
-
-function AgentRoster({
-  state,
-  agents,
-}: {
-  state: string;
-  agents: readonly AgentRosterEntry[] | undefined;
-}) {
-  if (state === "loading" && !agents) {
-    return <div class="op-loading">Loading roster…</div>;
-  }
-  if (!agents || agents.length === 0) {
-    return <div class="op-empty">No agents spawned for this ticket.</div>;
-  }
-  return (
-    <table class="op-tbl">
-      <thead>
-        <tr>
-          <th style={{ width: "160px" }}>Teammate</th>
-          <th style={{ width: "100px" }}>State</th>
-          <th>Last activity</th>
-        </tr>
-      </thead>
-      <tbody>
-        {agents.map((a) => {
-          const tone: PillTone =
-            a.state === "running"
-              ? "active"
-              : a.state === "idle"
-                ? "cool"
-                : "warn";
-          return (
-            <tr key={a.teammate}>
-              <td class="op-mono">{a.teammate}</td>
-              <td>
-                <Pill tone={tone}>{a.state}</Pill>
-              </td>
-              <td class="op-mono">{a.last_at ? formatTime(a.last_at) : "—"}</td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
-  );
 }

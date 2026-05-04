@@ -1327,6 +1327,19 @@ class TestDeriveTraceStatus:
     def test_complete(self) -> None:
         assert self._run(["webhook_received", "Pipeline complete"]) == "Complete"
 
+    def test_ado_skip_does_not_override_running_pipeline(self) -> None:
+        """Duplicate no-tag ADO webhooks after label removal are chatter."""
+        events = [
+            "ado_webhook_received",
+            "processing_started",
+            "l2_dispatched",
+            "ado_webhook_skipped_no_tag",
+        ]
+        assert self._run(events) == "Dispatched"
+
+    def test_ado_skip_terminal_when_pipeline_never_started(self) -> None:
+        assert self._run(["ado_webhook_skipped_no_tag"]) == "Skipped"
+
     def test_pr_created_without_complete(self) -> None:
         assert (
             self._run(["webhook_received", "pr_created"], pr_url="https://x/pr/1")
@@ -1417,13 +1430,20 @@ class TestExtractTraceMetadata:
             "review_verdict": "",
             "qa_result": "",
             "pipeline_mode": "",
+            "platform_profile": "",
+            "client_profile": "",
             "ticket_title": "",
         }
 
     def test_extracts_simple_fields(self) -> None:
         entries = [
             {"event": "webhook_received", "ticket_title": "My Ticket"},
-            {"event": "pipeline_started", "pipeline_mode": "multi"},
+            {
+                "event": "pipeline_started",
+                "pipeline_mode": "multi",
+                "platform_profile": "contentstack",
+                "client_profile": "cstk-demo",
+            },
             {"event": "l2_dispatched", "pr_url": "https://github.com/o/r/pull/1"},
             {"event": "Review complete", "review_verdict": "APPROVED"},
             {"event": "QA complete", "qa_result": "PASS"},
@@ -1431,6 +1451,8 @@ class TestExtractTraceMetadata:
         metadata = _extract_trace_metadata(entries)
         assert metadata["ticket_title"] == "My Ticket"
         assert metadata["pipeline_mode"] == "multi"
+        assert metadata["platform_profile"] == "contentstack"
+        assert metadata["client_profile"] == "cstk-demo"
         assert metadata["pr_url"] == "https://github.com/o/r/pull/1"
         assert metadata["review_verdict"] == "APPROVED"
         assert metadata["qa_result"] == "PASS"

@@ -17,6 +17,7 @@ class EventType(StrEnum):
     PR_SYNCHRONIZE = "pr_synchronize"  # New commits pushed to existing PR
     PR_READY_FOR_REVIEW = "pr_ready_for_review"
     PR_MERGED = "pr_merged"  # PR closed with merged=true
+    PR_CLOSED = "pr_closed"  # PR closed without merge
     CI_FAILED = "ci_failed"
     CI_PASSED = "ci_passed"
     REVIEW_APPROVED = "review_approved"
@@ -49,8 +50,11 @@ def classify_event(headers: dict[str, str], payload: dict[str, Any]) -> EventTyp
         if action == "synchronize":
             # New commits pushed to an open PR — distinct from initial open
             return EventType.PR_SYNCHRONIZE
-        if action == "closed" and payload.get("pull_request", {}).get("merged"):
+        pr = payload.get("pull_request") or {}
+        if action == "closed" and pr.get("merged"):
             return EventType.PR_MERGED
+        if action == "closed" and pr:
+            return EventType.PR_CLOSED
         return EventType.IGNORED
 
     # Check suite / check run events (CI)

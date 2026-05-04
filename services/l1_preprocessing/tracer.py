@@ -291,7 +291,8 @@ def _extract_trace_metadata(entries: list[dict[str, Any]]) -> dict[str, str]:
     """Walk ``entries`` once and pull the common metadata fields.
 
     Returns a dict with keys ``pr_url``, ``review_verdict``,
-    ``qa_result``, ``pipeline_mode``, and ``ticket_title``. The
+    ``qa_result``, ``pipeline_mode``, ``platform_profile``,
+    ``client_profile``, and ``ticket_title``. The
     ``review_verdict`` / ``qa_result`` pair is overridden when a
     ``Pipeline complete`` entry is present (its values are the
     authoritative end-of-run verdict).
@@ -307,6 +308,8 @@ def _extract_trace_metadata(entries: list[dict[str, Any]]) -> dict[str, str]:
         "review_verdict": "",
         "qa_result": "",
         "pipeline_mode": "",
+        "platform_profile": "",
+        "client_profile": "",
         "ticket_title": "",
     }
     for e in entries:
@@ -320,6 +323,12 @@ def _extract_trace_metadata(entries: list[dict[str, Any]]) -> dict[str, str]:
             metadata["qa_result"] = str(e["qa_result"])
         if e.get("pipeline_mode"):
             metadata["pipeline_mode"] = str(e["pipeline_mode"])
+        if e.get("platform_profile"):
+            metadata["platform_profile"] = str(e["platform_profile"])
+        if e.get("client_profile"):
+            metadata["client_profile"] = str(e["client_profile"])
+        if e.get("client_profile_name") and not metadata["client_profile"]:
+            metadata["client_profile"] = str(e["client_profile_name"])
         if e.get("event") == "Pipeline complete":
             metadata["review_verdict"] = str(e.get("review_verdict", ""))
             metadata["qa_result"] = str(e.get("qa_result", ""))
@@ -392,10 +401,35 @@ def derive_trace_status(
     if not entries:
         return "Unknown"
 
+    for entry in reversed(entries):
+        ev = str(entry.get("event") or "")
+        if ev == "trace_unsuppressed":
+            break
+        if ev == "trace_marked_misfire":
+            return "Misfire"
+        if ev == "trace_suppressed":
+            return "Suppressed"
+        if ev == "trace_marked_stale":
+            return "Stale"
+
     if "stale_worktree_cleaned" in events:
         return "Cleaned Up"
     # Skipped/manually-routed tickets never enter the pipeline — terminal.
-    if any(ev.startswith("ado_webhook_skipped") for ev in events):
+    # ADO can emit extra no-tag webhooks after the harness removes the trigger
+    # label; those must not override an already-dispatched/running trace.
+    pipeline_started = any(
+        ev in {
+            "processing_started",
+            "processing_completed",
+            "l2_dispatched",
+            "Pipeline complete",
+        }
+        for ev in events
+    )
+    if (
+        not pipeline_started
+        and any(ev.startswith("ado_webhook_skipped") for ev in events)
+    ):
         return "Skipped"
     if "manual_ticket_submitted" in events:
         return "Submitted"
@@ -417,10 +451,16 @@ def derive_trace_status(
         return "Failed"
     if "Pipeline complete" in events:
         return "Complete"
+    if "pr_merged" in events:
+        return "Merged"
+    if "pr_closed" in events:
+        return "Closed"
     if pr_url and not any("Pipeline complete" in ev for ev in events):
         return "PR Created"
     if any("QA complete" in ev for ev in events):
         return "QA Done"
+    if any(ev in ("review_approved", "review_changes_requested") for ev in events):
+        return "Review Done"
     if any("Review complete" in ev for ev in events):
         return "Review Done"
     if any("Merge complete" in ev for ev in events):
@@ -492,6 +532,11 @@ def list_traces(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
             "ticket_id": ticket_id,
             "ticket_title": metadata["ticket_title"],
             "trace_id": first.get("trace_id", ""),
+            "run_id": (
+                run_entries[0].get("trace_id", "")
+                if run_entries
+                else first.get("trace_id", "")
+            ),
             "started_at": first.get("timestamp", ""),
             "run_started_at": run_started_at or first.get("timestamp", ""),
             "completed_at": last.get("timestamp", ""),
@@ -501,6 +546,8 @@ def list_traces(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
             "review_verdict": metadata["review_verdict"],
             "qa_result": metadata["qa_result"],
             "pipeline_mode": metadata["pipeline_mode"],
+            "platform_profile": metadata["platform_profile"],
+            "client_profile": metadata["client_profile"],
             "current_phase": _derive_current_phase(
                 entries, run_start_idx=run_start_idx
             ),

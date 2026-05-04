@@ -26,9 +26,11 @@ import asyncio
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import structlog
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import RedirectResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -116,6 +118,33 @@ app = FastAPI(
     description="Receives Jira/ADO webhooks, enriches tickets, dispatches to Agent Teams.",
     version="0.1.0",
 )
+
+
+def _is_loopback_request(request: Request) -> bool:
+    host = (request.client.host if request.client else "").lower()
+    return host == "localhost" or host == "::1" or host.startswith("127.")
+
+
+def _operator_redirect_url(request: Request) -> str:
+    supplied_key = request.query_params.get("api_key") or ""
+    api_key = supplied_key
+    if not api_key and _is_loopback_request(request):
+        api_key = settings.api_key or ""
+    if api_key:
+        return "/operator/?" + urlencode({"api_key": api_key})
+    return "/operator/"
+
+
+@app.get("/", include_in_schema=False)
+async def operator_root(request: Request) -> RedirectResponse:
+    """Send local browser opens to the operator SPA instead of legacy 401.
+
+    ``/`` is often what humans type into a browser. For loopback requests we
+    can safely bootstrap the operator shell with the local API key; non-local
+    callers must still provide auth themselves at ``/operator/``.
+    """
+    return RedirectResponse(url=_operator_redirect_url(request), status_code=302)
+
 # Dashboard routers are pure-GET views — apply _require_dashboard_auth
 # globally at the include site so every route requires X-API-Key (or
 # DASHBOARD_ALLOW_ANONYMOUS=true for local dev).

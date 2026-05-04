@@ -20,13 +20,18 @@ import { sseUrl } from "../api/key";
 export type LiveConnState = "idle" | "connecting" | "connected" | "error";
 
 export interface LiveLogEntry {
+  event_id?: string;
   kind: string;
   teammate: string;
+  role?: string;
+  role_group?: "team_lead" | "dev" | "review" | "qa" | "other";
+  display_name?: string;
   timestamp: string;
+  observed_at?: string;
   tool_name?: string;
   text?: string;
   description?: string;
-  source_line?: number;
+  source_line?: number | null;
   [key: string]: unknown;
 }
 

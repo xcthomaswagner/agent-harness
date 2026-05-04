@@ -47,11 +47,14 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 .benchmarks/
+docs/harness-screenshots/
 
 # Runtime data (not source code)
 data/logs/
 data/*.db
 data/*.json
+data/*.bak
+services/l1_preprocessing/*.db
 
 # Binary documents (deliverables, not source)
 *.docx

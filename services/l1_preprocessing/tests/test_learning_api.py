@@ -384,6 +384,27 @@ class TestAuth:
         )
         assert r.status_code == 401
 
+    def test_operator_api_key_can_write_without_admin_token_header(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from autonomy_store import autonomy_conn, update_lesson_status
+
+        monkeypatch.setattr(settings, "api_key", "dashboard-key")
+        lid = _seed_candidate()
+        with autonomy_conn() as conn:
+            update_lesson_status(
+                conn, lid, "draft_ready", reason="drafter ok"
+            )
+
+        r = client.post(
+            f"/api/learning/candidates/{lid}/approve",
+            json={"reason": "operator approved"},
+            headers={"X-API-Key": "dashboard-key"},
+        )
+
+        assert r.status_code == 200
+        assert r.json()["status"] == "approved"
+
     def test_read_endpoints_do_not_require_token(
         self, client: TestClient
     ) -> None:

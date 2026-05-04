@@ -7,11 +7,29 @@ from ``schema`` to avoid re-defining it.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from pydantic import BaseModel
 
 from .schema import _now_iso
+
+ACTIVE_PR_RUN_STATES = frozenset({
+    "open",
+    "reviewed",
+    "needs_changes",
+    "awaiting_merge",
+})
+TERMINAL_PR_RUN_STATES = frozenset({
+    "merged",
+    "closed",
+    "escalated",
+    "suppressed",
+    "misfire",
+})
+VALID_PR_RUN_STATES = ACTIVE_PR_RUN_STATES | TERMINAL_PR_RUN_STATES | frozenset({
+    "stale",
+})
 
 
 class PrRunUpsert(BaseModel):
@@ -39,6 +57,14 @@ class PrRunUpsert(BaseModel):
     merged: int | None = None
     escalated: int | None = None
     backfilled: int = 0
+    state: str | None = None
+    state_reason: str | None = None
+    terminal_at: str | None = None
+    suppressed_at: str | None = None
+    suppressed_reason: str | None = None
+    excluded_from_metrics: int | None = None
+    last_observed_at: str | None = None
+    run_id: str | None = None
 
 
 _TEXT_FIELDS = (
@@ -52,8 +78,42 @@ _TEXT_FIELDS = (
     "approved_at",
     "merged_at",
     "closed_at",
+    "state",
+    "state_reason",
+    "terminal_at",
+    "suppressed_at",
+    "suppressed_reason",
+    "last_observed_at",
+    "run_id",
 )
-_INT_FIELDS = ("first_pass_accepted", "merged", "escalated")
+_INT_FIELDS = (
+    "first_pass_accepted",
+    "merged",
+    "escalated",
+    "excluded_from_metrics",
+)
+
+
+def _inferred_state(row: PrRunUpsert) -> str:
+    if row.state:
+        return row.state
+    if row.merged == 1:
+        return "merged"
+    if row.closed_at:
+        return "closed"
+    if row.escalated == 1:
+        return "escalated"
+    return "open"
+
+
+def _inferred_terminal_at(row: PrRunUpsert) -> str:
+    if row.terminal_at:
+        return row.terminal_at
+    if row.merged == 1 and row.merged_at:
+        return row.merged_at
+    if row.closed_at:
+        return row.closed_at
+    return ""
 
 
 def upsert_pr_run(conn: sqlite3.Connection, row: PrRunUpsert) -> int:
@@ -70,6 +130,8 @@ def upsert_pr_run(conn: sqlite3.Connection, row: PrRunUpsert) -> int:
     )
 
     if existing is None:
+        state = _inferred_state(row)
+        terminal_at = _inferred_terminal_at(row)
         with conn:
             cur = conn.execute(
                 """
@@ -78,8 +140,11 @@ def upsert_pr_run(conn: sqlite3.Connection, row: PrRunUpsert) -> int:
                     pipeline_mode, head_sha, base_sha, client_profile,
                     opened_at, approved_at, merged_at, closed_at,
                     first_pass_accepted, merged, escalated, backfilled,
+                    state, state_reason, terminal_at, suppressed_at,
+                    suppressed_reason, excluded_from_metrics, last_observed_at,
+                    run_id,
                     created_at, updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     row.ticket_id,
@@ -99,6 +164,18 @@ def upsert_pr_run(conn: sqlite3.Connection, row: PrRunUpsert) -> int:
                     row.merged if row.merged is not None else 0,
                     row.escalated if row.escalated is not None else 0,
                     row.backfilled,
+                    state,
+                    row.state_reason or "",
+                    terminal_at,
+                    row.suppressed_at or "",
+                    row.suppressed_reason or "",
+                    (
+                        row.excluded_from_metrics
+                        if row.excluded_from_metrics is not None
+                        else 0
+                    ),
+                    row.last_observed_at or row.opened_at or "",
+                    row.run_id or "",
                     now,
                     now,
                 ),
@@ -106,6 +183,15 @@ def upsert_pr_run(conn: sqlite3.Connection, row: PrRunUpsert) -> int:
             return int(cur.lastrowid or 0)
 
     # Update path: patch-style
+    if row.state is None:
+        if row.merged == 1:
+            row.state = "merged"
+            row.terminal_at = row.terminal_at or row.merged_at
+        elif row.closed_at:
+            row.state = "closed"
+            row.terminal_at = row.terminal_at or row.closed_at
+        elif row.escalated == 1:
+            row.state = "escalated"
     sets: list[str] = []
     params: list[object] = []
 
@@ -176,6 +262,7 @@ def list_pr_runs(
     client_profile: str | None = None,
     since_iso: str | None = None,
     until_iso: str | None = None,
+    include_excluded: bool = False,
 ) -> list[sqlite3.Row]:
     """List pr_runs rows with optional client_profile + opened_at filters.
 
@@ -195,6 +282,9 @@ def list_pr_runs(
     if until_iso is not None:
         clauses.append("opened_at < ?")
         params.append(until_iso)
+    if not include_excluded:
+        clauses.append("excluded_from_metrics = 0")
+        clauses.append("state NOT IN ('suppressed', 'misfire')")
     sql = "SELECT * FROM pr_runs"
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
@@ -206,6 +296,173 @@ def list_client_profiles(conn: sqlite3.Connection) -> list[str]:
     """Return distinct non-empty client_profile values from pr_runs."""
     rows = conn.execute(
         "SELECT DISTINCT client_profile FROM pr_runs "
-        "WHERE client_profile != '' ORDER BY client_profile"
+        "WHERE client_profile != '' "
+        "AND excluded_from_metrics = 0 "
+        "AND state NOT IN ('suppressed', 'misfire') "
+        "ORDER BY client_profile"
     ).fetchall()
     return [r["client_profile"] for r in rows]
+
+
+def set_pr_run_lifecycle_state(
+    conn: sqlite3.Connection,
+    pr_run_id: int,
+    *,
+    state: str,
+    reason: str = "",
+    created_by: str = "operator",
+    exclude_metrics: bool | None = None,
+    terminal_at: str | None = None,
+) -> bool:
+    """Set explicit lifecycle state for one pr_run and audit the operator action."""
+    if state not in VALID_PR_RUN_STATES:
+        raise ValueError(f"unsupported pr_run state: {state}")
+    row = conn.execute("SELECT * FROM pr_runs WHERE id = ?", (pr_run_id,)).fetchone()
+    if row is None:
+        return False
+
+    now = _now_iso()
+    effective_terminal_at = terminal_at or (
+        now if state in TERMINAL_PR_RUN_STATES or state == "stale" else ""
+    )
+    excluded = int(exclude_metrics) if exclude_metrics is not None else None
+    suppressed_at = now if state in ("suppressed", "misfire") else None
+    suppressed_reason = reason if state in ("suppressed", "misfire") else None
+
+    sets = [
+        "state = ?",
+        "state_reason = ?",
+        "last_observed_at = ?",
+        "updated_at = ?",
+    ]
+    params: list[object] = [state, reason, now, now]
+    if effective_terminal_at:
+        sets.append("terminal_at = ?")
+        params.append(effective_terminal_at)
+    if state == "merged":
+        sets.extend([
+            "merged = 1",
+            "merged_at = CASE WHEN merged_at = '' THEN ? ELSE merged_at END",
+        ])
+        params.append(effective_terminal_at or now)
+    if state == "closed":
+        sets.append("closed_at = CASE WHEN closed_at = '' THEN ? ELSE closed_at END")
+        params.append(effective_terminal_at or now)
+    if suppressed_at is not None:
+        sets.append("suppressed_at = ?")
+        params.append(suppressed_at)
+    if suppressed_reason is not None:
+        sets.append("suppressed_reason = ?")
+        params.append(suppressed_reason)
+    if state in ACTIVE_PR_RUN_STATES:
+        sets.extend([
+            "suppressed_at = ''",
+            "suppressed_reason = ''",
+            "terminal_at = ''",
+        ])
+    if excluded is not None:
+        sets.append("excluded_from_metrics = ?")
+        params.append(excluded)
+
+    params.append(pr_run_id)
+    with conn:
+        conn.execute(f"UPDATE pr_runs SET {', '.join(sets)} WHERE id = ?", params)
+        conn.execute(
+            """
+            INSERT INTO manual_overrides (
+                override_type, target_id, payload_json, created_at, created_by
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "pr_run_state",
+                str(pr_run_id),
+                json.dumps(
+                    {
+                        "state": state,
+                        "reason": reason,
+                        "exclude_metrics": exclude_metrics,
+                    },
+                    sort_keys=True,
+                ),
+                now,
+                created_by,
+            ),
+        )
+    return True
+
+
+def set_pr_runs_lifecycle_state_for_ticket(
+    conn: sqlite3.Connection,
+    ticket_id: str,
+    *,
+    state: str,
+    reason: str = "",
+    created_by: str = "operator",
+    exclude_metrics: bool | None = None,
+    only_active: bool = True,
+    source_states: tuple[str, ...] | None = None,
+) -> int:
+    """Apply a lifecycle state to pr_runs for a ticket; returns affected rows."""
+    if state not in VALID_PR_RUN_STATES:
+        raise ValueError(f"unsupported pr_run state: {state}")
+    clauses = ["ticket_id = ?"]
+    params: list[object] = [ticket_id]
+    if source_states:
+        placeholders = ",".join("?" * len(source_states))
+        clauses.append(f"state IN ({placeholders})")
+        params.extend(source_states)
+    elif only_active:
+        placeholders = ",".join("?" * len(ACTIVE_PR_RUN_STATES))
+        clauses.append(f"state IN ({placeholders})")
+        params.extend(sorted(ACTIVE_PR_RUN_STATES))
+    rows = conn.execute(
+        "SELECT id FROM pr_runs WHERE " + " AND ".join(clauses),
+        params,
+    ).fetchall()
+    count = 0
+    for row in rows:
+        if set_pr_run_lifecycle_state(
+            conn,
+            int(row["id"]),
+            state=state,
+            reason=reason,
+            created_by=created_by,
+            exclude_metrics=exclude_metrics,
+        ):
+            count += 1
+    return count
+
+
+def mark_stale_pr_runs(
+    conn: sqlite3.Connection,
+    *,
+    older_than_iso: str,
+    reason: str,
+    created_by: str = "system",
+    dry_run: bool = False,
+) -> int:
+    """Mark active unmerged PR runs stale when no observation landed after cutoff."""
+    placeholders = ",".join("?" * len(ACTIVE_PR_RUN_STATES))
+    params: list[object] = [*sorted(ACTIVE_PR_RUN_STATES), older_than_iso, older_than_iso]
+    rows = conn.execute(
+        "SELECT id FROM pr_runs "
+        f"WHERE state IN ({placeholders}) "
+        "AND merged = 0 AND closed_at = '' AND suppressed_at = '' "
+        "AND COALESCE(NULLIF(last_observed_at, ''), opened_at) < ? "
+        "AND opened_at < ?",
+        params,
+    ).fetchall()
+    if dry_run:
+        return len(rows)
+    count = 0
+    for row in rows:
+        if set_pr_run_lifecycle_state(
+            conn,
+            int(row["id"]),
+            state="stale",
+            reason=reason,
+            created_by=created_by,
+            exclude_metrics=False,
+        ):
+            count += 1
+    return count

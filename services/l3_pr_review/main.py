@@ -594,6 +594,8 @@ def _build_autonomy_event(
         merged_at = pr.get("merged_at")
         if merged_at:
             event["merged_at"] = merged_at
+    if ticket_id:
+        event["run_id"] = _lookup_trace_id(ticket_id)
 
     review = payload.get("review") or {}
     if review:
@@ -1056,6 +1058,35 @@ async def _handle_pr_merged(payload: dict[str, Any]) -> None:
         await _forward_autonomy_event(autonomy_event)
 
 
+async def _handle_pr_closed(payload: dict[str, Any]) -> None:
+    """Handle PR closed without merge — terminal lifecycle state for dashboards."""
+    pr = payload.get("pull_request", {})
+    pr_number = pr.get("number", 0)
+    if not pr_number or not isinstance(pr_number, int) or pr_number <= 0:
+        logger.debug("pr_closed_invalid_pr_number", raw=pr.get("number"))
+        return
+    closed_at = pr.get("closed_at") or datetime.now(UTC).isoformat()
+
+    log = logger.bind(pr_number=pr_number, closed_at=closed_at)
+    log.info("handling_pr_closed")
+
+    ticket_id = _ticket_id_from_payload(payload)
+    if ticket_id:
+        append_trace(
+            ticket_id,
+            _lookup_trace_id(ticket_id),
+            "l3_pr_review",
+            "pr_closed",
+            pr_number=pr_number,
+        )
+
+    autonomy_event = _build_autonomy_event(
+        "pr_closed", payload, event_at=closed_at
+    )
+    if autonomy_event:
+        await _forward_autonomy_event(autonomy_event)
+
+
 async def _handle_ci_passed(payload: dict[str, Any]) -> None:
     """Handle CI passing — check if PR is approved and ready for auto-merge."""
     check = payload.get("check_suite", payload.get("check_run", {}))
@@ -1178,6 +1209,7 @@ _HANDLERS: dict[EventType, Any] = {
     EventType.PR_SYNCHRONIZE: _handle_pr_opened,  # Re-review on new commits
     EventType.PR_READY_FOR_REVIEW: _handle_pr_opened,
     EventType.PR_MERGED: _handle_pr_merged,
+    EventType.PR_CLOSED: _handle_pr_closed,
     EventType.CI_FAILED: _handle_ci_failed,
     EventType.CI_PASSED: _handle_ci_passed,
     EventType.REVIEW_APPROVED: _handle_review_approved,
@@ -1364,6 +1396,10 @@ async def _handle_ado_pr_opened(payload: dict[str, Any]) -> None:
             source_control_type="azure-repos",
         )
 
+    autonomy_event = _build_ado_autonomy_event("pr_opened", payload)
+    if autonomy_event:
+        await _forward_autonomy_event(autonomy_event)
+
     # TODO: Wire into spawner with source_control_type="azure-repos"
     # once SessionSpawner supports ADO PR review sessions.
     log.info("ado_pr_opened_logged", note="spawner integration pending")
@@ -1384,6 +1420,77 @@ def _ado_pr_context(payload: dict[str, Any]) -> dict[str, Any]:
         "ticket_id": _ticket_id_from_ado_payload(payload),
         "labels": [label.get("name", "") for label in resource.get("labels", [])],
     }
+
+
+def _ado_event_at(payload: dict[str, Any]) -> str:
+    resource = payload.get("resource", {}) or {}
+    return (
+        resource.get("closedDate")
+        or resource.get("creationDate")
+        or payload.get("createdDate")
+        or datetime.now(UTC).isoformat()
+    )
+
+
+def _ado_repo_full_name(payload: dict[str, Any]) -> str:
+    resource = payload.get("resource", {}) or {}
+    repo = resource.get("repository", {}) or {}
+    project = str(repo.get("project", {}).get("name", "") or "")
+    repo_name = str(repo.get("name", "") or repo.get("id", "") or "")
+    return f"{project}/{repo_name}" if project and repo_name else repo_name
+
+
+def _ado_pr_url(payload: dict[str, Any]) -> str:
+    resource = payload.get("resource", {}) or {}
+    links = resource.get("_links", {}) or {}
+    web = links.get("web", {}) or {}
+    return str(web.get("href", "") or "")
+
+
+def _build_ado_autonomy_event(
+    event_type: str,
+    payload: dict[str, Any],
+    *,
+    event_at: str | None = None,
+) -> dict[str, Any] | None:
+    """Build a normalized AutonomyEventIn payload from an ADO PR webhook."""
+    ctx = _ado_pr_context(payload)
+    resource = payload.get("resource", {}) or {}
+    source_ref = str(resource.get("sourceRefName", "") or "")
+    target_ref = str(resource.get("targetRefName", "") or "")
+    base_sha = (resource.get("lastMergeTargetCommit") or {}).get("commitId", "")
+    head_sha = str(ctx["head_sha"] or "")
+    ticket_id = str(ctx["ticket_id"] or "")
+    repo_full_name = _ado_repo_full_name(payload)
+    pr_id = int(ctx["pr_id"] or 0)
+
+    if not (repo_full_name and pr_id and head_sha and ticket_id):
+        logger.debug(
+            "ado_autonomy_event_missing_required_fields",
+            event_type=event_type,
+            repo_full_name=repo_full_name,
+            pr_id=pr_id,
+            head_sha=head_sha,
+            ticket_id=ticket_id,
+        )
+        return None
+
+    event: dict[str, Any] = {
+        "event_type": event_type,
+        "repo_full_name": repo_full_name,
+        "pr_number": pr_id,
+        "pr_url": _ado_pr_url(payload),
+        "head_ref": source_ref,
+        "head_sha": head_sha,
+        "base_sha": str(base_sha or target_ref or ""),
+        "ticket_id": ticket_id,
+        "ticket_type": _ticket_type_from_labels(ctx["labels"]),
+        "event_at": event_at or _ado_event_at(payload),
+        "run_id": _lookup_trace_id(ticket_id),
+    }
+    if event_type == "pr_merged":
+        event["merged_at"] = event["event_at"]
+    return {k: v for k, v in event.items() if v is not None and v != ""}
 
 
 def _ado_org_url_from_payload(payload: dict[str, Any]) -> str:
@@ -1424,6 +1531,10 @@ async def _handle_ado_review_approved(payload: dict[str, Any]) -> None:
         source_control_type="azure-repos",
     )
 
+    autonomy_event = _build_ado_autonomy_event("review_approved", payload)
+    if autonomy_event:
+        await _forward_autonomy_event(autonomy_event)
+
     ticket_type = _ticket_type_from_labels(ctx["labels"])
 
     try:
@@ -1462,6 +1573,10 @@ async def _handle_ado_review_changes_requested(payload: dict[str, Any]) -> None:
             source_control_type="azure-repos",
         )
 
+    autonomy_event = _build_ado_autonomy_event("review_changes_requested", payload)
+    if autonomy_event:
+        await _forward_autonomy_event(autonomy_event)
+
     if ctx["org_url"] and ctx["repo_id"] and ctx["pr_id"]:
         ok, msg = await post_ado_pr_comment(
             ctx["org_url"],
@@ -1496,8 +1611,72 @@ async def _handle_ado_review_comment(payload: dict[str, Any]) -> None:
             source_control_type="azure-repos",
         )
 
+    autonomy_event = _build_ado_autonomy_event("review_comment", payload)
+    if autonomy_event:
+        await _forward_autonomy_event(autonomy_event)
+
     # Spawner does not yet support ADO comment response sessions
     log.info("ado_review_comment_logged", note="spawner integration pending")
+
+
+async def _handle_ado_pr_closed(payload: dict[str, Any]) -> None:
+    """Handle ADO abandoned PR — terminal lifecycle state for dashboards."""
+    ctx = _ado_pr_context(payload)
+    ticket_id = ctx["ticket_id"]
+
+    log = logger.bind(
+        pr_id=ctx["pr_id"],
+        project=ctx["project"],
+        ticket_id=ticket_id,
+        source_control_type="azure-repos",
+    )
+    log.info("handling_ado_pr_closed")
+
+    if ticket_id:
+        append_trace(
+            ticket_id,
+            _lookup_trace_id(ticket_id),
+            "l3_pr_review",
+            "ado_pr_closed",
+            pr_id=ctx["pr_id"],
+            source_control_type="azure-repos",
+        )
+
+    autonomy_event = _build_ado_autonomy_event(
+        "pr_closed", payload, event_at=_ado_event_at(payload)
+    )
+    if autonomy_event:
+        await _forward_autonomy_event(autonomy_event)
+
+
+async def _handle_ado_pr_merged(payload: dict[str, Any]) -> None:
+    """Handle ADO completed PR — terminal merged lifecycle state for dashboards."""
+    ctx = _ado_pr_context(payload)
+    ticket_id = ctx["ticket_id"]
+
+    log = logger.bind(
+        pr_id=ctx["pr_id"],
+        project=ctx["project"],
+        ticket_id=ticket_id,
+        source_control_type="azure-repos",
+    )
+    log.info("handling_ado_pr_merged")
+
+    if ticket_id:
+        append_trace(
+            ticket_id,
+            _lookup_trace_id(ticket_id),
+            "l3_pr_review",
+            "ado_pr_merged",
+            pr_id=ctx["pr_id"],
+            source_control_type="azure-repos",
+        )
+
+    autonomy_event = _build_ado_autonomy_event(
+        "pr_merged", payload, event_at=_ado_event_at(payload)
+    )
+    if autonomy_event:
+        await _forward_autonomy_event(autonomy_event)
 
 
 async def _handle_ado_build_complete(payload: dict[str, Any]) -> None:
@@ -1701,6 +1880,14 @@ async def ado_pr_webhook(
 
     if event_type == EventType.REVIEW_COMMENT:
         background_tasks.add_task(_handle_ado_review_comment, payload)
+        return {"status": "accepted", "event_type": event_type}
+
+    if event_type == EventType.PR_MERGED:
+        background_tasks.add_task(_handle_ado_pr_merged, payload)
+        return {"status": "accepted", "event_type": event_type}
+
+    if event_type == EventType.PR_CLOSED:
+        background_tasks.add_task(_handle_ado_pr_closed, payload)
         return {"status": "accepted", "event_type": event_type}
 
     # Other ADO event types — log but don't act yet

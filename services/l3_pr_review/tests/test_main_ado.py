@@ -87,6 +87,38 @@ async def test_ado_webhook_review_comment_routes() -> None:
 
 
 @pytest.mark.usefixtures("_no_ado_token")
+async def test_ado_webhook_completed_routes_to_merge_handler() -> None:
+    payload = _ado_pr_payload(status="completed")
+
+    with patch("main._handle_ado_pr_merged", new_callable=AsyncMock):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post("/webhooks/ado-pr", json=payload)
+
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["status"] == "accepted"
+        assert body["event_type"] == "pr_merged"
+
+
+@pytest.mark.usefixtures("_no_ado_token")
+async def test_ado_webhook_abandoned_routes_to_closed_handler() -> None:
+    payload = _ado_pr_payload(status="abandoned")
+
+    with patch("main._handle_ado_pr_closed", new_callable=AsyncMock):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post("/webhooks/ado-pr", json=payload)
+
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["status"] == "accepted"
+        assert body["event_type"] == "pr_closed"
+
+
+@pytest.mark.usefixtures("_no_ado_token")
 async def test_ado_build_webhook_succeeded() -> None:
     """POST to /webhooks/ado-build with succeeded build returns 202."""
     payload = {

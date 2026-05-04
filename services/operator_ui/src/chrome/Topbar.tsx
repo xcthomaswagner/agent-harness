@@ -1,4 +1,6 @@
 import { useState } from "preact/hooks";
+import type { OperatorSystemResponse } from "../api/types";
+import { useFeed } from "../hooks/useFeed";
 import type { Route } from "../router";
 import { Settings } from "./Settings";
 
@@ -17,14 +19,39 @@ interface TopbarProps {
  */
 export function Topbar({ route }: TopbarProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const system = useFeed<OperatorSystemResponse>("/api/operator/system", {
+    intervalMs: 15_000,
+  });
+  const systemInfo = system.data;
+  const systemLabel = systemInfo
+    ? `L1 ${systemInfo.git_sha || systemInfo.version} · ${formatTime(systemInfo.started_at)}`
+    : system.status === "error"
+      ? "L1 unavailable"
+      : "L1 checking";
+  const systemTitle = systemInfo
+    ? [
+        `PID ${systemInfo.pid}`,
+        `Started ${systemInfo.started_at}`,
+        `Uptime ${formatUptime(systemInfo.uptime_seconds)}`,
+        `Branch ${systemInfo.git_branch || "unknown"}`,
+        `DB ${systemInfo.db_path}`,
+        `Bundle ${systemInfo.operator_bundle.rev || "unknown"} ${systemInfo.operator_bundle.built_at || ""}`.trim(),
+      ].join("\n")
+    : system.error || "";
 
   return (
     <header class="op-topbar">
       <Breadcrumb route={route} />
       <div class="op-topbar-spacer" />
-      <div class="op-topbar-live">
+      <div
+        class={`op-topbar-live${system.status === "error" ? " is-err" : ""}`}
+        title={systemTitle}
+      >
         <span class="op-topbar-live-dot" aria-hidden="true" />
-        <span>Live</span>
+        <span>{system.status === "error" ? "Stale" : "Live"}</span>
+      </div>
+      <div class="op-topbar-system" title={systemTitle}>
+        {systemLabel}
       </div>
       <div class="op-settings-wrap">
         <button
@@ -40,6 +67,24 @@ export function Topbar({ route }: TopbarProps) {
       </div>
     </header>
   );
+}
+
+function formatTime(value: string): string {
+  if (!value) return "--:--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--:--";
+  return date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatUptime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "unknown";
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
 }
 
 function Breadcrumb({ route }: { route: Route }) {

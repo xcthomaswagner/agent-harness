@@ -78,3 +78,11 @@ def test_classify_pr_completed() -> None:
         "resource": {"status": "completed"},
     }
     assert classify_ado_event(payload) == EventType.PR_MERGED
+
+
+def test_classify_pr_abandoned() -> None:
+    payload = {
+        "eventType": "git.pullrequest.updated",
+        "resource": {"status": "abandoned"},
+    }
+    assert classify_ado_event(payload) == EventType.PR_CLOSED

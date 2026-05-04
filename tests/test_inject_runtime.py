@@ -13,11 +13,15 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "inject_runtime.py"
 
 
-def run_inject(target_dir: str, platform_profile: str = "") -> subprocess.CompletedProcess[str]:
+def run_inject(
+    target_dir: str,
+    platform_profile: str = "",
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     cmd = [sys.executable, str(SCRIPT), "--target-dir", target_dir]
     if platform_profile:
         cmd.extend(["--platform-profile", platform_profile])
-    return subprocess.run(cmd, capture_output=True, text=True)
+    return subprocess.run(cmd, capture_output=True, text=True, env=env)
 
 
 def test_basic_injection() -> None:
@@ -143,6 +147,36 @@ def test_mcp_env_var_default_fallback() -> None:
         assert sf_args == [
             "/Users/thomaswagner/Desktop/Projects.nosync/salesforce-mcp-server/dist/index.js"
         ]
+
+
+def test_contentstack_mcp_uses_supported_groups_and_env_tokens() -> None:
+    """Contentstack MCP must avoid GROUPS=all and keep tokens out of argv."""
+    with tempfile.TemporaryDirectory() as tmp:
+        client = Path(tmp) / "contentstack-client"
+        client.mkdir()
+
+        env = os.environ.copy()
+        env.update({
+            "CONTENTSTACK_API_KEY": "stack-key",
+            "CONTENTSTACK_DELIVERY_TOKEN": "delivery-token",
+            "CONTENTSTACK_MANAGEMENT_TOKEN": "management-token",
+            "CONTENTSTACK_REGION": "NA",
+            "CONTENTSTACK_ENVIRONMENT": "development",
+            "CONTENTSTACK_BRANCH": "ai",
+        })
+
+        result = run_inject(
+            str(client), platform_profile="contentstack", env=env
+        )
+        assert result.returncode == 0, result.stderr
+
+        mcp = json.loads((client / ".mcp.json").read_text())
+        contentstack = mcp["mcpServers"]["contentstack"]
+        assert contentstack["args"] == ["-y", "@contentstack/mcp"]
+        assert contentstack["env"]["CONTENTSTACK_API_KEY"] == "stack-key"
+        assert contentstack["env"]["CONTENTSTACK_DELIVERY_TOKEN"] == "delivery-token"
+        assert contentstack["env"]["CONTENTSTACK_MANAGEMENT_TOKEN"] == "management-token"
+        assert contentstack["env"]["GROUPS"] == "cma,cda"
 
 
 def test_salesforce_profile_skills_copied() -> None:

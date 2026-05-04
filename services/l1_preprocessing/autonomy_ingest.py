@@ -102,6 +102,7 @@ EventType = Literal[
     "review_changes_requested",
     "review_comment",
     "pr_merged",
+    "pr_closed",
 ]
 
 
@@ -176,6 +177,7 @@ class AutonomyEventIn(BaseModel):
     comment_url: str = ""
     merged_at: str = ""
     pipeline_mode: str = ""
+    run_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +224,7 @@ def apply_event(
       * review_changes_requested: set first_pass_accepted=0
       * review_comment: no-op upsert (Phase 2 will track follow-ups)
       * pr_merged: set merged=1 and merged_at
+      * pr_closed: set closed_at and terminal state without marking merged
     """
     # Look up any existing row so we can make first-pass decisions.
     existing = get_pr_run_by_unique(
@@ -239,6 +242,8 @@ def apply_event(
         head_sha=event.head_sha,
         base_sha=event.base_sha,
         client_profile=client_profile,
+        last_observed_at=event.event_at,
+        run_id=event.run_id,
     )
 
     et = event.event_type
@@ -249,11 +254,12 @@ def apply_event(
     _changes_req_sentinel = False
     if et == "pr_opened":
         upsert.opened_at = event.event_at
+        upsert.state = "open"
     elif et == "pr_synchronized":
-        # no-op on state; row existence ensured by upsert
-        pass
+        upsert.state = "open"
     elif et == "review_approved":
         upsert.approved_at = event.event_at
+        upsert.state = "reviewed"
         if existing is not None:
             # Detect if a prior review_changes_requested explicitly
             # downgraded this PR. Two reliable signals:
@@ -286,6 +292,8 @@ def apply_event(
                 prior_fpa_was_downgraded = True
         approval_pending = True
     elif et == "review_changes_requested":
+        upsert.state = "needs_changes"
+        upsert.state_reason = "review_changes_requested"
         upsert.first_pass_accepted = 0
         # Record a sentinel human_review issue so the approval path can
         # always detect this downgrade, even when L3 doesn't forward a
@@ -294,8 +302,16 @@ def apply_event(
     elif et == "review_comment":
         pass
     elif et == "pr_merged":
+        terminal_at = event.merged_at or event.event_at
+        upsert.state = "merged"
         upsert.merged = 1
-        upsert.merged_at = event.merged_at or event.event_at
+        upsert.merged_at = terminal_at
+        upsert.terminal_at = terminal_at
+    elif et == "pr_closed":
+        upsert.state = "closed"
+        upsert.state_reason = "closed_without_merge"
+        upsert.closed_at = event.event_at
+        upsert.terminal_at = event.event_at
 
     pr_run_id = upsert_pr_run(conn, upsert)
 

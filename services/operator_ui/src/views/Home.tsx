@@ -19,6 +19,7 @@ const STATUS_TONE: Record<TraceStatus, PillTone> = {
   stuck: "warn",
   queued: "cool",
   done: "ok",
+  hidden: "err",
 };
 
 /**

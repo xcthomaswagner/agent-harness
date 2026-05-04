@@ -56,13 +56,33 @@ export interface ModelPolicyResponse {
   roles: ModelPolicyRole[];
 }
 
-export type TraceStatus = "in-flight" | "stuck" | "queued" | "done";
+export interface OperatorSystemResponse {
+  service: string;
+  version: string;
+  pid: number;
+  started_at: string;
+  uptime_seconds: number;
+  git_sha: string;
+  git_branch: string;
+  code_path: string;
+  db_path: string;
+  operator_bundle: {
+    rev: string;
+    built_at: string;
+  };
+}
+
+export type TraceStatus = "in-flight" | "stuck" | "queued" | "done" | "hidden";
 
 export interface TraceSummary {
   id: string;
   title: string;
   status: TraceStatus;
   raw_status: string;
+  hidden: boolean;
+  lifecycle_state: string;
+  state_reason: string;
+  run_id: string;
   phase: string;
   elapsed: string;
   started_at: string;
@@ -77,6 +97,7 @@ export interface TracesResponse {
   count: number;
   offset: number;
   limit: number;
+  include_hidden: boolean;
 }
 
 export interface TracePhase {
@@ -99,6 +120,10 @@ export interface TraceDetailResponse {
   title: string;
   status: TraceStatus;
   raw_status: string;
+  hidden: boolean;
+  lifecycle_state: string;
+  state_reason: string;
+  run_id: string;
   pipeline_mode: string;
   started_at: string;
   elapsed: string;
@@ -213,12 +238,87 @@ export interface PRAutoMergeDecision {
 
 export interface AgentRosterEntry {
   teammate: string;
+  role: string;
+  role_group: "team_lead" | "dev" | "review" | "qa" | "other";
+  display_name: string;
   state: "running" | "idle" | "stale";
   last_at: string | null;
+  current_activity: string;
+  last_tool: string;
+  last_event_kind: string;
+  tool_uses: number;
+  total_tokens: number;
+  event_count: number;
+  stream_path_present: boolean;
+  last_summary: string;
+  latest_events: AgentActivityEvent[];
+}
+
+export interface AgentActivityEvent {
+  event_id: string;
+  teammate: string;
+  role: string;
+  role_group: "team_lead" | "dev" | "review" | "qa" | "other";
+  display_name: string;
+  kind: string;
+  timestamp: string;
+  observed_at: string;
+  source_line: number | null;
+  tool_name?: string;
+  text?: string;
+  description?: string;
+  summary?: string;
+  status?: string;
 }
 
 export interface AgentRosterResponse {
   agents: AgentRosterEntry[];
+}
+
+export interface ActivitySummaryItem {
+  event_id: string;
+  teammate: string;
+  display_name: string;
+  role: string;
+  role_group: "team_lead" | "dev" | "review" | "qa" | "other";
+  kind: string;
+  tool_name: string;
+  message: string;
+  last_at: string;
+  count: number;
+}
+
+export interface ActivitySummaryTool {
+  name: string;
+  count: number;
+}
+
+export interface ActivitySummaryTeammate {
+  teammate: string;
+  role: string;
+  role_group: "team_lead" | "dev" | "review" | "qa" | "other";
+  display_name: string;
+  state: string;
+  last_at: string | null;
+  event_count: number;
+  raw_event_count: number;
+  deduped_event_count: number;
+  tool_uses: number;
+  total_tokens: number;
+  tools: ActivitySummaryTool[];
+  actions: ActivitySummaryItem[];
+  warnings: string[];
+  current_activity: string;
+}
+
+export interface ActivitySummaryResponse {
+  ticket_id: string;
+  summary: string;
+  raw_event_count: number;
+  deduped_event_count: number;
+  teammates: ActivitySummaryTeammate[];
+  highlights: ActivitySummaryItem[];
+  warnings: string[];
 }
 
 export interface PRDetailResponse {
@@ -232,6 +332,10 @@ export interface PRDetailResponse {
   opened_at: string;
   merged: boolean;
   merged_at: string;
+  closed_at: string;
+  lifecycle_state: string;
+  state_reason: string;
+  excluded_from_metrics: boolean;
   first_pass_accepted: boolean;
   commits: PRCommit[];
   issues: PRReviewIssue[];

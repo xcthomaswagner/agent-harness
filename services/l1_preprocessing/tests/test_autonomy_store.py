@@ -28,6 +28,8 @@ from autonomy_store import (
     open_connection,
     promote_match_to_counted,
     record_defect_sweep_heartbeat,
+    set_pr_run_lifecycle_state,
+    suppress_dashboard_target,
     upsert_pr_run,
 )
 
@@ -1715,6 +1717,83 @@ class TestV4Migration:
                 "SELECT version FROM schema_version WHERE version = 4"
             ).fetchall()
             assert len(rows) == 1
+        finally:
+            conn.close()
+
+
+class TestV8DashboardLifecycle:
+    def test_v8_adds_lifecycle_columns_and_suppression_table(
+        self, db_path: Path
+    ) -> None:
+        conn = open_connection(db_path)
+        try:
+            version = ensure_schema(conn)
+            assert version >= 8
+            pr_cols = {
+                r["name"] for r in conn.execute("PRAGMA table_info(pr_runs)")
+            }
+            assert {
+                "state",
+                "state_reason",
+                "terminal_at",
+                "suppressed_at",
+                "excluded_from_metrics",
+                "last_observed_at",
+                "run_id",
+            }.issubset(pr_cols)
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='dashboard_suppressions'"
+            ).fetchone()
+            assert row is not None
+        finally:
+            conn.close()
+
+    def test_lifecycle_state_excludes_misfire_from_default_list(
+        self, db_path: Path
+    ) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            pr_run_id = upsert_pr_run(conn, _base_upsert())
+            assert len(list_pr_runs(conn, client_profile="default")) == 1
+            assert set_pr_run_lifecycle_state(
+                conn,
+                pr_run_id,
+                state="misfire",
+                reason="bad test run",
+                exclude_metrics=True,
+            )
+            assert list_pr_runs(conn, client_profile="default") == []
+            assert len(
+                list_pr_runs(
+                    conn,
+                    client_profile="default",
+                    include_excluded=True,
+                )
+            ) == 1
+        finally:
+            conn.close()
+
+    def test_dashboard_suppression_helper_audits_active_target(
+        self, db_path: Path
+    ) -> None:
+        conn = open_connection(db_path)
+        try:
+            ensure_schema(conn)
+            suppression_id = suppress_dashboard_target(
+                conn,
+                target_type="trace",
+                target_id="SCRUM-1",
+                reason="duplicate run",
+            )
+            row = conn.execute(
+                "SELECT * FROM dashboard_suppressions WHERE id = ?",
+                (suppression_id,),
+            ).fetchone()
+            assert row["target_type"] == "trace"
+            assert row["target_id"] == "SCRUM-1"
+            assert row["active"] == 1
         finally:
             conn.close()
 

@@ -196,6 +196,25 @@ def test_apply_event_pr_merged(conn: Any) -> None:
     ).fetchone()
     assert row["merged"] == 1
     assert row["merged_at"] == "2026-04-05T14:00:00+00:00"
+    assert row["state"] == "merged"
+    assert row["terminal_at"] == "2026-04-05T14:00:00+00:00"
+
+
+def test_apply_event_pr_closed_sets_terminal_state(conn: Any) -> None:
+    apply_event(conn, _base_event(event_type="pr_opened"), "harness-test")
+    event = _base_event(
+        event_type="pr_closed",
+        event_at="2026-04-05T15:00:00+00:00",
+    )
+    apply_event(conn, event, "harness-test")
+    row = conn.execute(
+        "SELECT * FROM pr_runs WHERE repo_full_name=? AND pr_number=? AND head_sha=?",
+        ("acme/widgets", 1, "abc123"),
+    ).fetchone()
+    assert row["merged"] == 0
+    assert row["state"] == "closed"
+    assert row["closed_at"] == "2026-04-05T15:00:00+00:00"
+    assert row["terminal_at"] == "2026-04-05T15:00:00+00:00"
 
 
 def test_apply_event_pr_synchronized_is_noop_upsert(conn: Any) -> None:

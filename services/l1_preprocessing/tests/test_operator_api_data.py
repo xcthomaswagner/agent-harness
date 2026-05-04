@@ -31,7 +31,10 @@ def _mk_app() -> FastAPI:
 
 
 def _write_profile(
-    profiles_dir: Path, name: str, platform: str = "salesforce"
+    profiles_dir: Path,
+    name: str,
+    platform: str = "salesforce",
+    project_key: str = "TEST",
 ) -> None:
     """Write a minimal client-profile YAML the loader can parse."""
     profiles_dir.mkdir(parents=True, exist_ok=True)
@@ -43,7 +46,7 @@ def _write_profile(
                 "ticket_source": {
                     "kind": "jira",
                     "instance": "example.atlassian.net",
-                    "project_key": "TEST",
+                    "project_key": project_key,
                     "ai_label": "ai-implement",
                     "quick_label": "ai-quick",
                 },
@@ -64,6 +67,9 @@ def _seed_pr_run(
     first_pass_accepted: int = 0,
     opened_at: str = "2026-04-18T12:00:00+00:00",
     merged_at: str | None = None,
+    closed_at: str | None = None,
+    state: str | None = None,
+    excluded_from_metrics: int | None = None,
 ) -> int:
     conn = open_connection(db_path)
     try:
@@ -79,8 +85,11 @@ def _seed_pr_run(
                 client_profile=client_profile,
                 opened_at=opened_at,
                 merged_at=merged_at,
+                closed_at=closed_at,
                 first_pass_accepted=first_pass_accepted,
                 merged=merged,
+                state=state,
+                excluded_from_metrics=excluded_from_metrics,
             ),
         )
     finally:
@@ -211,6 +220,157 @@ def test_profiles_counts_in_flight_and_completed_24h(
     assert p["id"] == "alpha"
     assert p["in_flight"] == 1
     assert p["completed_24h"] == 1
+
+
+def test_profiles_count_active_pre_pr_traces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Home in-flight count includes dispatched agents before a PR exists."""
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+
+    profiles_dir = tmp_path / "client-profiles"
+    _write_profile(
+        profiles_dir, "alpha", platform="contentstack", project_key="ALPHA"
+    )
+    import client_profile as cp_module
+    import tracer as tracer_module
+
+    monkeypatch.setattr(cp_module, "PROFILES_DIR", profiles_dir)
+    logs_dir = tmp_path / "logs"
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    _write_trace(
+        logs_dir,
+        "ALPHA-1",
+        events=[
+            ("webhook", "ado_webhook_received"),
+            ("pipeline", "processing_started"),
+            ("pipeline", "l2_dispatched"),
+            ("webhook", "ado_webhook_skipped_no_tag"),
+        ],
+    )
+
+    c = TestClient(_mk_app())
+    [profile] = c.get("/api/operator/profiles").json()["profiles"]
+    assert profile["id"] == "alpha"
+    assert profile["in_flight"] == 1
+
+
+def test_profiles_do_not_double_count_trace_with_active_pr_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+
+    profiles_dir = tmp_path / "client-profiles"
+    _write_profile(profiles_dir, "alpha", project_key="ALPHA")
+    import client_profile as cp_module
+    import tracer as tracer_module
+
+    monkeypatch.setattr(cp_module, "PROFILES_DIR", profiles_dir)
+    logs_dir = tmp_path / "logs"
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    recent_iso = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    _seed_pr_run(
+        db_path,
+        ticket_id="ALPHA-1",
+        pr_number=20,
+        client_profile="alpha",
+        opened_at=recent_iso,
+        state="open",
+    )
+    _write_trace(
+        logs_dir,
+        "ALPHA-1",
+        events=[
+            ("webhook", "webhook_received"),
+            ("pipeline", "processing_started"),
+            ("pipeline", "l2_dispatched"),
+        ],
+    )
+
+    c = TestClient(_mk_app())
+    [profile] = c.get("/api/operator/profiles").json()["profiles"]
+    assert profile["in_flight"] == 1
+
+
+def test_profiles_exclude_closed_suppressed_and_misfire_from_inflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+
+    profiles_dir = tmp_path / "client-profiles"
+    _write_profile(profiles_dir, "alpha")
+    import client_profile as cp_module
+
+    monkeypatch.setattr(cp_module, "PROFILES_DIR", profiles_dir)
+
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    recent_iso = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    _seed_pr_run(
+        db_path,
+        ticket_id="T-ACTIVE",
+        pr_number=10,
+        client_profile="alpha",
+        opened_at=recent_iso,
+        state="open",
+    )
+    _seed_pr_run(
+        db_path,
+        ticket_id="T-CLOSED",
+        pr_number=11,
+        client_profile="alpha",
+        opened_at=recent_iso,
+        closed_at=recent_iso,
+        state="closed",
+    )
+    _seed_pr_run(
+        db_path,
+        ticket_id="T-MISFIRE",
+        pr_number=12,
+        client_profile="alpha",
+        opened_at=recent_iso,
+        state="misfire",
+        excluded_from_metrics=1,
+    )
+    _seed_pr_run(
+        db_path,
+        ticket_id="T-OLD",
+        pr_number=13,
+        client_profile="alpha",
+        opened_at=(datetime.now(UTC) - timedelta(days=10)).isoformat(),
+        state="open",
+    )
+
+    c = TestClient(_mk_app())
+    [profile] = c.get("/api/operator/profiles").json()["profiles"]
+    assert profile["in_flight"] == 1
 
 
 def test_profiles_counts_long_running_and_recently_merged_by_correct_timestamps(
@@ -480,6 +640,19 @@ def test_model_policy_rejects_unknown_role(
     assert r.status_code == 400
 
 
+def test_system_endpoint_reports_runtime_metadata(client: TestClient) -> None:
+    r = client.get("/api/operator/system")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["service"] == "l1_preprocessing"
+    assert isinstance(data["pid"], int)
+    assert data["started_at"]
+    assert data["uptime_seconds"] >= 0
+    assert data["code_path"].endswith("operator_api_data.py")
+    assert data["db_path"]
+    assert set(data["operator_bundle"]) == {"rev", "built_at"}
+
+
 # ---------- /api/operator/traces ----------
 
 
@@ -496,6 +669,7 @@ def _write_trace(
     """
     logs_dir.mkdir(parents=True, exist_ok=True)
     path = logs_dir / f"{ticket_id}.jsonl"
+    base_ts = datetime.now(UTC)
     with path.open("w") as f:
         for i, (phase, ev) in enumerate(events):
             entry = {
@@ -503,7 +677,7 @@ def _write_trace(
                 "trace_id": f"t-{ticket_id}",
                 "phase": phase,
                 "event": ev,
-                "timestamp": f"2026-04-18T12:00:{i:02d}+00:00",
+                "timestamp": (base_ts + timedelta(seconds=i)).isoformat(),
                 "source": "agent",
             }
             if i == 0 and title:
@@ -539,7 +713,13 @@ def test_traces_empty(traces_client: TestClient) -> None:
     r = traces_client.get("/api/operator/traces")
     assert r.status_code == 200
     data = r.json()
-    assert data == {"traces": [], "count": 0, "offset": 0, "limit": 100}
+    assert data == {
+        "traces": [],
+        "count": 0,
+        "offset": 0,
+        "limit": 100,
+        "include_hidden": False,
+    }
 
 
 def test_traces_returns_shaped_rows(
@@ -667,10 +847,10 @@ def test_traces_pr_created_bucket_is_done(
     )
 
 
-def test_traces_stale_inflight_reclassified_as_stuck(
+def test_traces_stale_active_or_queued_reclassified_as_stuck(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """In-flight tickets with last activity > 2 hours ago should show as 'stuck'."""
+    """Active/queued tickets with last activity > 2 hours ago should show as 'stuck'."""
     import operator_api_data as oad_module
 
     db_path = tmp_path / "autonomy.db"
@@ -703,6 +883,18 @@ def test_traces_stale_inflight_reclassified_as_stuck(
         }) + "\n"
     )
 
+    queued_path = logs_dir / "HARN-QUEUED-STALE.jsonl"
+    queued_path.write_text(
+        json.dumps({
+            "ticket_id": "HARN-QUEUED-STALE",
+            "trace_id": "t-queued-stale",
+            "phase": "webhook",
+            "event": "webhook_received",
+            "timestamp": stale_ts,
+            "source": "pipeline",
+        }) + "\n"
+    )
+
     # Fresh ticket dispatched 30 minutes ago — should stay in-flight.
     fresh_ts = (datetime.now(UTC) - timedelta(minutes=30)).isoformat()
     fresh_path = logs_dir / "HARN-FRESH.jsonl"
@@ -723,9 +915,224 @@ def test_traces_stale_inflight_reclassified_as_stuck(
     assert rows["HARN-STALE"]["status"] == "stuck", (
         "Dispatched ticket silent for 3h should be reclassified as stuck"
     )
+    assert rows["HARN-QUEUED-STALE"]["status"] == "stuck", (
+        "Queued ticket silent for 3h should be reclassified as stuck"
+    )
     assert rows["HARN-FRESH"]["status"] == "in-flight", (
         "Dispatched ticket only 30min old should remain in-flight"
     )
+
+
+def test_trace_state_mark_misfire_hides_trace_and_excludes_pr_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    logs_dir = tmp_path / "logs"
+    import tracer as tracer_module
+
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    _write_trace(
+        logs_dir,
+        "HARN-MIS",
+        events=[
+            ("webhook", "webhook_received"),
+            ("pipeline", "l2_dispatched"),
+        ],
+    )
+    _seed_pr_run(
+        db_path,
+        ticket_id="HARN-MIS",
+        pr_number=77,
+        client_profile="alpha",
+        state="open",
+    )
+
+    c = TestClient(_mk_app())
+    r = c.post(
+        "/api/operator/traces/HARN-MIS/state",
+        json={
+            "state": "misfire",
+            "reason": "duplicate test run",
+            "exclude_metrics": True,
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["affected_pr_runs"] == 1
+
+    visible = c.get("/api/operator/traces").json()["traces"]
+    assert [row["id"] for row in visible] == []
+
+    hidden = c.get("/api/operator/traces?include_hidden=true").json()["traces"]
+    assert hidden[0]["id"] == "HARN-MIS"
+    assert hidden[0]["status"] == "hidden"
+    assert hidden[0]["raw_status"] == "Misfire"
+
+    conn = open_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT state, excluded_from_metrics FROM pr_runs WHERE ticket_id = ?",
+            ("HARN-MIS",),
+        ).fetchone()
+        assert row["state"] == "misfire"
+        assert row["excluded_from_metrics"] == 1
+    finally:
+        conn.close()
+
+
+def test_reconcile_stale_marks_old_active_pr_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+
+    old_iso = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    recent_iso = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    _seed_pr_run(
+        db_path,
+        ticket_id="OLD-1",
+        pr_number=81,
+        client_profile="alpha",
+        opened_at=old_iso,
+        state="open",
+    )
+    _seed_pr_run(
+        db_path,
+        ticket_id="NEW-1",
+        pr_number=82,
+        client_profile="alpha",
+        opened_at=recent_iso,
+        state="open",
+    )
+
+    c = TestClient(_mk_app())
+    dry = c.post(
+        "/api/operator/dashboard/reconcile-stale",
+        json={"stale_after_hours": 24, "dry_run": True},
+    )
+    assert dry.status_code == 200
+    assert dry.json()["matched"] == 1
+
+    applied = c.post(
+        "/api/operator/dashboard/reconcile-stale",
+        json={"stale_after_hours": 24, "dry_run": False},
+    )
+    assert applied.status_code == 200
+    assert applied.json()["matched"] == 1
+
+    conn = open_connection(db_path)
+    try:
+        rows = {
+            row["ticket_id"]: row["state"]
+            for row in conn.execute("SELECT ticket_id, state FROM pr_runs")
+        }
+        assert rows == {"OLD-1": "stale", "NEW-1": "open"}
+    finally:
+        conn.close()
+
+
+def test_reconcile_stale_backfills_closed_trace_before_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    logs_dir = tmp_path / "logs"
+    import tracer as tracer_module
+
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+
+    opened_at = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    closed_at = (datetime.now(UTC) - timedelta(days=9)).isoformat()
+    _seed_pr_run(
+        db_path,
+        ticket_id="SCRUM-16",
+        pr_number=42,
+        client_profile="alpha",
+        opened_at=opened_at,
+        state="open",
+    )
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    (logs_dir / "SCRUM-16.jsonl").write_text(
+        "\n".join(
+            json.dumps(entry)
+            for entry in [
+                {
+                    "ticket_id": "SCRUM-16",
+                    "trace_id": "trace-1",
+                    "phase": "l3_approval",
+                    "event": "review_approved",
+                    "pr_number": 42,
+                    "timestamp": opened_at,
+                    "source": "l3",
+                },
+                {
+                    "ticket_id": "SCRUM-16",
+                    "trace_id": "trace-1",
+                    "phase": "l3_pr_review",
+                    "event": "pr_closed",
+                    "pr_number": 42,
+                    "timestamp": closed_at,
+                    "source": "l3",
+                },
+                {
+                    "ticket_id": "SCRUM-16",
+                    "trace_id": "trace-1",
+                    "phase": "l3_approval",
+                    "event": "review_approved",
+                    "pr_number": 42,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "source": "l3",
+                },
+            ]
+        )
+        + "\n"
+    )
+
+    c = TestClient(_mk_app())
+    dry = c.post(
+        "/api/operator/dashboard/reconcile-stale",
+        json={"stale_after_hours": 24, "dry_run": True},
+    )
+    assert dry.status_code == 200
+    assert dry.json()["lifecycle_reconciled"] == 1
+    assert dry.json()["matched"] == 0
+
+    applied = c.post(
+        "/api/operator/dashboard/reconcile-stale",
+        json={"stale_after_hours": 24, "dry_run": False},
+    )
+    assert applied.status_code == 200
+    assert applied.json()["lifecycle_reconciled"] == 1
+    assert applied.json()["matched"] == 0
+
+    trace_row = c.get("/api/operator/traces?include_hidden=true").json()["traces"][0]
+    assert trace_row["status"] == "done"
+    assert trace_row["raw_status"] == "Closed"
+    assert trace_row["lifecycle_state"] == "closed"
+
+    conn = open_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT state, closed_at, state_reason FROM pr_runs WHERE ticket_id = ?",
+            ("SCRUM-16",),
+        ).fetchone()
+        assert row["state"] == "closed"
+        assert row["closed_at"] == closed_at
+        assert row["state_reason"] == "reconciled from trace event pr_closed"
+    finally:
+        conn.close()
 
 
 # ---------- /api/operator/traces/{id} (trace detail) ----------
@@ -1144,6 +1551,125 @@ def test_agents_lists_teammates_with_state(
     # At least one running (from recent), one stale (from 2024 timestamp).
     assert any(v == "running" for v in states.values())
     assert any(v == "stale" for v in states.values())
+    main = next(a for a in agents if a["teammate"] == "team-lead")
+    assert main["role"] == "team_lead"
+    assert main["role_group"] == "team_lead"
+    assert main["display_name"] == "Team Lead"
+    assert main["stream_path_present"] is True
+    assert "current_activity" in main
+    assert "latest_events" in main
+
+
+def test_activity_summary_returns_deduped_ticket_activity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    worktree = tmp_path / "wt" / "HARN-SUMMARY"
+    stream = worktree / ".harness" / "logs" / "session-stream.jsonl"
+    stream.parent.mkdir(parents=True)
+    event = {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "Read",
+                    "input": {"file_path": "src/Hero.tsx"},
+                }
+            ]
+        },
+    }
+    stream.write_text(json.dumps(event) + "\n" + json.dumps(event) + "\n")
+
+    import operator_api_data as oad
+
+    monkeypatch.setattr(oad, "_worktree_root_for_ticket", lambda _tid: worktree)
+
+    c = TestClient(_mk_app())
+    data = c.get("/api/operator/tickets/HARN-SUMMARY/activity-summary").json()
+    assert data["ticket_id"] == "HARN-SUMMARY"
+    assert data["raw_event_count"] == 2
+    assert data["deduped_event_count"] == 1
+    assert data["teammates"][0]["actions"][0]["count"] == 2
+
+
+def test_activity_summary_includes_finished_phase_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    worktree = tmp_path / "wt" / "HARN-FINISHED"
+    stream = worktree / ".harness" / "logs" / "session-stream.jsonl"
+    stream.parent.mkdir(parents=True)
+    stream.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Read",
+                            "input": {"file_path": "package.json"},
+                        }
+                    ]
+                },
+            }
+        )
+        + "\n"
+    )
+    (stream.parent / "pipeline.jsonl").write_text(
+        json.dumps(
+            {
+                "phase": "qa_validation",
+                "timestamp": "2026-05-03T22:21:56Z",
+                "event": "QA complete",
+                "overall": "PASS",
+                "criteria_passed": 23,
+                "criteria_total": 23,
+            }
+        )
+        + "\n"
+    )
+    (stream.parent / "qa-matrix.json").write_text(
+        json.dumps(
+            {
+                "overall": "PASS",
+                "issues": [
+                    {"criterion": "Hero renders", "status": "PASS"},
+                    {"criterion": "CTA sanitized", "status": "PASS_WITH_CAVEAT"},
+                ],
+            }
+        )
+    )
+
+    import operator_api_data as oad
+
+    monkeypatch.setattr(oad, "_worktree_root_for_ticket", lambda _tid: worktree)
+
+    c = TestClient(_mk_app())
+    data = c.get("/api/operator/tickets/HARN-FINISHED/activity-summary").json()
+    roles = {teammate["role"] for teammate in data["teammates"]}
+    assert "team_lead" in roles
+    assert "qa" in roles
+    assert any("QA complete" in item["message"] for item in data["highlights"])
 
 
 def test_pr_detail_surfaces_auto_merge_decision(

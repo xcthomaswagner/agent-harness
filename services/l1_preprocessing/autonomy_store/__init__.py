@@ -32,6 +32,10 @@ from .auto_merge import get_auto_merge_toggle as get_auto_merge_toggle
 from .auto_merge import list_recent_auto_merge_decisions as list_recent_auto_merge_decisions
 from .auto_merge import record_auto_merge_decision as record_auto_merge_decision
 from .auto_merge import set_auto_merge_toggle as set_auto_merge_toggle
+from .dashboard_state import clear_dashboard_suppression as clear_dashboard_suppression
+from .dashboard_state import get_active_suppression as get_active_suppression
+from .dashboard_state import list_active_suppressions as list_active_suppressions
+from .dashboard_state import suppress_dashboard_target as suppress_dashboard_target
 from .defects import _parse_iso as _parse_iso
 from .defects import count_merged_pr_runs_with_escape as count_merged_pr_runs_with_escape
 from .defects import create_manual_match as create_manual_match
@@ -78,11 +82,19 @@ from .pipeline_metrics import PipelineMetric as PipelineMetric
 from .pipeline_metrics import count_metrics as count_metrics
 from .pipeline_metrics import list_recent_metrics as list_recent_metrics
 from .pipeline_metrics import upsert_pipeline_metric as upsert_pipeline_metric
+from .pr_runs import ACTIVE_PR_RUN_STATES as ACTIVE_PR_RUN_STATES
+from .pr_runs import TERMINAL_PR_RUN_STATES as TERMINAL_PR_RUN_STATES
+from .pr_runs import VALID_PR_RUN_STATES as VALID_PR_RUN_STATES
 from .pr_runs import PrRunUpsert as PrRunUpsert
 from .pr_runs import find_latest_merged_pr_run_by_ticket as find_latest_merged_pr_run_by_ticket
 from .pr_runs import get_pr_run_by_unique as get_pr_run_by_unique
 from .pr_runs import list_client_profiles as list_client_profiles
 from .pr_runs import list_pr_runs as list_pr_runs
+from .pr_runs import mark_stale_pr_runs as mark_stale_pr_runs
+from .pr_runs import set_pr_run_lifecycle_state as set_pr_run_lifecycle_state
+from .pr_runs import (
+    set_pr_runs_lifecycle_state_for_ticket as set_pr_runs_lifecycle_state_for_ticket,
+)
 from .pr_runs import upsert_pr_run as upsert_pr_run
 from .schema import AI_SOURCES as AI_SOURCES
 from .schema import _current_schema_version as _current_schema_version
@@ -92,6 +104,7 @@ from .schema import _migrate_to_v3 as _migrate_to_v3
 from .schema import _migrate_to_v4 as _migrate_to_v4
 from .schema import _migrate_to_v5 as _migrate_to_v5
 from .schema import _migrate_to_v6 as _migrate_to_v6
+from .schema import _migrate_to_v8 as _migrate_to_v8
 from .schema import _now_iso as _now_iso
 from .schema import autonomy_conn as autonomy_conn
 from .schema import ensure_schema as ensure_schema

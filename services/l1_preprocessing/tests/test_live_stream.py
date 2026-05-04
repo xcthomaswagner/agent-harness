@@ -234,6 +234,155 @@ class TestFilter:
         assert ev["kind"] == "text"
         assert len(ev["text"]) <= live_stream.TEXT_SNIPPET_MAX
 
+    def test_redacts_tool_descriptions(self) -> None:
+        command = (
+            "curl -H 'Authorization: Bearer "
+            "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' "
+            "https://example.test csa0123456789abcdef0123456789"
+        )
+        ev = live_stream._filter_and_shape_event(
+            _tool_use_event("Bash", command), "developer-1"
+        )
+        assert ev is not None
+        assert "sk-ant-api03" not in ev["description"]
+        assert "csa0123456789abcdef0123456789" not in ev["description"]
+        assert "REDACTED" in ev["description"]
+        assert ev["role"] == "developer"
+        assert ev["role_group"] == "dev"
+        assert ev["display_name"] == "Developer 1"
+
+    def test_session_summary_includes_latest_activity(self, tmp_path: Path) -> None:
+        stream = tmp_path / "session-stream.jsonl"
+        _write_stream(
+            stream,
+            [
+                _tool_use_event(
+                    "Read", "package.json", "2026-04-18T10:00:00+00:00"
+                ),
+                _task_progress(3, 1200),
+                _text_event("Implementation is complete."),
+            ],
+        )
+        summary = live_stream.summarize_session_stream("qa", stream)
+        assert summary["role"] == "qa"
+        assert summary["role_group"] == "qa"
+        assert summary["display_name"] == "QA"
+        assert summary["tool_uses"] == 3
+        assert summary["total_tokens"] == 1200
+        assert summary["current_activity"] == "Implementation is complete."
+        assert len(summary["latest_events"]) == 2
+
+    def test_ticket_activity_summary_dedupes_repeated_strings(
+        self, tmp_path: Path
+    ) -> None:
+        stream = tmp_path / "session-stream.jsonl"
+        _write_stream(
+            stream,
+            [
+                _tool_use_event("Read", "src/Hero.tsx"),
+                _tool_use_event("Read", "src/Hero.tsx"),
+                _tool_use_event("Bash", "npm test failed"),
+                _text_event("QA passed."),
+            ],
+        )
+        summary = live_stream.summarize_ticket_activity(
+            "DEDUPE-1", [("developer-1", stream)]
+        )
+        assert summary["raw_event_count"] == 4
+        assert summary["deduped_event_count"] == 3
+        teammate = summary["teammates"][0]
+        assert teammate["deduped_event_count"] == 3
+        read_item = next(
+            item for item in teammate["actions"] if item["message"] == "Read: src/Hero.tsx"
+        )
+        assert read_item["count"] == 2
+        assert any("failed" in warning for warning in summary["warnings"])
+
+    def test_finished_activity_adds_review_judge_and_qa_without_streams(
+        self, tmp_path: Path
+    ) -> None:
+        wt = tmp_path / "RND-1"
+        logs = wt / ".harness" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "pipeline.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "phase": "judge",
+                            "timestamp": "2026-05-03T22:12:05Z",
+                            "event": "Judge complete",
+                            "validated": 4,
+                            "rejected": 6,
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "phase": "code_review",
+                            "timestamp": "2026-05-03T22:16:47Z",
+                            "event": "Review complete",
+                            "verdict": "APPROVED",
+                            "issues": 10,
+                            "critical": 3,
+                            "warnings": 7,
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "phase": "qa_validation",
+                            "timestamp": "2026-05-03T22:21:56Z",
+                            "event": "QA complete",
+                            "overall": "PASS",
+                            "criteria_passed": 23,
+                            "criteria_total": 23,
+                        }
+                    ),
+                ]
+            )
+            + "\n"
+        )
+        (logs / "code-review.json").write_text(
+            json.dumps(
+                {
+                    "verdict": "APPROVED",
+                    "issues": [{"summary": "Heading hierarchy fixed"}],
+                }
+            )
+        )
+        (logs / "judge-verdict.json").write_text(
+            json.dumps(
+                {
+                    "validated_issues": [{"summary": "CTA guard confirmed"}],
+                    "rejected_issues": [{"summary": "False positive"}],
+                }
+            )
+        )
+        (logs / "qa-matrix.json").write_text(
+            json.dumps(
+                {
+                    "overall": "PASS",
+                    "issues": [
+                        {"criterion": "Hero renders", "status": "PASS"},
+                        {"criterion": "CTA sanitized", "status": "PASS_BY_CODE_INSPECTION"},
+                    ],
+                }
+            )
+        )
+
+        finished = live_stream.collect_finished_activity(wt)
+        summary = live_stream.summarize_ticket_activity(
+            "RND-1", [], finished_events=finished
+        )
+
+        roles = {teammate["role"] for teammate in summary["teammates"]}
+        assert {"code_reviewer", "judge", "qa"}.issubset(roles)
+        assert any(
+            "QA complete" in item["message"] for item in summary["highlights"]
+        )
+        qa = next(teammate for teammate in summary["teammates"] if teammate["role"] == "qa")
+        assert qa["state"] == "completed"
+        assert qa["deduped_event_count"] >= 2
+
 
 class TestWorktreeDiscovery:
     def test_main_worktree_labeled_team_lead(

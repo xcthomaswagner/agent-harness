@@ -607,6 +607,7 @@ def _base_pr_payload(action: str = "opened", *, merged: bool = False) -> dict:
             "body": "Implements SCRUM-16",
             "merged": merged,
             "merged_at": "2026-04-05T12:00:00Z" if merged else None,
+            "closed_at": "2026-04-05T12:05:00Z" if action == "closed" else None,
             "head": {"ref": "ai/SCRUM-16", "sha": "abc123"},
             "base": {"sha": "def456", "repo": {"full_name": "org/repo"}},
             "labels": [],
@@ -700,6 +701,32 @@ async def test_pr_merged_forwards_autonomy_event() -> None:
         event = mock_forward.await_args.args[0]
         assert event["event_type"] == "pr_merged"
         assert event["merged_at"] == "2026-04-05T12:00:00Z"
+        assert event["ticket_id"] == "SCRUM-16"
+
+
+async def test_pr_closed_forwards_autonomy_event() -> None:
+    payload = _base_pr_payload("closed", merged=False)
+
+    with (
+        patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+        patch.object(l3_main, "_get_spawner") as mock_get,
+        patch.object(
+            l3_main, "_forward_autonomy_event", new_callable=AsyncMock
+        ) as mock_forward,
+    ):
+        mock_get.return_value = MagicMock()
+
+        async with await _make_client() as client:
+            response = await _post_webhook(client, payload, "pull_request")
+
+        assert response.status_code == 202
+        assert response.json()["event_type"] == "pr_closed"
+
+        await _wait_for(lambda: mock_forward.await_count >= 1)
+
+        event = mock_forward.await_args.args[0]
+        assert event["event_type"] == "pr_closed"
+        assert event["event_at"] == "2026-04-05T12:05:00Z"
         assert event["ticket_id"] == "SCRUM-16"
 
 

@@ -21,10 +21,15 @@ class TestPullRequestEvents:
         payload = {"action": "synchronize"}
         assert classify_event(headers, payload) == EventType.PR_SYNCHRONIZE
 
-    def test_pr_closed_ignored(self) -> None:
+    def test_pr_closed_without_merge_is_terminal(self) -> None:
         headers = {"x-github-event": "pull_request"}
-        payload = {"action": "closed"}
-        assert classify_event(headers, payload) == EventType.IGNORED
+        payload = {"action": "closed", "pull_request": {"merged": False}}
+        assert classify_event(headers, payload) == EventType.PR_CLOSED
+
+    def test_pr_closed_with_merge_is_merged(self) -> None:
+        headers = {"x-github-event": "pull_request"}
+        payload = {"action": "closed", "pull_request": {"merged": True}}
+        assert classify_event(headers, payload) == EventType.PR_MERGED
 
 
 class TestCheckSuiteEvents:

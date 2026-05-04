@@ -46,6 +46,20 @@ OPERATOR_STATIC_DIR = Path(__file__).resolve().parent / "operator_static"
 _JS_MIME = "application/javascript; charset=utf-8"
 _CSS_MIME = "text/css; charset=utf-8"
 _JSON_MIME = "application/json; charset=utf-8"
+_NO_STORE_HEADERS = {
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+}
+
+
+def _static_file(path: Path, media_type: str) -> FileResponse:
+    if not path.is_file():
+        return FileResponse(path, status_code=404)
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers=_NO_STORE_HEADERS,
+    )
 
 
 def _render_shell(api_key: str) -> HTMLResponse:
@@ -73,10 +87,7 @@ def _render_shell(api_key: str) -> HTMLResponse:
     )
     return HTMLResponse(
         content=injected,
-        headers={
-            "Cache-Control": "no-store",
-            "X-Content-Type-Options": "nosniff",
-        },
+        headers=_NO_STORE_HEADERS,
     )
 
 
@@ -98,10 +109,7 @@ def _current_api_key() -> str:
     include_in_schema=False,
 )
 def _operator_js() -> FileResponse:
-    path = OPERATOR_STATIC_DIR / "operator.js"
-    if not path.is_file():
-        return FileResponse(path, status_code=404)
-    return FileResponse(path, media_type=_JS_MIME)
+    return _static_file(OPERATOR_STATIC_DIR / "operator.js", _JS_MIME)
 
 
 @router.get(
@@ -110,10 +118,7 @@ def _operator_js() -> FileResponse:
     include_in_schema=False,
 )
 def _operator_bundled_css() -> FileResponse:
-    path = OPERATOR_STATIC_DIR / "operator.css"
-    if not path.is_file():
-        return FileResponse(path, status_code=404)
-    return FileResponse(path, media_type=_CSS_MIME)
+    return _static_file(OPERATOR_STATIC_DIR / "operator.css", _CSS_MIME)
 
 
 @router.get(
@@ -125,10 +130,7 @@ def _operator_tokens_css() -> FileResponse:
     # Tokens-only sheet kept for potential standalone consumers; the
     # real dashboard uses operator.css (which @imports tokens + every
     # component sheet).
-    path = OPERATOR_STATIC_DIR / "tokens.css"
-    if not path.is_file():
-        return FileResponse(path, status_code=404)
-    return FileResponse(path, media_type=_CSS_MIME)
+    return _static_file(OPERATOR_STATIC_DIR / "tokens.css", _CSS_MIME)
 
 
 @router.get(
@@ -137,10 +139,7 @@ def _operator_tokens_css() -> FileResponse:
     include_in_schema=False,
 )
 def _operator_build() -> FileResponse:
-    path = OPERATOR_STATIC_DIR / "build.json"
-    if not path.is_file():
-        return FileResponse(path, status_code=404)
-    return FileResponse(path, media_type=_JSON_MIME)
+    return _static_file(OPERATOR_STATIC_DIR / "build.json", _JSON_MIME)
 
 
 @router.get(

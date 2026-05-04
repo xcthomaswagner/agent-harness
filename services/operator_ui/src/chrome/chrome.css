@@ -173,6 +173,18 @@
   animation: none;
 }
 
+.op-topbar-system {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-500);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 @keyframes operator-heart {
   0%,
   100% {

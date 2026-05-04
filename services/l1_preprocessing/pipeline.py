@@ -566,7 +566,8 @@ class Pipeline:
         append_trace(enriched.id, tid, "pipeline", "l2_dispatched",
                      pipeline_mode=pipeline_mode, spawn_triggered=spawn_result,
                      figma_extracted=enriched.figma_design_spec is not None,
-                     platform_profile=enriched.platform_profile or "none")
+                     platform_profile=enriched.platform_profile or "none",
+                     client_profile=profile.name if profile else "")
 
         return {
             "status": "enriched",

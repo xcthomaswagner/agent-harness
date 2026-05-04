@@ -6,7 +6,10 @@ import { useFeed } from "../hooks/useFeed";
 import { useLiveLog } from "../hooks/useLiveLog";
 import type { LiveLogEntry } from "../hooks/useLiveLog";
 import type {
+  AgentRosterEntry,
   AgentRosterResponse,
+  ActivitySummaryResponse,
+  ActivitySummaryItem,
   TraceStatus,
   TraceSummary,
   TracesResponse,
@@ -14,6 +17,7 @@ import type {
 import { href } from "../router";
 
 type StatusFilter = TraceStatus | "all";
+type LiveFilter = "all" | "team_lead" | "dev" | "review" | "qa" | "other";
 
 const FILTERS: readonly { label: string; value: StatusFilter }[] = [
   { label: "All", value: "all" },
@@ -21,6 +25,7 @@ const FILTERS: readonly { label: string; value: StatusFilter }[] = [
   { label: "Stuck", value: "stuck" },
   { label: "Queued", value: "queued" },
   { label: "Done", value: "done" },
+  { label: "Hidden", value: "hidden" },
 ];
 
 const STATUS_TONE: Record<TraceStatus, PillTone> = {
@@ -28,7 +33,17 @@ const STATUS_TONE: Record<TraceStatus, PillTone> = {
   stuck: "warn",
   queued: "cool",
   done: "ok",
+  hidden: "err",
 };
+
+const LIVE_FILTERS: readonly { label: string; value: LiveFilter }[] = [
+  { label: "All", value: "all" },
+  { label: "Team Lead", value: "team_lead" },
+  { label: "Devs", value: "dev" },
+  { label: "Review", value: "review" },
+  { label: "QA", value: "qa" },
+  { label: "Other", value: "other" },
+];
 
 export function TicketsView() {
   const [filter, setFilter] = useState<StatusFilter>("in-flight");
@@ -48,6 +63,7 @@ export function TicketsView() {
       stuck: 0,
       queued: 0,
       done: 0,
+      hidden: 0,
     };
     if (feed.data) {
       base.all = feed.data.traces.length;
@@ -172,10 +188,25 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
   const roster = useFeed<AgentRosterResponse>(
     row ? `/api/operator/tickets/${encodeURIComponent(row.id)}/agents` : null,
   );
+  const activitySummary = useFeed<ActivitySummaryResponse>(
+    row ? `/api/operator/tickets/${encodeURIComponent(row.id)}/activity-summary` : null,
+  );
   const [triggerState, setTriggerState] = useState<"idle" | "busy" | "done" | "error">("idle");
+  const [liveFilter, setLiveFilter] = useState<LiveFilter>("all");
+
+  const visibleEntries = useMemo(
+    () =>
+      liveFilter === "all"
+        ? log.entries
+        : log.entries.filter((entry) => entry.role_group === liveFilter),
+    [log.entries, liveFilter],
+  );
 
   // Reset button state when selected ticket changes
-  useEffect(() => { setTriggerState("idle"); }, [row?.id]);
+  useEffect(() => {
+    setTriggerState("idle");
+    setLiveFilter("all");
+  }, [row?.id]);
 
   const removeTrigger = useCallback(async () => {
     if (!row || triggerState === "busy") return;
@@ -239,37 +270,46 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
         )}
       </div>
 
-      {roster.data && roster.data.agents.length > 0 && (
-        <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-          {roster.data.agents.map((a) => (
-            <Pill
-              key={a.teammate}
-              tone={a.state === "running" ? "active" : a.state === "idle" ? "cool" : "warn"}
-            >
-              {a.teammate}
-            </Pill>
-          ))}
-        </div>
+      <TeamActivity agents={roster.data?.agents} state={roster.status} compact />
+
+      {row.status !== "in-flight" && (
+        <ActivitySummaryPanel
+          data={activitySummary.data}
+          state={activitySummary.status}
+          compact
+        />
       )}
 
       <SectionHeader
         label="Live log"
         right={<ConnBadge state={log.state} />}
       />
+      <div class="op-live-filter-row">
+        {LIVE_FILTERS.map((f) => (
+          <Chip
+            key={f.value}
+            label={f.label}
+            on={liveFilter === f.value}
+            onClick={() => setLiveFilter(f.value)}
+          />
+        ))}
+      </div>
       <div class="op-rail-live-log">
-        {log.entries.length === 0 && (
+        {visibleEntries.length === 0 && (
           <div class="op-rail-log-conn">
             {log.state === "connecting"
               ? "Connecting…"
               : log.state === "connected"
-                ? "Waiting for activity…"
+                ? log.entries.length === 0
+                  ? "Waiting for activity…"
+                  : "No activity for this filter."
                 : log.state === "error"
                   ? log.error ?? "Disconnected"
                   : "Idle"}
           </div>
         )}
-        {log.entries.map((e, i) => (
-          <LogLine key={`${e.timestamp}-${i}`} entry={e} />
+        {visibleEntries.map((e, i) => (
+          <LogLine key={`${e.event_id ?? e.timestamp}-${i}`} entry={e} />
         ))}
       </div>
     </>
@@ -293,13 +333,217 @@ function LogLine({ entry }: { entry: LiveLogEntry }) {
 
   return (
     <div class="op-rail-log-line">
-      <span class="op-rail-log-time">{formatLogTime(entry.timestamp)}</span>
-      <span class="op-rail-log-team">{entry.teammate || "—"}</span>
+      <span class="op-rail-log-time">{formatLogTime(entry.observed_at || entry.timestamp)}</span>
+      <span class="op-rail-log-team">{entry.display_name || entry.teammate || "—"}</span>
       <span class="op-rail-log-msg" title={message}>
         {message}
       </span>
     </div>
   );
+}
+
+export function ActivitySummaryPanel({
+  data,
+  state,
+  compact = false,
+}: {
+  data: ActivitySummaryResponse | undefined;
+  state: string;
+  compact?: boolean;
+}) {
+  const [actorFilter, setActorFilter] = useState<string>("all");
+
+  useEffect(() => {
+    setActorFilter("all");
+  }, [data?.ticket_id]);
+
+  if (state === "loading" && !data) {
+    return <div class="op-rail-log-conn">Loading activity summary...</div>;
+  }
+  if (!data || data.raw_event_count === 0) {
+    return <div class="op-rail-log-conn">No finished activity summary available.</div>;
+  }
+  const filteredHighlights =
+    actorFilter === "all"
+      ? data.highlights
+      : data.highlights.filter((item) => item.teammate === actorFilter);
+  const topHighlights = filteredHighlights.slice(-(compact ? 6 : 12));
+  const visibleTeammates =
+    actorFilter === "all"
+      ? data.teammates
+      : data.teammates.filter((teammate) => teammate.teammate === actorFilter);
+  return (
+    <section class={compact ? "op-activity-summary is-compact" : "op-activity-summary"}>
+      <SectionHeader
+        label="Activity summary"
+        right={`${data.raw_event_count} raw · ${data.deduped_event_count} unique`}
+      />
+      <div class="op-summary-text">{data.summary}</div>
+      {data.teammates.length > 1 && (
+        <div class="op-summary-actor-strip">
+          <button
+            type="button"
+            class={actorFilter === "all" ? "is-active" : ""}
+            onClick={() => setActorFilter("all")}
+          >
+            All {data.deduped_event_count}
+          </button>
+          {data.teammates.map((teammate) => (
+            <button
+              key={teammate.teammate}
+              type="button"
+              class={actorFilter === teammate.teammate ? "is-active" : ""}
+              onClick={() => {
+                setActorFilter((current) =>
+                  current === teammate.teammate ? "all" : teammate.teammate,
+                );
+              }}
+            >
+              {teammate.display_name} {teammate.deduped_event_count}
+            </button>
+          ))}
+        </div>
+      )}
+      {data.warnings.length > 0 && (
+        <div class="op-summary-warnings">
+          {data.warnings.slice(0, compact ? 3 : 8).map((warning, i) => (
+            <div key={`${warning}-${i}`}>{warning}</div>
+          ))}
+        </div>
+      )}
+      <div class="op-summary-list">
+        {topHighlights.length === 0 ? (
+          <div class="op-rail-log-conn">No summary items for this teammate.</div>
+        ) : (
+          topHighlights.map((item) => (
+            <SummaryItem key={item.event_id || `${item.display_name}-${item.message}`} item={item} />
+          ))
+        )}
+      </div>
+      {!compact && (
+        <div class="op-summary-teammates">
+          {visibleTeammates.map((teammate) => (
+            <div key={teammate.teammate} class="op-summary-teammate">
+              <div class="op-summary-teammate-head">
+                <span>{teammate.display_name}</span>
+                <span>
+                  {teammate.raw_event_count} raw · {teammate.deduped_event_count} unique
+                </span>
+              </div>
+              <div class="op-summary-tool-row">
+                {teammate.tools.slice(0, 6).map((tool) => (
+                  <span key={tool.name}>{tool.name} {tool.count}</span>
+                ))}
+              </div>
+              {teammate.actions.slice(0, 5).map((action) => (
+                <SummaryItem key={action.event_id || action.message} item={action} />
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SummaryItem({ item }: { item: ActivitySummaryItem }) {
+  return (
+    <div class="op-summary-item">
+      <span class="op-summary-item-team">{item.display_name || item.teammate}</span>
+      <span class="op-summary-item-msg" title={item.message}>
+        {item.message}
+        {item.count > 1 && <span class="op-summary-repeat"> x{item.count}</span>}
+      </span>
+    </div>
+  );
+}
+
+export function TeamActivity({
+  agents,
+  state,
+  compact = false,
+}: {
+  agents: readonly AgentRosterEntry[] | undefined;
+  state: string;
+  compact?: boolean;
+}) {
+  if (state === "loading" && !agents) {
+    return <div class="op-rail-log-conn">Loading team activity...</div>;
+  }
+  if (!agents || agents.length === 0) {
+    return <div class="op-rail-log-conn">No agents spawned for this ticket.</div>;
+  }
+  return (
+    <div class={compact ? "op-team-activity is-compact" : "op-team-activity"}>
+      {agents.map((agent) => (
+        <AgentActivityCard key={agent.teammate} agent={agent} compact={compact} />
+      ))}
+    </div>
+  );
+}
+
+function AgentActivityCard({
+  agent,
+  compact,
+}: {
+  agent: AgentRosterEntry;
+  compact: boolean;
+}) {
+  const tone: PillTone =
+    agent.state === "running"
+      ? "active"
+      : agent.state === "idle"
+        ? "cool"
+        : "warn";
+  return (
+    <div class="op-agent-card">
+      <div class="op-agent-card-head">
+        <span class="op-agent-name">{agent.display_name || agent.teammate}</span>
+        <Pill tone={tone}>{agent.state}</Pill>
+      </div>
+      <div class="op-agent-meta">
+        <span>{agent.last_at ? formatLogTime(agent.last_at) : "—"}</span>
+        {agent.last_tool && <span>{agent.last_tool}</span>}
+        <span>{agent.tool_uses} tools</span>
+        {agent.total_tokens > 0 && <span>{formatCompactNumber(agent.total_tokens)} tok</span>}
+      </div>
+      <div class="op-agent-current" title={agent.current_activity || agent.last_summary}>
+        {agent.current_activity || agent.last_summary || "No displayable activity yet."}
+      </div>
+      {!compact && agent.latest_events.length > 0 && (
+        <div class="op-agent-events">
+          {agent.latest_events.slice(-3).map((event) => (
+            <div key={event.event_id} class="op-agent-event">
+              <span>{formatLogTime(event.observed_at || event.timestamp)}</span>
+              <span>{eventMessage(event)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function eventMessage(entry: {
+  kind: string;
+  tool_name?: string;
+  description?: string;
+  text?: string;
+  summary?: string;
+}): string {
+  if (entry.kind === "tool_use") {
+    return `${entry.tool_name ?? ""} ${entry.description ?? ""}`.trim();
+  }
+  if (entry.kind === "text") return entry.text ?? "";
+  if (entry.kind === "task_started") return `started ${entry.description ?? ""}`.trim();
+  if (entry.kind === "task_notification") return `done ${String(entry.summary ?? "")}`.trim();
+  return entry.kind;
+}
+
+function formatCompactNumber(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m`;
+  if (value >= 1_000) return `${Math.round(value / 100) / 10}k`;
+  return String(value);
 }
 
 function formatLogTime(ts: string): string {

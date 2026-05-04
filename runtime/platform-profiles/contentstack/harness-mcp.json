@@ -10,7 +10,7 @@
         "CONTENTSTACK_REGION": "${CONTENTSTACK_REGION:-NA}",
         "CONTENTSTACK_ENVIRONMENT": "${CONTENTSTACK_ENVIRONMENT:-development}",
         "CONTENTSTACK_BRANCH": "${CONTENTSTACK_BRANCH:-ai}",
-        "GROUPS": "all"
+        "GROUPS": "cma,cda"
       }
     }
   }

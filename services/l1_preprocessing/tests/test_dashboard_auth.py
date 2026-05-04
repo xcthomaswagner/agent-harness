@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -170,3 +171,40 @@ async def test_health_does_not_expose_secret_presence(
         assert leaky not in body, (
             f"/health must not expose {leaky!r} — secret-presence leak"
         )
+
+
+async def test_root_redirects_loopback_browser_to_authenticated_operator(
+) -> None:
+    """Bare localhost opens should land on the reloadable operator SPA."""
+    transport = ASGITransport(app=app, client=("127.0.0.1", 50000))
+    async with AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8000"
+    ) as ac:
+        with (
+            patch("main.settings.api_key", "root-secret"),
+            patch("main.settings.dashboard_allow_anonymous", False),
+        ):
+            resp = await ac.get("/", follow_redirects=False)
+
+    assert resp.status_code == 302
+    location = resp.headers["location"]
+    parsed = urlparse(location)
+    assert parsed.path == "/operator/"
+    assert parse_qs(parsed.query) == {"api_key": ["root-secret"]}
+
+
+async def test_root_redirect_does_not_inject_api_key_for_non_loopback(
+) -> None:
+    """Only local browser convenience opens get the configured key injected."""
+    transport = ASGITransport(app=app, client=("203.0.113.10", 50000))
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        with (
+            patch("main.settings.api_key", "root-secret"),
+            patch("main.settings.dashboard_allow_anonymous", False),
+        ):
+            resp = await ac.get("/", follow_redirects=False)
+
+    assert resp.status_code == 302
+    parsed = urlparse(resp.headers["location"])
+    assert parsed.path == "/operator/"
+    assert parse_qs(parsed.query) == {}

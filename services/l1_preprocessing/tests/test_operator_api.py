@@ -182,6 +182,19 @@ def test_shell_sets_no_store_cache_header(client: TestClient) -> None:
     assert r.headers.get("cache-control") == "no-store"
 
 
+def test_static_assets_set_no_store_cache_header(client: TestClient) -> None:
+    """The SPA bundle changes frequently during local operator work."""
+    for path in [
+        "/operator/operator.js",
+        "/operator/operator.css",
+        "/operator/tokens.css",
+        "/operator/build.json",
+    ]:
+        r = client.get(path)
+        assert r.status_code == 200
+        assert r.headers.get("cache-control") == "no-store"
+
+
 def test_missing_static_dir_returns_503(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
