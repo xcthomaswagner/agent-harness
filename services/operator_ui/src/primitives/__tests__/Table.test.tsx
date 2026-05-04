@@ -61,6 +61,36 @@ describe("Table", () => {
     expect(onRowClick).toHaveBeenCalledWith(rows[0]);
   });
 
+  it("does not call onRowClick when an interactive child is clicked", () => {
+    const rows: Row[] = [{ id: "T-1", name: "alpha", count: 4 }];
+    const onRowClick = vi.fn();
+    const linkColumns = [
+      {
+        key: "name",
+        label: "Name",
+        render: (r: Row) => <a href={`#${r.id}`}>{r.name}</a>,
+      },
+      {
+        key: "action",
+        label: "Action",
+        render: () => <button type="button">Open</button>,
+      },
+    ];
+    const { getByRole } = render(
+      <Table
+        columns={linkColumns}
+        rows={rows}
+        rowKey={(r) => r.id}
+        onRowClick={onRowClick}
+      />,
+    );
+
+    fireEvent.click(getByRole("link", { name: "alpha" }));
+    fireEvent.click(getByRole("button", { name: "Open" }));
+
+    expect(onRowClick).not.toHaveBeenCalled();
+  });
+
   it("renders an empty state when there are no rows", () => {
     const { getByText } = render(
       <Table columns={columns} rows={[]} rowKey={(r) => r.id} empty="Nothing here" />,

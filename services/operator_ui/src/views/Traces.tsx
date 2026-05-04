@@ -32,6 +32,10 @@ export function TracesView() {
   const [includeHidden, setIncludeHidden] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [cleanupBusy, setCleanupBusy] = useState(false);
+  const [notice, setNotice] = useState<{
+    tone: "ok" | "warn" | "err";
+    text: string;
+  } | null>(null);
   const feed = useFeed<TracesResponse>(
     `/api/operator/traces?limit=200&include_hidden=${includeHidden ? "true" : "false"}`,
   );
@@ -102,7 +106,7 @@ export function TracesView() {
           size="sm"
           disabled={cleanupBusy}
           onClick={() => {
-            void reconcileStaleRuns(feed.refresh, setCleanupBusy);
+            void reconcileStaleRuns(feed.refresh, setCleanupBusy, setNotice);
           }}
         >
           Reconcile stale
@@ -114,6 +118,11 @@ export function TracesView() {
       )}
       {feed.status === "error" && (
         <div class="op-error">Failed to load traces: {feed.error}</div>
+      )}
+      {notice && (
+        <div class={`op-action-notice is-${notice.tone}`} role="status">
+          {notice.text}
+        </div>
       )}
       {feed.data && (
         <Table<TraceSummary>
@@ -193,7 +202,7 @@ export function TracesView() {
                       disabled={busyId === t.id}
                       onClick={(e) => {
                         e.stopPropagation();
-                        void markTrace(t.id, "open", feed.refresh, setBusyId);
+                        void markTrace(t.id, "open", feed.refresh, setBusyId, setNotice);
                       }}
                     >
                       Restore
@@ -205,7 +214,13 @@ export function TracesView() {
                         disabled={busyId === t.id}
                         onClick={(e) => {
                           e.stopPropagation();
-                          void markTrace(t.id, "suppressed", feed.refresh, setBusyId);
+                          void markTrace(
+                            t.id,
+                            "suppressed",
+                            feed.refresh,
+                            setBusyId,
+                            setNotice,
+                          );
                         }}
                       >
                         Hide
@@ -216,7 +231,13 @@ export function TracesView() {
                         disabled={busyId === t.id}
                         onClick={(e) => {
                           e.stopPropagation();
-                          void markTrace(t.id, "misfire", feed.refresh, setBusyId);
+                          void markTrace(
+                            t.id,
+                            "misfire",
+                            feed.refresh,
+                            setBusyId,
+                            setNotice,
+                          );
                         }}
                       >
                         Misfire
@@ -227,7 +248,13 @@ export function TracesView() {
                           disabled={busyId === t.id}
                           onClick={(e) => {
                             e.stopPropagation();
-                            void markTrace(t.id, "open", feed.refresh, setBusyId);
+                            void markTrace(
+                              t.id,
+                              "open",
+                              feed.refresh,
+                              setBusyId,
+                              setNotice,
+                            );
                           }}
                         >
                           Mark Active
@@ -239,7 +266,13 @@ export function TracesView() {
                           disabled={busyId === t.id}
                           onClick={(e) => {
                             e.stopPropagation();
-                            void markTrace(t.id, "stale", feed.refresh, setBusyId);
+                            void markTrace(
+                              t.id,
+                              "stale",
+                              feed.refresh,
+                              setBusyId,
+                              setNotice,
+                            );
                           }}
                         >
                           Stale
@@ -262,6 +295,7 @@ async function markTrace(
   state: TraceLifecycleAction,
   refresh: () => void,
   setBusyId: (id: string | null) => void,
+  setNotice: (notice: { tone: "ok" | "warn" | "err"; text: string }) => void,
 ) {
   const fallbackReason =
     state === "misfire"
@@ -274,6 +308,7 @@ async function markTrace(
   const reason = window.prompt("Reason", fallbackReason) ?? "";
   if (!reason.trim()) return;
   setBusyId(ticketId);
+  setNotice({ tone: "warn", text: `Updating ${ticketId}...` });
   try {
     const res = await fetch(
       `/api/operator/traces/${encodeURIComponent(ticketId)}/state`,
@@ -291,8 +326,15 @@ async function markTrace(
         }),
       },
     );
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`${res.status}: ${readableError(text)}`);
+    }
+    setNotice({ tone: "ok", text: `Updated ${ticketId}.` });
     refresh();
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    setNotice({ tone: "err", text: `Failed to update ${ticketId}: ${detail}` });
   } finally {
     setBusyId(null);
   }
@@ -301,11 +343,13 @@ async function markTrace(
 async function reconcileStaleRuns(
   refresh: () => void,
   setCleanupBusy: (value: boolean) => void,
+  setNotice?: (notice: { tone: "ok" | "warn" | "err"; text: string }) => void,
 ) {
   const raw = window.prompt("Stale after hours", "168") ?? "";
   const staleAfterHours = Number.parseInt(raw.trim(), 10);
   if (!Number.isFinite(staleAfterHours) || staleAfterHours <= 0) return;
   setCleanupBusy(true);
+  setNotice?.({ tone: "warn", text: "Reconciling stale traces..." });
   try {
     const res = await fetch("/api/operator/dashboard/reconcile-stale", {
       method: "POST",
@@ -319,11 +363,33 @@ async function reconcileStaleRuns(
         dry_run: false,
       }),
     });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`${res.status}: ${readableError(text)}`);
+    }
     const data = await res.json();
-    window.alert(`Marked ${data.matched ?? 0} PR runs stale.`);
+    setNotice?.({
+      tone: "ok",
+      text: `Marked ${data.matched ?? 0} PR runs stale.`,
+    });
     refresh();
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    setNotice?.({ tone: "err", text: `Reconcile failed: ${detail}` });
   } finally {
     setCleanupBusy(false);
   }
+}
+
+function readableError(text: string): string {
+  try {
+    const value = JSON.parse(text);
+    if (value && typeof value === "object") {
+      const detail = (value as Record<string, unknown>)["detail"];
+      if (detail) return String(detail).slice(0, 300);
+    }
+  } catch {
+    // Fall through to plain text below.
+  }
+  return (text || "request failed").slice(0, 300);
 }

@@ -123,7 +123,14 @@ export function Table<Row>({
             <tr
               key={rowKey(row)}
               class={isLive?.(row) ? "is-live" : undefined}
-              onClick={onRowClick ? () => onRowClick(row) : undefined}
+              onClick={
+                onRowClick
+                  ? (event) => {
+                      if (isInteractiveTarget(event.target)) return;
+                      onRowClick(row);
+                    }
+                  : undefined
+              }
               style={onRowClick ? { cursor: "pointer" } : undefined}
             >
               {columns.map((col) => (
@@ -219,4 +226,13 @@ function textFromChildren(value: ComponentChildren): string {
     return textFromChildren(props?.children);
   }
   return "";
+}
+
+function isInteractiveTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return Boolean(
+    target.closest(
+      "a,button,input,select,textarea,label,summary,[role='button'],[role='link']",
+    ),
+  );
 }
