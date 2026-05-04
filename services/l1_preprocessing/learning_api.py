@@ -164,6 +164,7 @@ async def get_learning_candidates(
     client_profile: str | None = Query(default=None),
     detector_name: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     include_evidence: bool = Query(default=False),
 ) -> dict[str, Any]:
     """List lesson candidates with optional filters.
@@ -180,6 +181,7 @@ async def get_learning_candidates(
             client_profile=client_profile,
             detector_name=detector_name,
             limit=limit,
+            offset=offset,
         )
         # Batch the evidence lookup — a per-row ``list_lesson_evidence``
         # loop issued one SELECT per candidate, so include_evidence=true
@@ -197,7 +199,12 @@ async def get_learning_candidates(
                 ev = evidence_by_id.get(str(record["lesson_id"]), [])
                 record["evidence"] = [dict(e) for e in ev]
             out.append(record)
-        return {"candidates": out, "count": len(out)}
+        return {
+            "candidates": out,
+            "count": len(out),
+            "limit": limit,
+            "offset": offset,
+        }
 
 
 @router.get("/api/learning/candidates/{lesson_id}")

@@ -110,6 +110,37 @@ class TestPopulated:
         assert "xcsf30" in r.text
         assert "salesforce" in r.text
 
+    def test_pagination_links_preserve_filters(
+        self, client: TestClient
+    ) -> None:
+        old_id = _seed(pattern="p-old", scope_suffix="old")
+        new_id = _seed(pattern="p-new", scope_suffix="new")
+        with autonomy_conn() as conn:
+            conn.execute(
+                "UPDATE lesson_candidates SET detected_at = ? "
+                "WHERE lesson_id = ?",
+                ("2026-04-10T00:00:00+00:00", old_id),
+            )
+            conn.execute(
+                "UPDATE lesson_candidates SET detected_at = ? "
+                "WHERE lesson_id = ?",
+                ("2026-04-12T00:00:00+00:00", new_id),
+            )
+
+        r = client.get(
+            "/autonomy/learning?client_profile=xcsf30"
+            "&status=proposed&limit=1&offset=1"
+        )
+
+        assert r.status_code == 200
+        assert old_id in r.text
+        assert new_id not in r.text
+        assert "1 candidates shown (limit 1, offset 1)." in r.text
+        assert (
+            "/autonomy/learning?client_profile=xcsf30&amp;"
+            "status=proposed&amp;limit=1"
+        ) in r.text
+
     def test_proposed_delta_rendered_as_preformatted(
         self, client: TestClient
     ) -> None:

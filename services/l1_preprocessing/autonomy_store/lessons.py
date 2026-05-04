@@ -288,6 +288,7 @@ def list_lesson_candidates(
     client_profile: str | None = None,
     detector_name: str | None = None,
     limit: int = 100,
+    offset: int = 0,
 ) -> list[sqlite3.Row]:
     """List lesson_candidates with optional filters.
 
@@ -310,9 +311,9 @@ def list_lesson_candidates(
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     sql = (
         f"SELECT * FROM lesson_candidates {where} "
-        "ORDER BY detected_at DESC LIMIT ?"
+        "ORDER BY detected_at DESC LIMIT ? OFFSET ?"
     )
-    params.append(limit)
+    params.extend([limit, offset])
     return list(conn.execute(sql, params).fetchall())
 
 

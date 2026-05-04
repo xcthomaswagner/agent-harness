@@ -86,7 +86,12 @@ class TestListCandidates:
         r = client.get("/api/learning/candidates")
         assert r.status_code == 200
         body = r.json()
-        assert body == {"candidates": [], "count": 0}
+        assert body == {
+            "candidates": [],
+            "count": 0,
+            "limit": 100,
+            "offset": 0,
+        }
 
     def test_returns_candidates_with_parsed_delta(
         self, client: TestClient
@@ -100,6 +105,34 @@ class TestListCandidates:
         assert isinstance(candidate["proposed_delta"], dict)
         assert candidate["client_profile"] == "xcsf30"
         assert candidate["status"] == "proposed"
+
+    def test_paginates_candidates_by_offset(
+        self, client: TestClient
+    ) -> None:
+        old_id = _seed_candidate(scope="s-old", pattern="p-old")
+        new_id = _seed_candidate(scope="s-new", pattern="p-new")
+        from autonomy_store import autonomy_conn
+
+        with autonomy_conn() as conn:
+            conn.execute(
+                "UPDATE lesson_candidates SET detected_at = ? "
+                "WHERE lesson_id = ?",
+                ("2026-04-10T00:00:00+00:00", old_id),
+            )
+            conn.execute(
+                "UPDATE lesson_candidates SET detected_at = ? "
+                "WHERE lesson_id = ?",
+                ("2026-04-12T00:00:00+00:00", new_id),
+            )
+
+        r = client.get("/api/learning/candidates?limit=1&offset=1")
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["count"] == 1
+        assert body["limit"] == 1
+        assert body["offset"] == 1
+        assert body["candidates"][0]["lesson_id"] == old_id
 
     def test_filters_by_status(self, client: TestClient) -> None:
         _seed_candidate(scope="s1", pattern="p1")

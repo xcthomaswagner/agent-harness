@@ -139,11 +139,22 @@ def _mapped_badge(text: str, mapping: dict[str, str]) -> str:
     return _badge(text, mapping.get(text, "badge-secondary"))
 
 
-def _learning_href(*, client_profile: str | None, status: str | None) -> str:
+def _learning_href(
+    *,
+    client_profile: str | None,
+    status: str | None,
+    limit: int | None = None,
+    offset: int | None = None,
+) -> str:
     """Build a /autonomy/learning URL with filter params, skipping empties."""
     params = {
         k: v
-        for k, v in (("client_profile", client_profile), ("status", status))
+        for k, v in (
+            ("client_profile", client_profile),
+            ("status", status),
+            ("limit", limit),
+            ("offset", offset),
+        )
         if v
     }
     query = _urlencode(params) if params else ""
@@ -154,6 +165,7 @@ def _render_selector(
     profiles: list[str],
     current_profile: str | None,
     current_status: str | None,
+    limit: int,
 ) -> str:
     """Render profile + status filter selectors above the table.
 
@@ -165,14 +177,22 @@ def _render_selector(
     if not current_profile:
         parts.append(f'<span class="current">{_e(_PROFILE_ANY)}</span>')
     else:
-        href = _learning_href(client_profile=None, status=current_status)
+        href = _learning_href(
+            client_profile=None,
+            status=current_status,
+            limit=limit,
+            offset=0,
+        )
         parts.append(f'<a href="{_e(href)}">{_e(_PROFILE_ANY)}</a>')
     for profile in profiles:
         if profile == current_profile:
             parts.append(f'<span class="current">{_e(profile)}</span>')
         else:
             href = _learning_href(
-                client_profile=profile, status=current_status
+                client_profile=profile,
+                status=current_status,
+                limit=limit,
+                offset=0,
             )
             parts.append(f'<a href="{_e(href)}">{_e(profile)}</a>')
     parts.append("</div>")
@@ -191,8 +211,50 @@ def _render_selector(
         if s == current_status:
             parts.append(f'<span class="current">{_e(label)}</span>')
         else:
-            href = _learning_href(client_profile=current_profile, status=s)
+            href = _learning_href(
+                client_profile=current_profile,
+                status=s,
+                limit=limit,
+                offset=0,
+            )
             parts.append(f'<a href="{_e(href)}">{_e(label)}</a>')
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _render_pager(
+    *,
+    client_profile: str | None,
+    status: str | None,
+    limit: int,
+    offset: int,
+    shown: int,
+) -> str:
+    """Render simple offset pagination while preserving active filters."""
+    prev_offset = max(offset - limit, 0)
+    next_offset = offset + limit
+    parts: list[str] = ['<div class="selector"><strong>Page:</strong> ']
+    if offset > 0:
+        prev_href = _learning_href(
+            client_profile=client_profile,
+            status=status,
+            limit=limit,
+            offset=prev_offset,
+        )
+        parts.append(f'<a href="{_e(prev_href)}">previous</a>')
+    else:
+        parts.append('<span class="current">previous</span>')
+    parts.append(f'<span class="meta"> offset {offset}</span>')
+    if shown == limit:
+        next_href = _learning_href(
+            client_profile=client_profile,
+            status=status,
+            limit=limit,
+            offset=next_offset,
+        )
+        parts.append(f'<a href="{_e(next_href)}">next</a>')
+    else:
+        parts.append('<span class="current">next</span>')
     parts.append("</div>")
     return "".join(parts)
 
@@ -478,6 +540,7 @@ async def get_learning_dashboard(
     client_profile: str | None = Query(default=None),
     status: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
 ) -> HTMLResponse:
     """Triage view for the self-learning miner's lesson candidates."""
     with autonomy_conn() as conn:
@@ -487,6 +550,7 @@ async def get_learning_dashboard(
             status=status,
             client_profile=client_profile,
             limit=limit,
+            offset=offset,
         )
         lesson_ids = [str(c["lesson_id"]) for c in candidates]
         outcomes_by_id = list_latest_outcomes(conn, lesson_ids)
@@ -497,11 +561,18 @@ async def get_learning_dashboard(
             evidence = evidence_by_id.get(lid, [])
             outcome = outcomes_by_id.get(lid)
             enriched.append((c, evidence, outcome))
-    selector_html = _render_selector(profiles, client_profile, status)
+    selector_html = _render_selector(profiles, client_profile, status, limit)
+    pager_html = _render_pager(
+        client_profile=client_profile,
+        status=status,
+        limit=limit,
+        offset=offset,
+        shown=len(candidates),
+    )
     table_html = _render_candidate_table(enriched)
     summary = (
         f'<p class="meta">{len(candidates)} candidates shown '
-        f"(limit {limit}).</p>"
+        f"(limit {limit}, offset {offset}).</p>"
     )
     html_doc = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Self-learning</title>
@@ -515,6 +586,7 @@ async def get_learning_dashboard(
 </div>
 {selector_html}
 {summary}
+{pager_html}
 {table_html}
 </div></body></html>"""
     return HTMLResponse(content=html_doc)

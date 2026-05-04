@@ -487,6 +487,22 @@ class TestListLessonCandidates:
         rows = list_lesson_candidates(conn)
         assert [r["scope_key"] for r in rows] == ["s2", "s3", "s1"]
 
+    def test_offset_paginates_after_ordering(self, conn) -> None:
+        for scope, pattern, now in (
+            ("s1", "p1", "2026-04-10T00:00:00+00:00"),
+            ("s2", "p2", "2026-04-12T00:00:00+00:00"),
+            ("s3", "p3", "2026-04-11T00:00:00+00:00"),
+        ):
+            upsert_lesson_candidate(
+                conn,
+                _base_candidate(scope_key=scope, pattern_key=pattern),
+                now=now,
+            )
+
+        rows = list_lesson_candidates(conn, limit=1, offset=1)
+
+        assert [r["scope_key"] for r in rows] == ["s3"]
+
 
 class TestUpdateLessonStatus:
     def _seed(self, conn) -> str:
