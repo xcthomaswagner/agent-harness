@@ -49,9 +49,10 @@ class TestSpawnPrReview:
 class TestSpawnCiFix:
     def test_spawns_with_sonnet_model(self) -> None:
         spawner = SessionSpawner(repo_path="/tmp/repo")
+        ok_result = MagicMock(returncode=0, stderr="", stdout="")
 
         with patch("spawner.subprocess.Popen") as mock_popen, \
-             patch("spawner.subprocess.run"):
+             patch("spawner.subprocess.run", return_value=ok_result):
             result = spawner.spawn_ci_fix(
                 pr_number=42, branch="ai/PROJ-123", failure_logs="Error: test failed"
             )
@@ -65,9 +66,10 @@ class TestSpawnCiFix:
     def test_truncates_failure_logs_to_3000_chars(self) -> None:
         spawner = SessionSpawner(repo_path="/tmp/repo")
         long_logs = "E" * 10000
+        ok_result = MagicMock(returncode=0, stderr="", stdout="")
 
         with patch("spawner.subprocess.Popen") as mock_popen, \
-             patch("spawner.subprocess.run"):
+             patch("spawner.subprocess.run", return_value=ok_result):
             spawner.spawn_ci_fix(pr_number=1, branch="main", failure_logs=long_logs)
 
         cmd = mock_popen.call_args[0][0]
@@ -129,17 +131,17 @@ class TestSpawnErrorHandling:
 
         assert mock_popen.call_args[1]["cwd"] == "/tmp/my-repo"
 
-    def test_empty_repo_path_falls_back_to_env(self) -> None:
+    def test_empty_repo_path_fails_closed(self) -> None:
         spawner = SessionSpawner(repo_path="")
 
         with (
             patch("spawner.subprocess.Popen") as mock_popen,
             patch.dict("os.environ", {"CLIENT_REPO_PATH": ""}, clear=False),
         ):
-            spawner.spawn_pr_review(pr_number=1, pr_diff="", ticket_context="")
+            result = spawner.spawn_pr_review(pr_number=1, pr_diff="", ticket_context="")
 
-        # With no repo_path and no CLIENT_REPO_PATH, cwd should be None
-        assert mock_popen.call_args[1]["cwd"] is None
+        assert result is False
+        mock_popen.assert_not_called()
 
 
 # --- Branch-name argument-injection regression ---
@@ -216,6 +218,26 @@ class TestBranchNameValidation:
         assert fetch_cmd[-1] == "ai/SCRUM-16"
         assert "--" in pull_cmd
         assert pull_cmd[-1] == "ai/SCRUM-16"
+
+    def test_ensure_branch_current_repo_match_is_exact(
+        self, tmp_path
+    ) -> None:
+        """A similarly named repo must not satisfy expected_repo by substring."""
+        spawner = SessionSpawner(repo_path=str(tmp_path))
+        log = MagicMock()
+        remote = MagicMock(
+            returncode=0,
+            stdout="git@github.com:evil/acme-project.git\n",
+            stderr="",
+        )
+        with patch("spawner.subprocess.run", return_value=remote) as mock_run:
+            ok = spawner._ensure_branch_current(
+                "ai/SCRUM-16", log, expected_repo="acme/project"
+            )
+        assert ok is False
+        assert mock_run.call_count == 1
+        log.error.assert_called_once()
+        assert log.error.call_args[0][0] == "repo_mismatch"
 
 
 # --- Watchdog zombie-reap regression ---
@@ -396,6 +418,57 @@ class TestSpawnClaim:
         proceed.set()
         t1.join(timeout=5)
         assert results["first"] is True
+
+    def test_ci_fix_uses_claim_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CI-fix sessions must share the same per-PR claim protection
+        as PR review sessions.
+        """
+        monkeypatch.setattr(spawner, "LOGS_DIR", tmp_path)
+        (tmp_path / ".spawn-claims").mkdir(parents=True, exist_ok=True)
+        held = spawner._try_claim_pr_session(
+            tmp_path, "acme/project", 42, "ci-fix"
+        )
+        assert held is not None
+        s = SessionSpawner(repo_path=str(tmp_path))
+        try:
+            with patch("spawner.subprocess.Popen") as mock_popen:
+                result = s.spawn_ci_fix(
+                    pr_number=42,
+                    branch="ai/SCRUM-16",
+                    failure_logs="failed",
+                    repo="acme/project",
+                )
+            assert result is False
+            mock_popen.assert_not_called()
+        finally:
+            spawner._release_pr_claim(held)
+
+    def test_comment_response_uses_claim_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Comment-response sessions must not race each other on a PR."""
+        monkeypatch.setattr(spawner, "LOGS_DIR", tmp_path)
+        (tmp_path / ".spawn-claims").mkdir(parents=True, exist_ok=True)
+        held = spawner._try_claim_pr_session(
+            tmp_path, "acme/project", 42, "comment-response"
+        )
+        assert held is not None
+        s = SessionSpawner(repo_path=str(tmp_path))
+        try:
+            with patch("spawner.subprocess.Popen") as mock_popen:
+                result = s.spawn_comment_response(
+                    pr_number=42,
+                    comment_body="please fix",
+                    comment_author="reviewer",
+                    branch="ai/SCRUM-16",
+                    repo="acme/project",
+                )
+            assert result is False
+            mock_popen.assert_not_called()
+        finally:
+            spawner._release_pr_claim(held)
 
     def test_different_prs_spawn_in_parallel(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
