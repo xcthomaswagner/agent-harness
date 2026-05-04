@@ -132,6 +132,71 @@ describe("TicketsView", () => {
       expect(urls.some((url) => url.includes("include_hidden=true"))).toBe(true);
     });
   });
+
+  it("shows backend detail when trigger removal fails", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/operator/traces")) {
+        return jsonResponse({
+          traces: [
+            {
+              id: "HARN-2",
+              title: "Broken trigger",
+              status: "in-flight",
+              raw_status: "In Flight",
+              hidden: false,
+              lifecycle_state: "",
+              state_reason: "",
+              run_id: "trace-2",
+              phase: "implementing",
+              elapsed: "1m",
+              started_at: "2026-05-04T12:00:00+00:00",
+              pr_url: null,
+              pipeline_mode: "",
+              review_verdict: "",
+              qa_result: "",
+            },
+          ],
+          count: 1,
+          status_counts: {
+            all: 1,
+            "in-flight": 1,
+            stuck: 0,
+            queued: 0,
+            done: 0,
+            hidden: 0,
+          },
+          offset: 0,
+          limit: 200,
+          include_hidden: false,
+        });
+      }
+      if (url.endsWith("/agents")) return jsonResponse({ agents: [] });
+      if (url.endsWith("/activity-summary")) {
+        return jsonResponse({
+          ticket_id: "HARN-2",
+          summary: "",
+          raw_event_count: 0,
+          deduped_event_count: 0,
+          teammates: [],
+          highlights: [],
+          warnings: [],
+        });
+      }
+      if (url.endsWith("/trigger-label")) {
+        return jsonResponse({ detail: "Adapter token expired" }, { status: 500 });
+      }
+      return jsonResponse({}, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { findByText } = render(<TicketsView />);
+    fireEvent.click(await findByText("Remove Trigger"));
+
+    expect(await findByText(/Remove trigger failed: Adapter token expired/))
+      .toBeTruthy();
+  });
 });
 
 function jsonResponse(data: unknown, init?: ResponseInit): Response {

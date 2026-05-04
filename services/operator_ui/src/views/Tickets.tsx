@@ -16,6 +16,7 @@ import type {
   TracesResponse,
 } from "../api/types";
 import { href } from "../router";
+import { readableErrorText } from "../api/errors";
 
 type StatusFilter = TraceStatus | "all";
 type LiveFilter = "all" | "team_lead" | "dev" | "review" | "qa" | "other";
@@ -243,6 +244,7 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
     { clearOnUrlChange: true },
   );
   const [triggerState, setTriggerState] = useState<"idle" | "busy" | "done" | "error">("idle");
+  const [triggerError, setTriggerError] = useState("");
   const [liveFilter, setLiveFilter] = useState<LiveFilter>("all");
 
   const visibleEntries = useMemo(
@@ -256,12 +258,14 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
   // Reset button state when selected ticket changes
   useEffect(() => {
     setTriggerState("idle");
+    setTriggerError("");
     setLiveFilter("all");
   }, [row?.id]);
 
   const removeTrigger = useCallback(async () => {
     if (!row || triggerState === "busy") return;
     setTriggerState("busy");
+    setTriggerError("");
     try {
       const res = await fetch(
         `/api/operator/tickets/${encodeURIComponent(row.id)}/trigger-label`,
@@ -271,8 +275,15 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
           credentials: "same-origin",
         },
       );
-      setTriggerState(res.ok ? "done" : "error");
-    } catch {
+      if (!res.ok) {
+        const text = await res.text();
+        setTriggerError(readableErrorText(text));
+        setTriggerState("error");
+        return;
+      }
+      setTriggerState("done");
+    } catch (err) {
+      setTriggerError(err instanceof Error ? err.message : String(err));
       setTriggerState("error");
     }
   }, [row, triggerState]);
@@ -324,6 +335,11 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
           </Button>
         )}
       </div>
+      {triggerState === "error" && triggerError && (
+        <div class="op-action-notice is-err" role="status">
+          Remove trigger failed: {triggerError}
+        </div>
+      )}
 
       <TeamActivity agents={roster.data?.agents} state={roster.status} compact />
 
