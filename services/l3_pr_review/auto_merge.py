@@ -273,6 +273,21 @@ async def _evaluate_core(
             client_profile = profile_info.get("client_profile") or ""
             if not client_profile:
                 log.info("auto_merge_no_profile_skipped")
+                await _record_decision(
+                    l1_url_resolved,
+                    token_resolved,
+                    repo_full_name=repo_full_name,
+                    pr_number=pr_number,
+                    head_sha=head_sha,
+                    ticket_id=ticket_id,
+                    client_profile="",
+                    recommended_mode="unknown",
+                    ticket_type=ticket_type,
+                    decision="skipped",
+                    reason="no_profile_for_repo",
+                    gates={"profile_resolved": False},
+                    dry_run=not global_enabled,
+                )
                 _dedup_store.record_outcome(dedup, "skipped")
                 _outcome_recorded = True
                 return {"status": "skipped", "reason": "no_profile_for_repo"}
@@ -316,6 +331,25 @@ async def _evaluate_core(
                     "build_sha_stale",
                     caller_sha=head_sha,
                     pr_sha=pr_state_sha_raw,
+                )
+                await _record_decision(
+                    l1_url_resolved,
+                    token_resolved,
+                    repo_full_name=repo_full_name,
+                    pr_number=pr_number,
+                    head_sha=head_sha,
+                    ticket_id=ticket_id,
+                    client_profile=client_profile,
+                    recommended_mode=mode,
+                    ticket_type=ticket_type,
+                    decision="skipped",
+                    reason="build_sha_stale",
+                    gates={
+                        "build_sha_matches": False,
+                        "caller_sha": head_sha,
+                        "pr_head_sha": pr_state_sha_raw,
+                    },
+                    dry_run=not global_enabled,
                 )
                 _dedup_store.record_outcome(dedup, "skipped")
                 _outcome_recorded = True

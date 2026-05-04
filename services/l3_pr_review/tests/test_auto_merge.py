@@ -143,6 +143,12 @@ async def test_no_profile_skips(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert result["status"] == "skipped"
     assert result["reason"] == "no_profile_for_repo"
+    assert mocks["_record_decision"].call_count == 1
+    _args, kwargs = mocks["_record_decision"].call_args
+    assert kwargs["decision"] == "skipped"
+    assert kwargs["reason"] == "no_profile_for_repo"
+    assert kwargs["client_profile"] == ""
+    assert kwargs["gates"] == {"profile_resolved": False}
     # get_pr_state should not be called since we bail early
     assert mocks["get_pr_state"].call_count == 0
 
@@ -363,6 +369,36 @@ async def test_dedup_records_both_webhook_and_pr_state_sha(
         trigger_event="review_approved",
     )
     assert r3["status"] == "deduped"
+
+
+async def test_build_sha_stale_records_skipped_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pr_state = _good_pr_state()
+    pr_state["head_sha"] = "new_sha"
+    mocks = _patch_fetches(monkeypatch, pr_state=pr_state)
+
+    result = await evaluate_and_maybe_merge(
+        repo_full_name="acme/repo",
+        pr_number=1,
+        head_sha="old_sha",
+        ticket_id="T",
+        ticket_type="bug",
+        trigger_event="ci_passed",
+    )
+
+    assert result == {"status": "skipped", "reason": "build_sha_stale"}
+    assert mocks["merge_pr"].call_count == 0
+    assert mocks["_record_decision"].call_count == 1
+    _args, kwargs = mocks["_record_decision"].call_args
+    assert kwargs["decision"] == "skipped"
+    assert kwargs["reason"] == "build_sha_stale"
+    assert kwargs["head_sha"] == "old_sha"
+    assert kwargs["gates"] == {
+        "build_sha_matches": False,
+        "caller_sha": "old_sha",
+        "pr_head_sha": "new_sha",
+    }
 
 
 # --- ADO auto-merge ---
