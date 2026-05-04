@@ -167,6 +167,20 @@
   line-height: 1.35;
 }
 
+.op-table-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -4px 0 12px;
+}
+
+.op-muted {
+  color: var(--ink-500);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
 .op-action-notice {
   margin: -8px 0 18px;
   padding: 10px 12px;

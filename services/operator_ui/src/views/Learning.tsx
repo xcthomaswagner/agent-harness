@@ -6,6 +6,7 @@ import { useFeed } from "../hooks/useFeed";
 import type {
   LessonCandidate,
   LessonCandidatesResponse,
+  LessonCountsResponse,
   LessonStatus,
 } from "../api/types";
 import { fetchHeaders } from "../api/key";
@@ -56,17 +57,21 @@ const IMPACT_RANK: Record<LessonImpact, number> = {
   medium: 2,
   low: 3,
 };
+const PAGE_SIZE = 200;
 
 export function LearningView() {
   const [filter, setFilter] = useState<StatusFilter>("all");
+  const [offset, setOffset] = useState(0);
   const [pendingLessonId, setPendingLessonId] = useState<string | null>(null);
   const [notice, setNotice] = useState<{
     tone: "ok" | "warn" | "err";
     text: string;
   } | null>(null);
+  const statusQuery = filter === "all" ? "" : `&status=${encodeURIComponent(filter)}`;
   const feed = useFeed<LessonCandidatesResponse>(
-    "/api/learning/candidates?limit=200",
+    `/api/learning/candidates?limit=${PAGE_SIZE}&offset=${offset}${statusQuery}`,
   );
+  const lessonCounts = useFeed<LessonCountsResponse>("/api/operator/lessons/counts");
 
   const counts = useMemo(() => {
     const base: Record<StatusFilter, number> = {
@@ -78,23 +83,24 @@ export function LearningView() {
       snoozed: 0,
       rejected: 0,
     };
-    if (feed.data) {
-      base.all = feed.data.candidates.length;
-      for (const c of feed.data.candidates) {
-        // Only count filterable statuses; reverted/stale fall through
-        // to the "All" tally only.
-        if (c.status in base) base[c.status as StatusFilter] += 1;
-      }
+    if (lessonCounts.data) {
+      const raw = lessonCounts.data.counts;
+      base.proposed = raw.proposed;
+      base.draft_ready = raw.draft_ready;
+      base.approved = raw.approved;
+      base.applied = raw.applied;
+      base.snoozed = raw.snoozed;
+      base.rejected = raw.rejected;
+      base.all = Object.values(raw).reduce((sum, value) => sum + value, 0);
+    } else if (feed.data) {
+      base.all = feed.data.total ?? feed.data.count;
     }
     return base;
-  }, [feed.data]);
+  }, [feed.data, lessonCounts.data]);
 
   const filtered = useMemo(() => {
     if (!feed.data) return [];
-    const rows =
-      filter === "all"
-        ? feed.data.candidates
-        : feed.data.candidates.filter((c) => c.status === filter);
+    const rows = feed.data.candidates;
     return [...rows].sort((a, b) => {
       const ai = lessonImpact(a);
       const bi = lessonImpact(b);
@@ -104,7 +110,7 @@ export function LearningView() {
         a.pattern_key.localeCompare(b.pattern_key)
       );
     });
-  }, [feed.data, filter]);
+  }, [feed.data]);
 
   const awaitingTriage = counts.proposed + counts.draft_ready;
 
@@ -184,7 +190,10 @@ export function LearningView() {
             label={f.label}
             count={counts[f.value]}
             on={filter === f.value}
-            onClick={() => setFilter(f.value)}
+            onClick={() => {
+              setFilter(f.value);
+              setOffset(0);
+            }}
           />
         ))}
       </div>
@@ -201,16 +210,38 @@ export function LearningView() {
         <div class="op-error">Failed to load lessons: {feed.error}</div>
       )}
       {feed.data && (
-        <Table<LessonCandidate>
-          large
-          rowKey={(c) => c.lesson_id}
-          rows={filtered}
-          empty={
-            filter === "all"
-              ? "No lessons proposed yet."
-              : `No ${filter} lessons.`
-          }
-          columns={[
+        <>
+          <div class="op-table-tools">
+            <span class="op-muted">
+              Showing {feed.data.count} of {feed.data.total} · offset {feed.data.offset}
+            </span>
+            <div style={{ display: "flex", gap: "8px" }}>
+              <Button
+                size="sm"
+                disabled={offset === 0}
+                onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+              >
+                Previous
+              </Button>
+              <Button
+                size="sm"
+                disabled={offset + PAGE_SIZE >= feed.data.total}
+                onClick={() => setOffset(offset + PAGE_SIZE)}
+              >
+                Next
+              </Button>
+            </div>
+          </div>
+          <Table<LessonCandidate>
+            large
+            rowKey={(c) => c.lesson_id}
+            rows={filtered}
+            empty={
+              filter === "all"
+                ? "No lessons proposed yet."
+                : `No ${filter} lessons.`
+            }
+            columns={[
             {
               key: "id",
               label: "Lesson",
@@ -293,8 +324,9 @@ export function LearningView() {
                 />
               ),
             },
-          ]}
-        />
+            ]}
+          />
+        </>
       )}
     </>
   );

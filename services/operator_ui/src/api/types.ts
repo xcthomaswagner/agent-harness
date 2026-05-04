@@ -193,6 +193,9 @@ export interface LessonCandidate {
 export interface LessonCandidatesResponse {
   candidates: LessonCandidate[];
   count: number;
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 // PR drilldown — matches operator_api_data.get_pr_detail

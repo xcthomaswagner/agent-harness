@@ -40,6 +40,7 @@ import autonomy_ingest
 from autonomy_ingest import _guard_admin_request
 from autonomy_store import (
     autonomy_conn,
+    count_lesson_candidates,
     get_latest_outcome,
     get_lesson_by_id,
     list_evidence_for_lessons,
@@ -183,6 +184,12 @@ async def get_learning_candidates(
             limit=limit,
             offset=offset,
         )
+        total = count_lesson_candidates(
+            conn,
+            status=status,
+            client_profile=client_profile,
+            detector_name=detector_name,
+        )
         # Batch the evidence lookup — a per-row ``list_lesson_evidence``
         # loop issued one SELECT per candidate, so include_evidence=true
         # on limit=500 was up to 500 SQL round-trips. list_evidence_for_lessons
@@ -202,6 +209,7 @@ async def get_learning_candidates(
         return {
             "candidates": out,
             "count": len(out),
+            "total": total,
             "limit": limit,
             "offset": offset,
         }

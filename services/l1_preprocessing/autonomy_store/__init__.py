@@ -65,6 +65,7 @@ from .lessons import LESSON_REASON_MAX_LEN as LESSON_REASON_MAX_LEN
 from .lessons import LESSON_SNIPPET_MAX_LEN as LESSON_SNIPPET_MAX_LEN
 from .lessons import LessonCandidateUpsert as LessonCandidateUpsert
 from .lessons import LessonOutcomeInsert as LessonOutcomeInsert
+from .lessons import count_lesson_candidates as count_lesson_candidates
 from .lessons import get_latest_outcome as get_latest_outcome
 from .lessons import get_lesson_by_id as get_lesson_by_id
 from .lessons import insert_lesson_evidence as insert_lesson_evidence

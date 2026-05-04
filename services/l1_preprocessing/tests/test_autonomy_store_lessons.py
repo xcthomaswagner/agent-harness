@@ -8,6 +8,7 @@ from autonomy_store import (
     LESSON_EVIDENCE_CAP,
     LessonCandidateUpsert,
     PrRunUpsert,
+    count_lesson_candidates,
     get_lesson_by_id,
     insert_lesson_evidence,
     list_lesson_candidates,
@@ -502,6 +503,36 @@ class TestListLessonCandidates:
         rows = list_lesson_candidates(conn, limit=1, offset=1)
 
         assert [r["scope_key"] for r in rows] == ["s3"]
+
+    def test_count_uses_same_filters_without_limit(self, conn) -> None:
+        upsert_lesson_candidate(
+            conn,
+            _base_candidate(
+                scope_key="s1",
+                pattern_key="p1",
+                client_profile="a",
+            ),
+        )
+        upsert_lesson_candidate(
+            conn,
+            _base_candidate(
+                scope_key="s2",
+                pattern_key="p2",
+                client_profile="a",
+            ),
+        )
+        upsert_lesson_candidate(
+            conn,
+            _base_candidate(
+                scope_key="s3",
+                pattern_key="p3",
+                client_profile="b",
+            ),
+        )
+
+        assert count_lesson_candidates(conn) == 3
+        assert count_lesson_candidates(conn, client_profile="a") == 2
+        assert count_lesson_candidates(conn, client_profile="missing") == 0
 
 
 class TestUpdateLessonStatus:

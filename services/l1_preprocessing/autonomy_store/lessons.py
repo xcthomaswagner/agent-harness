@@ -317,6 +317,33 @@ def list_lesson_candidates(
     return list(conn.execute(sql, params).fetchall())
 
 
+def count_lesson_candidates(
+    conn: sqlite3.Connection,
+    *,
+    status: str | None = None,
+    client_profile: str | None = None,
+    detector_name: str | None = None,
+) -> int:
+    """Count lesson_candidates with the same optional filters as list."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if status is not None:
+        clauses.append("status = ?")
+        params.append(status)
+    if client_profile is not None:
+        clauses.append("client_profile = ?")
+        params.append(client_profile)
+    if detector_name is not None:
+        clauses.append("detector_name = ?")
+        params.append(detector_name)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    row = conn.execute(
+        f"SELECT COUNT(*) AS n FROM lesson_candidates {where}",
+        params,
+    ).fetchone()
+    return int(row["n"] if row else 0)
+
+
 # Allowed (current -> {next}) transitions. Linear approval flow
 # (proposed -> draft_ready -> approved -> applied) with snooze
 # cycles and rejected/reverted/stale as terminal states.

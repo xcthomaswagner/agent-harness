@@ -89,6 +89,7 @@ class TestListCandidates:
         assert body == {
             "candidates": [],
             "count": 0,
+            "total": 0,
             "limit": 100,
             "offset": 0,
         }
@@ -130,6 +131,7 @@ class TestListCandidates:
         assert r.status_code == 200
         body = r.json()
         assert body["count"] == 1
+        assert body["total"] == 2
         assert body["limit"] == 1
         assert body["offset"] == 1
         assert body["candidates"][0]["lesson_id"] == old_id
