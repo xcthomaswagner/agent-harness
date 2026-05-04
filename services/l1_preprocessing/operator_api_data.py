@@ -896,12 +896,25 @@ def get_traces(
     ]
     if not include_hidden:
         shaped = [t for t in shaped if not t["hidden"]]
+    status_counts = {
+        "all": len(shaped),
+        "in-flight": 0,
+        "stuck": 0,
+        "queued": 0,
+        "done": 0,
+        "hidden": 0,
+    }
+    for trace in shaped:
+        trace_status = str(trace.get("status") or "")
+        if trace_status in status_counts:
+            status_counts[trace_status] += 1
     if status is not None:
         shaped = [t for t in shaped if t["status"] == status]
     page = shaped[offset: offset + capped_limit]
     return {
         "traces": page,
         "count": len(shaped),
+        "status_counts": status_counts,
         "offset": offset,
         "limit": capped_limit,
         "include_hidden": include_hidden,

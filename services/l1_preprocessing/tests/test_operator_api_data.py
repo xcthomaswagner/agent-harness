@@ -744,6 +744,14 @@ def test_traces_empty(traces_client: TestClient) -> None:
     assert data == {
         "traces": [],
         "count": 0,
+        "status_counts": {
+            "all": 0,
+            "in-flight": 0,
+            "stuck": 0,
+            "queued": 0,
+            "done": 0,
+            "hidden": 0,
+        },
         "offset": 0,
         "limit": 100,
         "include_hidden": False,
@@ -858,6 +866,14 @@ def test_traces_status_filter_applies_before_pagination(
     c = TestClient(_mk_app())
     body = c.get("/api/operator/traces?status=done&limit=1").json()
     assert body["count"] == 1
+    assert body["status_counts"] == {
+        "all": 2,
+        "in-flight": 0,
+        "stuck": 0,
+        "queued": 1,
+        "done": 1,
+        "hidden": 0,
+    }
     assert [r["id"] for r in body["traces"]] == ["HARN-DONE"]
 
 

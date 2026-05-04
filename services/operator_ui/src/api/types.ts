@@ -95,6 +95,7 @@ export interface TraceSummary {
 export interface TracesResponse {
   traces: TraceSummary[];
   count: number;
+  status_counts: Record<TraceStatus | "all", number>;
   offset: number;
   limit: number;
   include_hidden: boolean;

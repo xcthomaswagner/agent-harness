@@ -9,6 +9,7 @@ import { href, navigate } from "../router";
 
 type StatusFilter = TraceStatus | "all";
 type TraceLifecycleAction = "suppressed" | "misfire" | "stale" | "open";
+const PAGE_SIZE = 200;
 
 const FILTERS: readonly { label: string; value: StatusFilter }[] = [
   { label: "All", value: "all" },
@@ -29,6 +30,7 @@ const STATUS_TONE: Record<TraceStatus, PillTone> = {
 
 export function TracesView() {
   const [filter, setFilter] = useState<StatusFilter>("all");
+  const [offset, setOffset] = useState(0);
   const [includeHidden, setIncludeHidden] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [cleanupBusy, setCleanupBusy] = useState(false);
@@ -36,15 +38,10 @@ export function TracesView() {
     tone: "ok" | "warn" | "err";
     text: string;
   } | null>(null);
+  const statusQuery = filter === "all" ? "" : `&status=${encodeURIComponent(filter)}`;
   const feed = useFeed<TracesResponse>(
-    `/api/operator/traces?limit=200&include_hidden=${includeHidden ? "true" : "false"}`,
+    `/api/operator/traces?limit=${PAGE_SIZE}&offset=${offset}&include_hidden=${includeHidden ? "true" : "false"}${statusQuery}`,
   );
-
-  const filtered = useMemo(() => {
-    if (!feed.data) return [];
-    if (filter === "all") return feed.data.traces;
-    return feed.data.traces.filter((t) => t.status === filter);
-  }, [feed.data, filter]);
 
   const counts = useMemo(() => {
     const base: Record<StatusFilter, number> = {
@@ -56,10 +53,7 @@ export function TracesView() {
       hidden: 0,
     };
     if (!feed.data) return base;
-    base.all = feed.data.traces.length;
-    for (const t of feed.data.traces) {
-      base[t.status] += 1;
-    }
+    Object.assign(base, feed.data.status_counts);
     return base;
   }, [feed.data]);
 
@@ -88,7 +82,10 @@ export function TracesView() {
             label={f.label}
             count={counts[f.value]}
             on={filter === f.value}
-            onClick={() => setFilter(f.value)}
+            onClick={() => {
+              setFilter(f.value);
+              setOffset(0);
+            }}
           />
           )
         ))}
@@ -98,6 +95,7 @@ export function TracesView() {
           onClick={() => {
             setIncludeHidden((v) => !v);
             if (filter === "hidden") setFilter("all");
+            setOffset(0);
           }}
         >
           {includeHidden ? "Hide hidden" : "Show hidden"}
@@ -125,10 +123,33 @@ export function TracesView() {
         </div>
       )}
       {feed.data && (
+        <>
+        <div class="op-table-tools">
+          <span class="op-muted">
+            Showing {feed.data.traces.length} of {feed.data.count} · offset{" "}
+            {feed.data.offset}
+          </span>
+          <div style={{ display: "flex", gap: "8px" }}>
+            <Button
+              size="sm"
+              disabled={offset === 0}
+              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+            >
+              Previous
+            </Button>
+            <Button
+              size="sm"
+              disabled={offset + PAGE_SIZE >= feed.data.count}
+              onClick={() => setOffset(offset + PAGE_SIZE)}
+            >
+              Next
+            </Button>
+          </div>
+        </div>
         <Table<TraceSummary>
           large
           rowKey={(t) => t.id}
-          rows={filtered}
+          rows={feed.data.traces}
           isLive={(t) => t.status === "in-flight"}
           onRowClick={(t) => navigate(`/traces/${encodeURIComponent(t.id)}`)}
           empty={
@@ -285,6 +306,7 @@ export function TracesView() {
             },
           ]}
         />
+        </>
       )}
     </>
   );
