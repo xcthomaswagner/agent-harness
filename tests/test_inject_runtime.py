@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import subprocess
 import sys
@@ -11,6 +12,14 @@ import tempfile
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "inject_runtime.py"
+
+
+def _load_script_module():
+    spec = importlib.util.spec_from_file_location("inject_runtime_module", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def run_inject(
@@ -275,6 +284,28 @@ def test_runtime_version_stamp_written() -> None:
         stamp = client / ".harness" / "runtime-version"
         assert stamp.exists(), "runtime-version stamp not written"
         assert stamp.read_text() == runtime_version
+
+
+def test_invalid_mcp_json_reports_config_path(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """Malformed MCP JSON should fail with an actionable config error, not a traceback."""
+    module = _load_script_module()
+    bad_json = tmp_path / "harness-mcp.json"
+    bad_json.write_text('{"mcpServers":')
+
+    try:
+        module._read_json_file(bad_json, "base MCP")
+    except SystemExit as exc:
+        assert exc.code == 1
+    else:
+        raise AssertionError("Expected SystemExit for malformed JSON")
+
+    output = capsys.readouterr().out
+    assert "Invalid base MCP JSON" in output
+    assert str(bad_json) in output
+    assert "line 1" in output
 
 
 if __name__ == "__main__":

@@ -92,6 +92,20 @@ def expand_env_vars(value: Any) -> Any:
     return value
 
 
+def _read_json_file(path: Path, label: str) -> dict[str, Any]:
+    """Read a JSON object and emit a concise config error on malformed input."""
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        print(f"Error: Invalid {label} JSON in {path}: line {exc.lineno}, column {exc.colno}: {exc.msg}")
+        sys.exit(1)
+
+    if not isinstance(payload, dict):
+        print(f"Error: Invalid {label} JSON in {path}: expected a top-level object")
+        sys.exit(1)
+    return payload
+
+
 def inject(target_dir: Path, platform_profile: str = "") -> None:
     """Inject harness runtime files into the target directory."""
     if not target_dir.is_dir():
@@ -201,13 +215,13 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
     # --- Step 5: Generate .mcp.json (base + optional platform profile MCP merge) ---
     mcp_template = RUNTIME_DIR / "harness-mcp.json"
     if mcp_template.exists():
-        base_mcp = json.loads(mcp_template.read_text())
+        base_mcp = _read_json_file(mcp_template, "base MCP")
         base_servers = base_mcp.setdefault("mcpServers", {})
 
         if platform_profile:
             profile_mcp_path = RUNTIME_DIR / "platform-profiles" / platform_profile / "harness-mcp.json"
             if profile_mcp_path.exists():
-                profile_mcp = json.loads(profile_mcp_path.read_text())
+                profile_mcp = _read_json_file(profile_mcp_path, f"{platform_profile} MCP")
                 profile_servers = profile_mcp.get("mcpServers", {})
                 # Profile keys override base on collision
                 for server_name, server_cfg in profile_servers.items():

@@ -60,6 +60,35 @@ class TestParsePorcelainOutput:
 
 
 class TestIdentifiesStaleWorktrees:
+    def test_rejects_non_positive_max_age(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A non-positive TTL must not evaluate worktrees for removal."""
+        client_repo = tmp_path / "repo"
+        client_repo.mkdir()
+        (client_repo / ".git").mkdir()
+
+        with patch("cleanup_stale_worktrees.subprocess.run") as run:
+            with patch(
+                "sys.argv",
+                [
+                    "prog",
+                    "--client-repo",
+                    str(client_repo),
+                    "--max-age-hours",
+                    "0",
+                    "--dry-run",
+                ],
+            ):
+                with pytest.raises(SystemExit) as exc:
+                    main()
+
+        assert exc.value.code == 1
+        assert "--max-age-hours must be a positive integer" in capsys.readouterr().out
+        run.assert_not_called()
+
     def test_identifies_stale_worktrees(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """Stale worktrees (age > max) are identified in dry-run output."""
         client_repo = tmp_path / "repo"

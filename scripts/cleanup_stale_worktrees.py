@@ -118,7 +118,7 @@ def main() -> None:
         "--max-age-hours",
         type=int,
         default=48,
-        help="Maximum age in hours before a worktree is considered stale (default: 48)",
+        help="Positive maximum age in hours before a worktree is considered stale (default: 48)",
     )
     parser.add_argument(
         "--dry-run",
@@ -130,6 +130,10 @@ def main() -> None:
     client_repo = Path(args.client_repo).resolve()
     max_age_hours = args.max_age_hours
     dry_run = args.dry_run
+
+    if max_age_hours < 1:
+        print("[cleanup] Error: --max-age-hours must be a positive integer")
+        sys.exit(1)
 
     if not (client_repo / ".git").exists() and not (client_repo / ".git").is_file():
         print(f"[cleanup] Error: Not a git repository: {client_repo}")
