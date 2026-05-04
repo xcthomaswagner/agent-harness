@@ -1575,6 +1575,61 @@ def test_trace_detail_maps_runtime_phase_names_to_timeline(
     assert all(p["state"] == "done" for p in phases.values())
 
 
+def test_trace_detail_keeps_manual_l1_prelude_in_timeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir(parents=True)
+    import tracer as tracer_module
+
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    ticket_id = "HARN-MANUAL"
+    trace_id = "trace-manual"
+    path = logs_dir / f"{ticket_id}.jsonl"
+    rows = [
+        ("operator", "manual_ticket_submitted", "Manual ticket submitted"),
+        ("pipeline", "processing_started", "Processing started"),
+        ("analyst", "analyst_completed", "Analyst completed"),
+        ("pipeline", "l2_dispatched", "L2 dispatched"),
+        ("pipeline", "processing_completed", "Processing completed"),
+        ("pipeline", "Pipeline started", "Team lead started"),
+        ("implementation", "Implementation complete", "Implementation complete"),
+    ]
+    with path.open("w") as f:
+        for idx, (phase, event, message) in enumerate(rows):
+            f.write(
+                json.dumps(
+                    {
+                        "ticket_id": ticket_id,
+                        "trace_id": trace_id,
+                        "phase": phase,
+                        "event": event,
+                        "message": message,
+                        "timestamp": f"2026-04-18T12:0{idx}:00+00:00",
+                        "source": "agent" if idx >= 5 else "pipeline",
+                    }
+                )
+                + "\n"
+            )
+
+    c = TestClient(_mk_app())
+    data = c.get(f"/api/operator/traces/{ticket_id}").json()
+    phases = {p["key"]: p for p in data["phases"]}
+    assert phases["planning"]["event_count"] >= 1
+    assert phases["scaffolding"]["event_count"] >= 1
+    assert phases["implementing"]["event_count"] >= 1
+
+
 # ---------- /api/operator/autonomy/{profile} ----------
 
 
@@ -1856,6 +1911,86 @@ def test_agents_handles_naive_fallback_timestamp(
     assert r.json()["agents"][0]["last_at"] == "2026-05-04T12:00:00+00:00"
 
 
+def test_agents_extracts_embedded_claude_subagents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    worktree = tmp_path / "wt" / "HARN-SUBAGENTS"
+    stream = worktree / ".harness" / "logs" / "session-stream.jsonl"
+    stream.parent.mkdir(parents=True)
+    stream.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "timestamp": "2026-05-04T12:00:00+00:00",
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "toolu_dev",
+                                    "name": "Agent",
+                                    "input": {
+                                        "subagent_type": "developer",
+                                        "description": "Implement hero",
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-05-04T12:00:01+00:00",
+                        "type": "system",
+                        "subtype": "task_started",
+                        "tool_use_id": "toolu_dev",
+                        "description": "Developer implementing hero",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-05-04T12:00:02+00:00",
+                        "type": "assistant",
+                        "parent_tool_use_id": "toolu_dev",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "name": "Edit",
+                                    "input": {"file_path": "src/Hero.tsx"},
+                                }
+                            ]
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    import operator_api_data as oad
+
+    monkeypatch.setattr(oad, "_worktree_root_for_ticket", lambda _tid: worktree)
+
+    c = TestClient(_mk_app())
+    data = c.get("/api/operator/tickets/HARN-SUBAGENTS/agents").json()
+    agents = {agent["teammate"]: agent for agent in data["agents"]}
+    assert agents["team-lead"]["role"] == "team_lead"
+    assert agents["developer"]["role"] == "developer"
+    assert agents["developer"]["current_activity"] == "Edit: src/Hero.tsx"
+
+
 def test_activity_summary_returns_deduped_ticket_activity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1896,6 +2031,70 @@ def test_activity_summary_returns_deduped_ticket_activity(
     assert data["raw_event_count"] == 2
     assert data["deduped_event_count"] == 1
     assert data["teammates"][0]["actions"][0]["count"] == 2
+
+
+def test_activity_summary_extracts_embedded_subagent_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    worktree = tmp_path / "wt" / "HARN-SUBSUMMARY"
+    stream = worktree / ".harness" / "logs" / "session-stream.jsonl"
+    stream.parent.mkdir(parents=True)
+    stream.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "toolu_qa",
+                                    "name": "Agent",
+                                    "input": {"subagent_type": "qa"},
+                                }
+                            ]
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "parent_tool_use_id": "toolu_qa",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "QA found the missing Tailwind dependency.",
+                                }
+                            ]
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    import operator_api_data as oad
+
+    monkeypatch.setattr(oad, "_worktree_root_for_ticket", lambda _tid: worktree)
+
+    c = TestClient(_mk_app())
+    data = c.get("/api/operator/tickets/HARN-SUBSUMMARY/activity-summary").json()
+    teammates = {teammate["role"] for teammate in data["teammates"]}
+    assert "qa" in teammates
+    assert any("missing Tailwind" in item["message"] for item in data["highlights"])
 
 
 def test_activity_summary_includes_finished_phase_artifacts(

@@ -57,7 +57,7 @@ from live_stream import (
     _find_session_streams,
     _worktree_root_for_ticket,
     collect_finished_activity,
-    summarize_session_stream,
+    summarize_stream_teammates,
     summarize_ticket_activity,
 )
 from tracer import (
@@ -1087,6 +1087,42 @@ def _canonical_phase(phase: str) -> str | None:
     return None
 
 
+_L1_PRELUDE_EVENTS = {
+    "manual_ticket_submitted",
+    "webhook_received",
+    "processing_started",
+    "analyst_started",
+    "analyst_completed",
+    "l2_dispatched",
+    "processing_completed",
+}
+
+
+def _timeline_start_idx(entries: list[dict[str, Any]], run_start_idx: int) -> int:
+    """Include the same-run L1 prelude when rendering phase dots.
+
+    Manual tickets often produce analyst/pipeline events before the
+    agent-written run start. The detail timeline should show that
+    planning/scaffolding work instead of resetting those buckets to
+    pending as soon as the team lead starts writing its own events.
+    """
+    if run_start_idx <= 0 or run_start_idx >= len(entries):
+        return run_start_idx
+    run_trace = str(entries[run_start_idx].get("trace_id") or "")
+    idx = run_start_idx
+    while idx > 0:
+        candidate = entries[idx - 1]
+        if run_trace and str(candidate.get("trace_id") or "") not in {"", run_trace}:
+            break
+        event = str(candidate.get("event") or "")
+        phase = _canonical_phase(str(candidate.get("phase") or ""))
+        if event in _L1_PRELUDE_EVENTS or phase in {"planning", "scaffolding"}:
+            idx -= 1
+            continue
+        break
+    return idx
+
+
 def _shape_trace_detail(
     ticket_id: str,
     entries: list[dict[str, Any]],
@@ -1108,6 +1144,7 @@ def _shape_trace_detail(
 
     run_start_idx = find_run_start_idx(entries)
     run_entries = entries[run_start_idx:]
+    timeline_entries = entries[_timeline_start_idx(entries, run_start_idx):]
     metadata = _extract_trace_metadata_local(entries)
     raw_status = metadata["status"]
     bucket = _normalize_trace_status(raw_status)
@@ -1152,7 +1189,7 @@ def _shape_trace_detail(
             continue
         per_bucket_duration[canon] += float(d.get("duration_seconds") or 0.0)
         per_bucket_events[canon] += 1
-    for e in run_entries:
+    for e in timeline_entries:
         canon = _canonical_phase(str(e.get("phase", "")))
         if canon:
             per_bucket_events[canon] += 1
@@ -1694,17 +1731,18 @@ def get_ticket_agents(ticket_id: str) -> dict[str, Any]:
     streams = _find_session_streams(worktree)
     agents: list[dict[str, Any]] = []
     for teammate, path in streams:
-        summary = summarize_session_stream(teammate, path)
-        last = _parse_roster_time(summary.get("last_at"))
-        if last is not None:
-            summary["last_at"] = last.isoformat()
-        # Fall back to the older raw-tail timestamp path for streams
-        # that have timestamps but no displayable assistant/system rows.
-        if last is None:
-            last = _last_event_time(path)
-            summary["last_at"] = last.isoformat() if last else None
-        summary["state"] = _roster_state(last)
-        agents.append(summary)
+        for summary in summarize_stream_teammates(teammate, path):
+            last = _parse_roster_time(summary.get("last_at"))
+            if last is not None:
+                summary["last_at"] = last.isoformat()
+            # Fall back to the older raw-tail timestamp path for physical
+            # streams that have timestamps but no displayable rows. Virtual
+            # subagents without rows should stay timestamp-less.
+            if last is None and summary.get("teammate") == teammate:
+                last = _last_event_time(path)
+                summary["last_at"] = last.isoformat() if last else None
+            summary["state"] = _roster_state(last)
+            agents.append(summary)
     return {"agents": agents}
 
 

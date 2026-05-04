@@ -6,6 +6,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import tempfile
+import json
 from pathlib import Path
 
 import pytest
@@ -112,6 +113,33 @@ def test_archives_untracked_files_then_removes() -> None:
             archive_target / "untracked" / "notes" / "scratch.txt"
         ).read_text() == "important scratch\n"
         assert not wt_dir.exists()
+
+
+def test_dirty_manifest_classifies_harness_and_generated_artifacts() -> None:
+    """Archived dirty work includes operator-friendly artifact categories."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        client_repo, wt_dir = _init_repo_and_worktree(tmp_path)
+
+        (wt_dir / "CLAUDE.md").write_text("runtime\n<!-- harness-injected -->\n")
+        (wt_dir / "next-env.d.ts").write_text("/// <reference types=\"next\" />\n")
+        (wt_dir / "src").mkdir()
+        (wt_dir / "src" / "feature.ts").write_text("export const x = 1\n")
+        archive_dir = tmp_path / "archive"
+
+        safe_remove_worktree(
+            wt_dir,
+            archive_dir=archive_dir,
+            client_repo=client_repo,
+        )
+
+        manifest = json.loads(
+            (archive_dir / wt_dir.name / "dirty-worktree-manifest.json").read_text()
+        )
+        categories = {item["path"]: item["category"] for item in manifest["items"]}
+        assert categories["CLAUDE.md"] == "harness_injected"
+        assert categories["next-env.d.ts"] == "generated_artifact"
+        assert categories["src/feature.ts"] == "uncommitted_source"
 
 
 def test_allows_nested_ai_branch_worktree_paths() -> None:

@@ -152,6 +152,183 @@ def _preflight_platform_profile(profile_name: str) -> None:
         sys.exit(1)
 
 
+def _read_package_json(worktree_dir: Path) -> dict[str, object]:
+    try:
+        data = json.loads((worktree_dir / "package.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _package_deps(package_json: dict[str, object]) -> dict[str, str]:
+    deps: dict[str, str] = {}
+    for key in ("dependencies", "devDependencies"):
+        value = package_json.get(key)
+        if isinstance(value, dict):
+            deps.update({str(k): str(v) for k, v in value.items()})
+    return deps
+
+
+def _has_any(worktree_dir: Path, patterns: tuple[str, ...]) -> bool:
+    return any(next(worktree_dir.glob(pattern), None) is not None for pattern in patterns)
+
+
+def _tracked_files(worktree_dir: Path) -> set[str]:
+    result = subprocess.run(
+        ["git", "-C", str(worktree_dir), "ls-files"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return set()
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def _client_readiness_report(worktree_dir: Path, profile: object | None) -> dict[str, object]:
+    """Detect repo-level constraints that should shape agent prompts."""
+    package_json = _read_package_json(worktree_dir)
+    deps = _package_deps(package_json)
+    scripts = package_json.get("scripts") if isinstance(package_json, dict) else {}
+    scripts = scripts if isinstance(scripts, dict) else {}
+    tracked = _tracked_files(worktree_dir)
+    warnings: list[dict[str, str]] = []
+
+    def warn(
+        check_id: str,
+        area: str,
+        message: str,
+        recommendation: str,
+        severity: str = "warning",
+    ) -> None:
+        warnings.append(
+            {
+                "id": check_id,
+                "area": area,
+                "severity": severity,
+                "message": message,
+                "recommendation": recommendation,
+            }
+        )
+
+    is_next = "next" in deps or (worktree_dir / "next.config.js").exists() or (
+        worktree_dir / "next.config.mjs"
+    ).exists()
+    claude_text = ""
+    try:
+        claude_text = (worktree_dir / "CLAUDE.md").read_text(errors="replace")
+    except OSError:
+        pass
+    tailwind_present = "tailwindcss" in deps or _has_any(
+        worktree_dir,
+        ("tailwind.config.*", "postcss.config.*"),
+    )
+    if is_next and "tailwind" in claude_text.lower() and not tailwind_present:
+        warn(
+            "next_tailwind_not_configured",
+            "frontend",
+            "Runtime guidance references Tailwind, but this Next.js repo does not appear to have Tailwind configured.",
+            "Use the repo's existing CSS approach, or explicitly add/configure Tailwind before using Tailwind classes.",
+        )
+
+    lint_script = str(scripts.get("lint") or "")
+    has_eslint_config = _has_any(
+        worktree_dir,
+        (".eslintrc", ".eslintrc.*", "eslint.config.*"),
+    )
+    if is_next and "next lint" in lint_script and not has_eslint_config:
+        warn(
+            "next_lint_can_prompt",
+            "validation",
+            "The lint script uses next lint without an existing ESLint config, which can become interactive.",
+            "Prefer a non-interactive lint/build/test command, or add a committed ESLint config before relying on next lint.",
+        )
+
+    if (worktree_dir / "jest.config.ts").exists() and "ts-node" not in deps:
+        warn(
+            "jest_config_ts_without_ts_node",
+            "validation",
+            "jest.config.ts is present but ts-node is not installed.",
+            "Install ts-node as a devDependency or convert the Jest config to JavaScript before running Jest.",
+        )
+
+    lockfiles = {"package-lock.json", "pnpm-lock.yaml", "yarn.lock"}
+    if package_json and not (tracked & lockfiles):
+        warn(
+            "lockfile_policy_missing",
+            "dependencies",
+            "No tracked JavaScript lockfile was found.",
+            "If package installation is needed, confirm whether the repo wants a committed lockfile before leaving one in the PR.",
+        )
+
+    workflows = list((worktree_dir / ".github" / "workflows").glob("*.yml")) + list(
+        (worktree_dir / ".github" / "workflows").glob("*.yaml")
+    )
+    source_control_type = ""
+    if profile is not None:
+        source_control_type = str(getattr(profile, "source_control_type", "") or "")
+    if source_control_type in {"", "github"} and not workflows:
+        warn(
+            "github_actions_missing",
+            "ci",
+            "No GitHub Actions workflow was found, so PRs may show zero status checks.",
+            "Do not treat missing PR checks as a pass; rely on local harness validation and consider adding CI.",
+        )
+
+    if "next" in deps:
+        warn(
+            "security_baseline_requires_context",
+            "security",
+            "Dependency audit findings may include pre-existing framework advisories.",
+            "Separate baseline vulnerabilities from dependencies introduced or changed by this ticket.",
+            severity="info",
+        )
+
+    return {
+        "generated_by": "spawn_team.client_readiness",
+        "client_profile": str(getattr(profile, "name", "") or "") if profile else "",
+        "is_next": is_next,
+        "warning_count": len(warnings),
+        "warnings": warnings,
+    }
+
+
+def _write_client_readiness(worktree_dir: Path, profile: object | None) -> None:
+    """Write machine and human readable readiness notes for the agents."""
+    report = _client_readiness_report(worktree_dir, profile)
+    harness_dir = worktree_dir / ".harness"
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    (harness_dir / "client-readiness.json").write_text(json.dumps(report, indent=2))
+    lines = [
+        "# Client Readiness",
+        "",
+        f"Warnings: {report['warning_count']}",
+        "",
+    ]
+    for item in report["warnings"]:
+        lines.extend(
+            [
+                f"## {item['id']} ({item['severity']})",
+                f"Area: {item['area']}",
+                "",
+                str(item["message"]),
+                "",
+                f"Recommendation: {item['recommendation']}",
+                "",
+            ]
+        )
+    if not report["warnings"]:
+        lines.append("No readiness warnings detected.")
+    (harness_dir / "client-readiness.md").write_text("\n".join(lines).rstrip() + "\n")
+    if report["warning_count"]:
+        print(
+            "[spawn] Client readiness warnings: "
+            + ", ".join(str(item["id"]) for item in report["warnings"])
+        )
+    else:
+        print("[spawn] Client readiness: no warnings")
+
+
 def run_git(client_repo: str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     """Run a git command in the client repo."""
     return subprocess.run(
@@ -586,6 +763,8 @@ def main() -> None:
         else:
             print(f"[spawn] WARNING: Client profile '{args.client_profile}' not found")
 
+    _write_client_readiness(worktree_dir, profile)
+
     # --- Step 3: Write ticket, mode, trace config, and copy attachments ---
     harness_dir = worktree_dir / ".harness"
     harness_dir.mkdir(parents=True, exist_ok=True)
@@ -658,11 +837,16 @@ def main() -> None:
     if pipeline_mode == "quick":
         # Read quick-mode instructions from the shared file (single source of truth)
         quick_prompt_file = SCRIPT_DIR.parent / "runtime" / "quick-mode-prompt.md"
-        prompt = quick_prompt_file.read_text()
+        prompt = (
+            "Before making changes, read .harness/client-readiness.md for repo "
+            "constraints and validation caveats.\n\n"
+            + quick_prompt_file.read_text()
+        )
     else:
         prompt = (
             "You are the team lead. Read the enriched ticket at .harness/ticket.json "
-            "and execute the pipeline per the Agentic Harness Pipeline Instructions in CLAUDE.md."
+            "and .harness/client-readiness.md, then execute the pipeline per the "
+            "Agentic Harness Pipeline Instructions in CLAUDE.md."
         )
 
     env = sanitized_env()

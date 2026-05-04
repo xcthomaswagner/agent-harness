@@ -12,6 +12,8 @@ The harness uses **two layers** of security checking:
 
 **If Semgrep was NOT available:** Review everything — you are the only security gate.
 
+**Dependency audit baseline:** Treat `.harness/logs/security-scan.md` as authoritative for dependency CVEs. Pre-existing baseline CVEs should be reported as inherited risk, not as a defect introduced by the ticket. Any newly added or upgraded dependency with a critical CVE is a ticket-blocking security finding.
+
 ---
 
 ## Tool-Covered (Semgrep + gitleaks handle these — verify only if tools were unavailable)

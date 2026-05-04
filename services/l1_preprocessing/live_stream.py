@@ -117,6 +117,8 @@ _ROLE_ALIASES: tuple[tuple[str, str], ...] = (
     ("unit", "developer"),
 )
 
+_SUBAGENT_TOOL_NAME = "Agent"
+
 
 def _validate_ticket_id(ticket_id: str) -> str:
     """Reject path-like ticket ids that could escape the worktree root."""
@@ -217,6 +219,88 @@ def _display_name(teammate: str, role: str) -> str:
     if role == "developer" and match:
         return f"{base} {match.group(1)}"
     return base
+
+
+def _agent_teammate_from_tool_use(block: dict[str, Any]) -> str:
+    """Derive the virtual teammate label for a Claude Agent tool call."""
+    if block.get("name") != _SUBAGENT_TOOL_NAME:
+        return ""
+    inp = block.get("input") or {}
+    if not isinstance(inp, dict):
+        return ""
+    for key in ("subagent_type", "agent_type", "role"):
+        val = inp.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip().lower().replace("_", "-")
+    description = inp.get("description")
+    if isinstance(description, str) and description.strip():
+        role = _canonical_role(description)
+        if role != "unknown":
+            return role.replace("_", "-")
+    return ""
+
+
+def _agent_teammate_from_task(raw: dict[str, Any]) -> str:
+    """Best-effort role inference for task events when the spawn line is absent."""
+    for key in ("subagent_type", "agent_type", "role", "description", "summary"):
+        val = raw.get(key)
+        if isinstance(val, str) and val.strip():
+            role = _canonical_role(val)
+            if role != "unknown":
+                return role.replace("_", "-")
+    return ""
+
+
+def _update_agent_task_map(
+    raw: dict[str, Any], task_agents: dict[str, str]
+) -> None:
+    """Track Claude Agent tool ids so child stream events can be attributed.
+
+    Claude Code writes subagent activity into the team-lead
+    ``session-stream.jsonl`` with ``parent_tool_use_id``. Without this
+    mapping those child messages look like team-lead chatter and the
+    dashboard roster never shows developer/reviewer/QA activity.
+    """
+    if raw.get("type") == "assistant":
+        message = raw.get("message") or {}
+        if not isinstance(message, dict):
+            return
+        content = message.get("content") or []
+        if not isinstance(content, list):
+            return
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            tool_id = block.get("id")
+            teammate = _agent_teammate_from_tool_use(block)
+            if isinstance(tool_id, str) and tool_id and teammate:
+                task_agents[tool_id] = teammate
+        return
+
+    if raw.get("type") == "system" and str(raw.get("subtype") or "").startswith("task_"):
+        tool_id = raw.get("tool_use_id") or raw.get("parent_tool_use_id")
+        if not isinstance(tool_id, str) or not tool_id:
+            return
+        if tool_id not in task_agents:
+            teammate = _agent_teammate_from_task(raw)
+            if teammate:
+                task_agents[tool_id] = teammate
+
+
+def _teammate_for_raw_event(
+    default_teammate: str,
+    raw: dict[str, Any],
+    task_agents: dict[str, str],
+) -> str:
+    """Return the stream teammate, rewritten for embedded subagent events."""
+    parent = raw.get("parent_tool_use_id")
+    if isinstance(parent, str) and parent in task_agents:
+        return task_agents[parent]
+    if raw.get("type") == "system" and str(raw.get("subtype") or "").startswith("task_"):
+        tool_id = raw.get("tool_use_id")
+        if isinstance(tool_id, str) and tool_id in task_agents:
+            return task_agents[tool_id]
+    return default_teammate
 
 
 def _redact_live_text(text: str) -> str:
@@ -484,23 +568,119 @@ def _replay_events_for_stream(
     last_lines = _read_last_lines(path, raw_budget)
     shaped: list[dict[str, Any]] = []
     last_observed_at = ""
+    task_agents: dict[str, str] = {}
     for lineno, raw in last_lines:
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
             continue
+        _update_agent_task_map(parsed, task_agents)
         raw_ts = _raw_timestamp(parsed)
         if raw_ts:
             last_observed_at = raw_ts
+        event_teammate = _teammate_for_raw_event(teammate, parsed, task_agents)
         ev = _filter_and_shape_event(
             parsed,
-            teammate,
+            event_teammate,
             source_line=lineno,
             observed_at=raw_ts or last_observed_at,
         )
         if ev is not None:
             shaped.append(ev)
     return shaped[-limit:] if len(shaped) > limit else shaped
+
+
+def _task_agent_map_from_path(path: Path) -> dict[str, str]:
+    """Build parent_tool_use_id -> teammate from the current stream body."""
+    task_agents: dict[str, str] = {}
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return task_agents
+    for raw in lines:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        _update_agent_task_map(parsed, task_agents)
+    return task_agents
+
+
+def _summary_from_events(
+    teammate: str,
+    events: list[dict[str, Any]],
+    *,
+    stream_path_present: bool,
+    latest_events: int = 5,
+) -> dict[str, Any]:
+    """Build a roster card from already attributed events."""
+    role = _canonical_role(teammate)
+    shaped_events: list[dict[str, Any]] = []
+    tool_uses_progress = 0
+    total_tokens = 0
+    last_tool = ""
+    last_at = ""
+    for ev in sorted(events, key=_sort_key):
+        if ev.get("observed_at"):
+            last_at = str(ev["observed_at"])
+        if ev.get("kind") == "progress_update":
+            tool_uses_progress = max(tool_uses_progress, int(ev.get("tool_uses") or 0))
+            total_tokens = max(total_tokens, int(ev.get("total_tokens") or 0))
+            if ev.get("last_tool_name"):
+                last_tool = str(ev["last_tool_name"])
+            continue
+        if ev.get("kind") == "tool_use" and ev.get("tool_name"):
+            last_tool = str(ev["tool_name"])
+        shaped_events.append(ev)
+
+    visible = shaped_events[-latest_events:]
+    current = visible[-1] if visible else None
+    tool_use_count = sum(1 for e in shaped_events if e.get("kind") == "tool_use")
+    return {
+        "teammate": teammate,
+        "role": role,
+        "role_group": _role_group(role),
+        "display_name": _display_name(teammate, role),
+        "last_at": last_at or None,
+        "last_tool": last_tool,
+        "last_event_kind": str(current.get("kind") or "") if current else "",
+        "current_activity": _event_message(current) if current else "",
+        "last_summary": _event_message(current) if current else "",
+        "tool_uses": max(tool_uses_progress, tool_use_count),
+        "total_tokens": total_tokens,
+        "event_count": len(shaped_events),
+        "stream_path_present": stream_path_present,
+        "latest_events": visible,
+    }
+
+
+def summarize_stream_teammates(
+    teammate: str,
+    path: Path,
+    *,
+    limit: int = 200,
+    latest_events: int = 5,
+) -> list[dict[str, Any]]:
+    """Return roster summaries for a physical stream plus embedded subagents."""
+    events = _replay_events_for_stream(teammate, path, limit)
+    by_teammate: dict[str, list[dict[str, Any]]] = {}
+    for ev in events:
+        by_teammate.setdefault(str(ev.get("teammate") or teammate), []).append(ev)
+    summaries = [
+        _summary_from_events(
+            name,
+            evs,
+            stream_path_present=path.is_file(),
+            latest_events=latest_events,
+        )
+        for name, evs in sorted(by_teammate.items())
+    ]
+    if teammate not in by_teammate:
+        summaries.insert(
+            0,
+            summarize_session_stream(teammate, path, limit=limit, latest_events=latest_events),
+        )
+    return summaries
 
 
 def summarize_session_stream(
@@ -519,16 +699,21 @@ def summarize_session_stream(
     tool_uses_progress = 0
     total_tokens = 0
     last_tool = ""
+    task_agents: dict[str, str] = {}
 
     for lineno, raw in raw_lines:
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
             continue
+        _update_agent_task_map(parsed, task_agents)
         raw_ts = _raw_timestamp(parsed)
         if raw_ts:
             last_raw_ts = raw_ts
             last_at = raw_ts
+        event_teammate = _teammate_for_raw_event(teammate, parsed, task_agents)
+        if event_teammate != teammate:
+            continue
         ev = _filter_and_shape_event(
             parsed,
             teammate,
@@ -936,48 +1121,57 @@ def summarize_ticket_activity(
     seen_teammates: set[str] = set()
 
     for teammate, path in streams:
-        roster = summarize_session_stream(
-            teammate, path, limit=per_stream_limit, latest_events=5
-        )
         events = _replay_events_for_stream(teammate, path, per_stream_limit)
         raw_event_count += len(events)
-        visible_events = [e for e in events if e.get("kind") != "progress_update"]
-        deduped = _dedupe_activity_events(visible_events)
-        tools: dict[str, int] = {}
-        warnings: list[str] = []
-        for item in deduped:
-            tool = str(item.get("tool_name") or "")
-            if tool:
-                tools[tool] = tools.get(tool, 0) + int(item.get("count") or 1)
-            msg = str(item.get("message") or "")
-            if _WARNING_RE.search(msg):
-                warnings.append(msg)
-        teammates.append(
-            {
-                "teammate": teammate,
-                "role": roster["role"],
-                "role_group": roster["role_group"],
-                "display_name": roster["display_name"],
-                "state": "unknown",
-                "last_at": roster["last_at"],
-                "event_count": len(visible_events),
-                "raw_event_count": len(events),
-                "deduped_event_count": len(deduped),
-                "tool_uses": roster["tool_uses"],
-                "total_tokens": roster["total_tokens"],
-                "tools": [
-                    {"name": name, "count": count}
-                    for name, count in sorted(
-                        tools.items(), key=lambda kv: (-kv[1], kv[0])
-                    )[:8]
-                ],
-                "actions": deduped[-10:],
-                "warnings": warnings[:5],
-                "current_activity": roster["current_activity"],
-            }
-        )
-        seen_teammates.add(teammate)
-        all_events.extend(visible_events)
+        by_teammate: dict[str, list[dict[str, Any]]] = {}
+        for event in events:
+            by_teammate.setdefault(str(event.get("teammate") or teammate), []).append(event)
+        for actor, actor_events in sorted(by_teammate.items()):
+            visible_events = [
+                e for e in actor_events if e.get("kind") != "progress_update"
+            ]
+            deduped = _dedupe_activity_events(visible_events)
+            roster = _summary_from_events(
+                actor,
+                actor_events,
+                stream_path_present=path.is_file(),
+                latest_events=5,
+            )
+            tools: dict[str, int] = {}
+            warnings: list[str] = []
+            for item in deduped:
+                tool = str(item.get("tool_name") or "")
+                if tool:
+                    tools[tool] = tools.get(tool, 0) + int(item.get("count") or 1)
+                msg = str(item.get("message") or "")
+                if _WARNING_RE.search(msg):
+                    warnings.append(msg)
+            teammates.append(
+                {
+                    "teammate": actor,
+                    "role": roster["role"],
+                    "role_group": roster["role_group"],
+                    "display_name": roster["display_name"],
+                    "state": "unknown",
+                    "last_at": roster["last_at"],
+                    "event_count": len(visible_events),
+                    "raw_event_count": len(actor_events),
+                    "deduped_event_count": len(deduped),
+                    "tool_uses": roster["tool_uses"],
+                    "total_tokens": roster["total_tokens"],
+                    "tools": [
+                        {"name": name, "count": count}
+                        for name, count in sorted(
+                            tools.items(), key=lambda kv: (-kv[1], kv[0])
+                        )[:8]
+                    ],
+                    "actions": deduped[-10:],
+                    "warnings": warnings[:5],
+                    "current_activity": roster["current_activity"],
+                }
+            )
+            seen_teammates.add(actor)
+            all_events.extend(visible_events)
 
     extra_events = finished_events or []
     raw_event_count += len(extra_events)
@@ -1071,7 +1265,7 @@ class _StreamPosition:
     (truncated), reset to offset 0 so we don't skip the new content.
     """
 
-    __slots__ = ("inode", "last_observed_at", "next_lineno", "offset", "path")
+    __slots__ = ("inode", "last_observed_at", "next_lineno", "offset", "path", "task_agents")
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -1079,6 +1273,7 @@ class _StreamPosition:
         self.inode: int | None = None
         self.last_observed_at = ""
         self.next_lineno = 1
+        self.task_agents: dict[str, str] = {}
 
     def read_new_lines(self) -> list[tuple[int, str]]:
         try:
@@ -1090,6 +1285,7 @@ class _StreamPosition:
             self.inode = None
             self.last_observed_at = ""
             self.next_lineno = 1
+            self.task_agents = {}
             return []
         if self.inode is None:
             self.inode = st.st_ino
@@ -1099,6 +1295,7 @@ class _StreamPosition:
             self.inode = st.st_ino
             self.last_observed_at = ""
             self.next_lineno = 1
+            self.task_agents = {}
         if st.st_size == self.offset:
             return []
         out: list[tuple[int, str]] = []
@@ -1162,6 +1359,7 @@ async def _stream_generator(
     positions: list[tuple[str, _StreamPosition]] = []
     for teammate, path in streams:
         pos = _StreamPosition(path)
+        pos.task_agents = _task_agent_map_from_path(path)
         try:
             st = path.stat()
             pos.offset = st.st_size
@@ -1192,9 +1390,13 @@ async def _stream_generator(
                 raw_ts = _raw_timestamp(parsed)
                 if raw_ts:
                     pos.last_observed_at = raw_ts
+                _update_agent_task_map(parsed, pos.task_agents)
+                event_teammate = _teammate_for_raw_event(
+                    teammate, parsed, pos.task_agents
+                )
                 shaped = _filter_and_shape_event(
                     parsed,
-                    teammate,
+                    event_teammate,
                     source_line=lineno,
                     observed_at=raw_ts or pos.last_observed_at,
                 )
@@ -1483,6 +1685,7 @@ __all__ = [
     "_teammate_name_for",
     "_worktree_root_for_ticket",
     "router",
+    "summarize_stream_teammates",
 ]
 
 

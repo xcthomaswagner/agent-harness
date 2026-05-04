@@ -22,6 +22,7 @@ removal), ``scripts/cleanup_worktree.py``, ``scripts/cleanup_stale_worktrees.py`
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -40,6 +41,70 @@ _EXPECTED_PARENT_NAME = "worktrees"
 # ``subprocess.run`` directly in its own namespace, and the existing test
 # mocks rely on that. Defaults to the stdlib call when not provided.
 _RunFn = Callable[..., Any]
+
+
+def _status_path(line: str) -> str:
+    path = line[3:].strip() if len(line) > 3 else line.strip()
+    if " -> " in path:
+        path = path.rsplit(" -> ", 1)[-1]
+    return path.strip('"')
+
+
+def _classify_dirty_entry(wt_path: Path, line: str) -> dict[str, str]:
+    rel = _status_path(line)
+    path = wt_path / rel
+    category = "uncommitted_source"
+    reason = "tracked or untracked project file"
+    if rel == "CLAUDE.md":
+        try:
+            if "harness-injected" in path.read_text(errors="replace"):
+                category = "harness_injected"
+                reason = "runtime CLAUDE.md injection marker present"
+        except OSError:
+            pass
+    elif rel.startswith(".harness/") or rel.startswith(".claude/"):
+        category = "harness_runtime"
+        reason = "harness runtime metadata"
+    elif rel in {"next-env.d.ts", "package-lock.json"}:
+        category = "generated_artifact"
+        reason = "common framework/package-manager generated file"
+    elif rel.startswith(".next/") or rel.startswith("node_modules/"):
+        category = "generated_artifact"
+        reason = "build or dependency output"
+    return {
+        "status": line[:2].strip() or "unknown",
+        "path": rel,
+        "category": category,
+        "reason": reason,
+    }
+
+
+def _write_dirty_manifest(
+    wt_path: Path,
+    archive_target: Path,
+    dirty_lines: list[str],
+    untracked_files: list[Path],
+) -> None:
+    items = [_classify_dirty_entry(wt_path, line) for line in dirty_lines]
+    seen_paths = {item["path"] for item in items}
+    for rel_path in untracked_files:
+        rel = str(rel_path)
+        if rel not in seen_paths:
+            items.append(_classify_dirty_entry(wt_path, f"?? {rel}"))
+            seen_paths.add(rel)
+    by_category: dict[str, int] = {}
+    for item in items:
+        category = item["category"]
+        by_category[category] = by_category.get(category, 0) + 1
+    manifest = {
+        "worktree": str(wt_path),
+        "dirty_count": len(items),
+        "by_category": by_category,
+        "items": items,
+    }
+    (archive_target / "dirty-worktree-manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n"
+    )
 
 
 def _run_git_diff(wt_path: Path, run_fn: _RunFn) -> str:
@@ -205,6 +270,9 @@ def safe_remove_worktree(
             if patch_text or untracked_files:
                 archive_target = _archive_target_for(archive_dir, wt_path, worktrees_root)
                 archive_target.mkdir(parents=True, exist_ok=True)
+                _write_dirty_manifest(
+                    wt_path, archive_target, dirty_lines, untracked_files
+                )
                 if patch_text:
                     (archive_target / "uncommitted.patch").write_text(patch_text)
                 if untracked_files:

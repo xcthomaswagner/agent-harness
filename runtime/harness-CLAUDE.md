@@ -376,7 +376,7 @@ elif [ -f go.mod ]; then
   govulncheck ./... 2>/dev/null || true
 fi
 ```
-If critical CVEs are found in newly added dependencies, route to developer for fix. If the audit tool is not installed, log a warning and proceed.
+Separate dependency audit findings into **baseline** versus **introduced** risk. Baseline means the vulnerable package/version was already present on the base branch before this ticket; introduced means this ticket added or upgraded the vulnerable package. Route introduced critical CVEs to the developer for fix. Report baseline critical CVEs in `.harness/logs/security-scan.md` as pre-existing risk, but do not fail the ticket solely for unrelated baseline advisories. If the audit tool is not installed, log a warning and proceed.
 
 **SAST Scanner (Semgrep)** — run on changed files only:
 ```bash
@@ -391,9 +391,9 @@ gitleaks detect --log-opts="$BASE_BRANCH...HEAD" --json 2>/dev/null || true
 ```
 If gitleaks is not installed, skip with warning. Any finding = developer must remove the secret before proceeding.
 
-Log: `{"phase": "security_scan", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Security scan complete", "semgrep_findings": N, "dependency_cves": N, "secrets_found": N, "semgrep_status": "clean|findings|not_installed", "tools_available": ["semgrep","gitleaks","npm_audit"]}`
+Log: `{"phase": "security_scan", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Security scan complete", "semgrep_findings": N, "dependency_cves": N, "introduced_dependency_cves": N, "baseline_dependency_cves": N, "secrets_found": N, "semgrep_status": "clean|findings|not_installed", "tools_available": ["semgrep","gitleaks","npm_audit"]}`
 
-Write scan results to `.harness/logs/security-scan.md` so the Code Reviewer knows which tools ran.
+Write scan results to `.harness/logs/security-scan.md` so the Code Reviewer knows which tools ran. Include a short "Security baseline" section naming any pre-existing critical advisories separately from issues introduced by this branch.
 
 If any tool found critical issues, spawn a developer to fix them before proceeding to code review.
 

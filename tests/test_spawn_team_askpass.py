@@ -473,6 +473,37 @@ def test_contentstack_preflight_rejects_unsupported_groups(
     assert "CONTENTSTACK_MCP_GROUPS" in capsys.readouterr().err
 
 
+def test_client_readiness_flags_next_repo_gaps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spawn_team = _load_spawn_team_module()
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    subprocess.run(["git", "init", "-q", str(worktree)], check=True)
+    (worktree / "package.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {"next": "14.2.0"},
+                "scripts": {"lint": "next lint", "test": "jest"},
+            }
+        )
+    )
+    (worktree / "CLAUDE.md").write_text("Use Tailwind when building UI.\n")
+    (worktree / "jest.config.ts").write_text("export default {}\n")
+    monkeypatch.setattr(spawn_team, "subprocess", subprocess)
+
+    report = spawn_team._client_readiness_report(worktree, profile=None)
+
+    ids = {item["id"] for item in report["warnings"]}
+    assert "next_tailwind_not_configured" in ids
+    assert "next_lint_can_prompt" in ids
+    assert "jest_config_ts_without_ts_node" in ids
+    assert "lockfile_policy_missing" in ids
+    assert "github_actions_missing" in ids
+    assert "security_baseline_requires_context" in ids
+
+
 def test_replays_pending_completion_with_api_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
