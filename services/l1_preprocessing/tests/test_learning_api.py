@@ -343,6 +343,30 @@ class TestSnooze:
         )
         assert r.status_code == 422
 
+    def test_snooze_rejects_timezone_naive_next_review_at(
+        self, client: TestClient, admin_headers: dict[str, str]
+    ) -> None:
+        lid = _seed_candidate()
+        r = client.post(
+            f"/api/learning/candidates/{lid}/snooze",
+            json={"reason": "x", "next_review_at": "2026-05-01T00:00:00"},
+            headers=admin_headers,
+        )
+        assert r.status_code == 422
+        assert "timezone offset" in r.text
+
+    def test_snooze_normalizes_zulu_next_review_at(
+        self, client: TestClient, admin_headers: dict[str, str]
+    ) -> None:
+        lid = _seed_candidate()
+        r = client.post(
+            f"/api/learning/candidates/{lid}/snooze",
+            json={"reason": "x", "next_review_at": "2026-05-01T00:00:00Z"},
+            headers=admin_headers,
+        )
+        assert r.status_code == 200
+        assert r.json()["next_review_at"] == "2026-05-01T00:00:00+00:00"
+
 
 class TestConfiguredReviewers:
     """The helper that parses LEARNING_PR_OPENER_REVIEWERS env."""

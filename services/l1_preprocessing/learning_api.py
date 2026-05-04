@@ -28,7 +28,7 @@ import json
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -138,12 +138,14 @@ class SnoozeIn(BaseModel):
         if not v:
             raise ValueError("next_review_at is required")
         try:
-            datetime.fromisoformat(v)
+            parsed = datetime.fromisoformat(v)
         except ValueError as exc:
             raise ValueError(
                 f"next_review_at must be ISO 8601: {exc}"
             ) from exc
-        return v
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("next_review_at must include a timezone offset")
+        return parsed.astimezone(UTC).isoformat()
 
 
 class RevertIn(BaseModel):
