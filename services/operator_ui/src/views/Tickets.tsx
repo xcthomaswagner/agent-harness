@@ -19,6 +19,7 @@ import { href } from "../router";
 
 type StatusFilter = TraceStatus | "all";
 type LiveFilter = "all" | "team_lead" | "dev" | "review" | "qa" | "other";
+const PAGE_SIZE = 200;
 
 const FILTERS: readonly { label: string; value: StatusFilter }[] = [
   { label: "All", value: "all" },
@@ -48,14 +49,14 @@ const LIVE_FILTERS: readonly { label: string; value: LiveFilter }[] = [
 
 export function TicketsView() {
   const [filter, setFilter] = useState<StatusFilter>("in-flight");
+  const [offset, setOffset] = useState(0);
+  const [includeHidden, setIncludeHidden] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
-  const feed = useFeed<TracesResponse>("/api/operator/traces?limit=200");
-
-  const rows = useMemo(() => {
-    if (!feed.data) return [];
-    if (filter === "all") return feed.data.traces;
-    return feed.data.traces.filter((t) => t.status === filter);
-  }, [feed.data, filter]);
+  const statusQuery = filter === "all" ? "" : `&status=${encodeURIComponent(filter)}`;
+  const feed = useFeed<TracesResponse>(
+    `/api/operator/traces?limit=${PAGE_SIZE}&offset=${offset}&include_hidden=${includeHidden ? "true" : "false"}${statusQuery}`,
+    { clearOnUrlChange: true },
+  );
 
   const counts = useMemo(() => {
     const base: Record<StatusFilter, number> = {
@@ -66,10 +67,7 @@ export function TicketsView() {
       done: 0,
       hidden: 0,
     };
-    if (feed.data) {
-      base.all = feed.data.traces.length;
-      for (const t of feed.data.traces) base[t.status] += 1;
-    }
+    if (feed.data) Object.assign(base, feed.data.status_counts);
     return base;
   }, [feed.data]);
 
@@ -82,9 +80,11 @@ export function TicketsView() {
   // MUST be in an effect, not a render-body setState call (that triggers a
   // Preact "cannot update during render" warning and re-render loop).
   useEffect(() => {
-    if (selected || !feed.data) return;
+    if (!feed.data) return;
+    if (selected && feed.data.traces.some((t) => t.id === selected)) return;
     const firstLive = feed.data.traces.find((t) => t.status === "in-flight");
-    if (firstLive) setSelected(firstLive.id);
+    const firstRow = firstLive ?? feed.data.traces[0];
+    if (firstRow) setSelected(firstRow.id);
   }, [feed.data, selected]);
 
   return (
@@ -99,14 +99,32 @@ export function TicketsView() {
 
       <div style={{ display: "flex", gap: "8px", marginBottom: "20px", flexWrap: "wrap" }}>
         {FILTERS.map((f) => (
-          <Chip
-            key={f.value}
-            label={f.label}
-            count={counts[f.value]}
-            on={filter === f.value}
-            onClick={() => setFilter(f.value)}
-          />
+          f.value === "hidden" && !includeHidden ? null : (
+            <Chip
+              key={f.value}
+              label={f.label}
+              count={counts[f.value]}
+              on={filter === f.value}
+              onClick={() => {
+                setFilter(f.value);
+                setOffset(0);
+                setSelected(null);
+              }}
+            />
+          )
         ))}
+        <Button
+          size="sm"
+          variant={includeHidden ? "danger" : "default"}
+          onClick={() => {
+            setIncludeHidden((v) => !v);
+            if (filter === "hidden") setFilter("all");
+            setOffset(0);
+            setSelected(null);
+          }}
+        >
+          {includeHidden ? "Hide hidden" : "Show hidden"}
+        </Button>
       </div>
 
       <div class="op-tickets-grid" style={{ border: "var(--rule)" }}>
@@ -118,61 +136,91 @@ export function TicketsView() {
             <div class="op-error">Failed to load: {feed.error}</div>
           )}
           {feed.data && (
-            <Table<TraceSummary>
-              rowKey={(t) => t.id}
-              rows={rows}
-              isLive={(t) => t.status === "in-flight"}
-              onRowClick={(t) => setSelected(t.id)}
-              empty={`No ${filter === "all" ? "tickets" : filter + " tickets"} right now.`}
-              columns={[
-                {
-                  key: "id",
-                  label: "Ticket",
-                  width: "120px",
-                  render: (t) => (
-                    <span
-                      class="op-mono"
-                      style={{
-                        color:
-                          t.id === selected
-                            ? "var(--accent)"
-                            : "var(--ink-700)",
-                      }}
-                    >
-                      {t.id}
-                    </span>
-                  ),
-                },
-                {
-                  key: "title",
-                  label: "Title",
-                  render: (t) => t.title || "—",
-                },
-                {
-                  key: "status",
-                  label: "Status",
-                  width: "120px",
-                  render: (t) => (
-                    <Pill tone={STATUS_TONE[t.status]}>{t.raw_status}</Pill>
-                  ),
-                },
-                {
-                  key: "phase",
-                  label: "Phase",
-                  width: "120px",
-                  render: (t) => (
-                    <span class="op-mono">{t.phase || "—"}</span>
-                  ),
-                },
-                {
-                  key: "elapsed",
-                  label: "Elapsed",
-                  width: "80px",
-                  numeric: true,
-                  render: (t) => t.elapsed || "—",
-                },
-              ]}
-            />
+            <>
+              <div class="op-table-tools">
+                <span class="op-muted">
+                  Showing {feed.data.traces.length} of {feed.data.count} · offset{" "}
+                  {feed.data.offset}
+                </span>
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <Button
+                    size="sm"
+                    disabled={offset === 0}
+                    onClick={() => {
+                      setOffset(Math.max(0, offset - PAGE_SIZE));
+                      setSelected(null);
+                    }}
+                  >
+                    Previous
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={offset + PAGE_SIZE >= feed.data.count}
+                    onClick={() => {
+                      setOffset(offset + PAGE_SIZE);
+                      setSelected(null);
+                    }}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+              <Table<TraceSummary>
+                rowKey={(t) => t.id}
+                rows={feed.data.traces}
+                isLive={(t) => t.status === "in-flight"}
+                onRowClick={(t) => setSelected(t.id)}
+                empty={`No ${filter === "all" ? "tickets" : filter + " tickets"} right now.`}
+                columns={[
+                  {
+                    key: "id",
+                    label: "Ticket",
+                    width: "120px",
+                    render: (t) => (
+                      <span
+                        class="op-mono"
+                        style={{
+                          color:
+                            t.id === selected
+                              ? "var(--accent)"
+                              : "var(--ink-700)",
+                        }}
+                      >
+                        {t.id}
+                      </span>
+                    ),
+                  },
+                  {
+                    key: "title",
+                    label: "Title",
+                    render: (t) => t.title || "—",
+                  },
+                  {
+                    key: "status",
+                    label: "Status",
+                    width: "120px",
+                    render: (t) => (
+                      <Pill tone={STATUS_TONE[t.status]}>{t.raw_status}</Pill>
+                    ),
+                  },
+                  {
+                    key: "phase",
+                    label: "Phase",
+                    width: "120px",
+                    render: (t) => (
+                      <span class="op-mono">{t.phase || "—"}</span>
+                    ),
+                  },
+                  {
+                    key: "elapsed",
+                    label: "Elapsed",
+                    width: "80px",
+                    numeric: true,
+                    render: (t) => t.elapsed || "—",
+                  },
+                ]}
+              />
+            </>
           )}
         </div>
 

@@ -49,6 +49,14 @@ describe("TicketsView", () => {
             },
           ],
           count: 1,
+          status_counts: {
+            all: 1,
+            "in-flight": 1,
+            stuck: 0,
+            queued: 0,
+            done: 0,
+            hidden: 0,
+          },
           offset: 0,
           limit: 200,
           include_hidden: false,
@@ -88,6 +96,40 @@ describe("TicketsView", () => {
       expect(removeCall?.[1]?.headers).toMatchObject({
         "X-API-Key": "sekret",
       });
+    });
+  });
+
+  it("requests hidden tickets only after the operator enables them", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/operator/traces")) {
+        return jsonResponse({
+          traces: [],
+          count: 0,
+          status_counts: {
+            all: 0,
+            "in-flight": 0,
+            stuck: 0,
+            queued: 0,
+            done: 0,
+            hidden: 0,
+          },
+          offset: 0,
+          limit: 200,
+          include_hidden: url.includes("include_hidden=true"),
+        });
+      }
+      return jsonResponse({}, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { findByText } = render(<TicketsView />);
+    fireEvent.click(await findByText("Show hidden"));
+
+    await waitFor(() => {
+      const urls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(urls.some((url) => url.includes("include_hidden=false"))).toBe(true);
+      expect(urls.some((url) => url.includes("include_hidden=true"))).toBe(true);
     });
   });
 });
