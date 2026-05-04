@@ -35,6 +35,7 @@ from pathlib import Path
 # scripts/inject_runtime.py so a placeholder accepted there is also
 # discoverable here.
 _ENV_VAR_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
+_ENV_NAME_RE = re.compile(r"[A-Z_][A-Z0-9_]*")
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PROFILES_DIR = _REPO_ROOT / "runtime" / "platform-profiles"
@@ -79,4 +80,16 @@ def pass_through_vars(profile_name: str) -> set[str]:
     except (OSError, json.JSONDecodeError):
         return set()
 
-    return _scan_for_placeholders(config)
+    explicit = set()
+    if isinstance(config, dict):
+        harness = config.get("harness", {})
+        if isinstance(harness, dict):
+            values = harness.get("passThroughEnv", [])
+            if isinstance(values, list):
+                explicit = {
+                    value
+                    for value in values
+                    if isinstance(value, str) and _ENV_NAME_RE.fullmatch(value)
+                }
+
+    return _scan_for_placeholders(config) | explicit

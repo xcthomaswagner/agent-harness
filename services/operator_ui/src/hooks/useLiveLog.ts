@@ -37,6 +37,21 @@ export interface LiveLogEntry {
 
 const MAX_BUFFERED = 200;
 
+function liveLogEntryKey(entry: LiveLogEntry): string {
+  if (entry.event_id) return `id:${entry.event_id}`;
+  return [
+    "fallback",
+    entry.timestamp,
+    entry.observed_at ?? "",
+    entry.teammate,
+    entry.kind,
+    entry.tool_name ?? "",
+    entry.source_line ?? "",
+    entry.text ?? "",
+    entry.description ?? "",
+  ].join("|");
+}
+
 export function useLiveLog(ticketId: string | null): {
   state: LiveConnState;
   entries: LiveLogEntry[];
@@ -72,6 +87,10 @@ export function useLiveLog(ticketId: string | null): {
       try {
         const entry = JSON.parse(ev.data) as LiveLogEntry;
         setEntries((prev) => {
+          const key = liveLogEntryKey(entry);
+          if (prev.some((existing) => liveLogEntryKey(existing) === key)) {
+            return prev;
+          }
           const next = [entry, ...prev];
           if (next.length > MAX_BUFFERED) next.length = MAX_BUFFERED;
           return next;

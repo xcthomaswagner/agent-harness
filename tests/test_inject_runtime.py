@@ -149,8 +149,8 @@ def test_mcp_env_var_default_fallback() -> None:
         ]
 
 
-def test_contentstack_mcp_uses_supported_groups_and_env_tokens() -> None:
-    """Contentstack MCP must avoid GROUPS=all and keep tokens out of argv."""
+def test_contentstack_mcp_uses_supported_groups_without_persisting_secrets() -> None:
+    """Contentstack MCP must avoid GROUPS=all and keep secrets out of .mcp.json."""
     with tempfile.TemporaryDirectory() as tmp:
         client = Path(tmp) / "contentstack-client"
         client.mkdir()
@@ -173,10 +173,16 @@ def test_contentstack_mcp_uses_supported_groups_and_env_tokens() -> None:
         mcp = json.loads((client / ".mcp.json").read_text())
         contentstack = mcp["mcpServers"]["contentstack"]
         assert contentstack["args"] == ["-y", "@contentstack/mcp"]
-        assert contentstack["env"]["CONTENTSTACK_API_KEY"] == "stack-key"
-        assert contentstack["env"]["CONTENTSTACK_DELIVERY_TOKEN"] == "delivery-token"
-        assert contentstack["env"]["CONTENTSTACK_MANAGEMENT_TOKEN"] == "management-token"
         assert contentstack["env"]["GROUPS"] == "cma,cda"
+        assert contentstack["env"]["CONTENTSTACK_REGION"] == "NA"
+
+        serialized = json.dumps(mcp)
+        assert "stack-key" not in serialized
+        assert "delivery-token" not in serialized
+        assert "management-token" not in serialized
+        assert "CONTENTSTACK_API_KEY" not in contentstack["env"]
+        assert "CONTENTSTACK_DELIVERY_TOKEN" not in contentstack["env"]
+        assert "CONTENTSTACK_MANAGEMENT_TOKEN" not in contentstack["env"]
 
 
 def test_salesforce_profile_skills_copied() -> None:
@@ -258,6 +264,7 @@ if __name__ == "__main__":
     test_invalid_target()
     test_salesforce_mcp_merged()
     test_mcp_env_var_default_fallback()
+    test_contentstack_mcp_uses_supported_groups_without_persisting_secrets()
     test_salesforce_profile_skills_copied()
     test_non_salesforce_profile_skill_not_leaked()
     test_non_salesforce_profile_unaffected()

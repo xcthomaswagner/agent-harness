@@ -52,6 +52,95 @@ def _platform_pass_through_env(profile_name: str) -> dict[str, str]:
     return {name: os.environ[name] for name in needed if name in os.environ}
 
 
+def _l1_completion_headers() -> dict[str, str]:
+    """Headers for the L2 -> L1 completion callback."""
+    headers = {"Content-Type": "application/json"}
+    api_key = os.environ.get("API_KEY", "")
+    if api_key:
+        headers["X-API-Key"] = api_key
+    return headers
+
+
+def _post_l1_completion(l1_url: str, completion_data: dict[str, object]) -> None:
+    """POST a completion payload to L1 using the configured control-plane auth."""
+    data = json.dumps(completion_data).encode()
+    req = urllib.request.Request(
+        f"{l1_url}/api/agent-complete",
+        data=data,
+        headers=_l1_completion_headers(),
+    )
+    urllib.request.urlopen(req, timeout=10)
+
+
+def _replay_completion_pending(worktree_dir: Path) -> bool:
+    """Replay a preserved completion-pending.json before replacing a worktree."""
+    pending = worktree_dir / ".harness" / "completion-pending.json"
+    if not pending.exists():
+        return True
+
+    try:
+        completion_data = json.loads(pending.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"[spawn] ERROR: Cannot read pending completion at {pending}: {exc}", file=sys.stderr)
+        return False
+
+    if not isinstance(completion_data, dict):
+        print(f"[spawn] ERROR: Invalid pending completion payload at {pending}", file=sys.stderr)
+        return False
+
+    l1_url = os.environ.get("L1_SERVICE_URL", "http://localhost:8000")
+    try:
+        print(f"[spawn] Replaying pending completion before cleanup: {pending}")
+        _post_l1_completion(l1_url, completion_data)
+    except urllib.error.HTTPError as exc:
+        print(f"[spawn] ERROR: Pending completion replay got HTTP {exc.code}: {exc.reason}", file=sys.stderr)
+        return False
+    except (urllib.error.URLError, OSError) as exc:
+        print(f"[spawn] ERROR: Pending completion replay could not reach L1: {exc}", file=sys.stderr)
+        return False
+
+    pending.unlink(missing_ok=True)
+    print("[spawn] Pending completion replayed")
+    return True
+
+
+def _preflight_platform_profile(profile_name: str) -> None:
+    """Fail early when a selected platform profile cannot start its MCP."""
+    if profile_name != "contentstack":
+        return
+
+    missing = [
+        name
+        for name in (
+            "CONTENTSTACK_API_KEY",
+            "CONTENTSTACK_DELIVERY_TOKEN",
+            "CONTENTSTACK_REGION",
+        )
+        if not os.environ.get(name)
+    ]
+    if missing:
+        print(
+            "[spawn] ERROR: ContentStack profile missing required env vars: "
+            + ", ".join(missing),
+            file=sys.stderr,
+        )
+        print(
+            "[spawn] Run scripts/smoke-test-contentstack-mcp.sh after fixing env "
+            "to verify the MCP handshake before dispatch.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    region = os.environ.get("CONTENTSTACK_REGION", "")
+    if region not in {"NA", "EU", "AZURE_NA", "AZURE_EU"}:
+        print(
+            "[spawn] ERROR: CONTENTSTACK_REGION must be one of "
+            f"NA, EU, AZURE_NA, AZURE_EU; got {region!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def run_git(client_repo: str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     """Run a git command in the client repo."""
     return subprocess.run(
@@ -255,6 +344,8 @@ def main() -> None:
             print(f"Error: Invalid JSON in ticket file: {ticket_json}", file=sys.stderr)
             sys.exit(1)
 
+    _preflight_platform_profile(args.platform_profile)
+
     # --- Step 0: Pre-flight cleanup — clean prior worktrees for THIS ticket only ---
     # Only removes worktrees from earlier runs of the same ticket (same branch name).
     # Other tickets' worktrees are left alone — they may be needed for debugging
@@ -286,6 +377,14 @@ def main() -> None:
                 file=sys.stderr,
             )
             sys.exit(0)
+
+        if not _replay_completion_pending(worktree_dir_candidate):
+            print(
+                "[spawn] Prior worktree has an unreplayed completion-pending.json; "
+                "leaving it intact and aborting this dispatch.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
         # Worktree exists from a prior run — determine reason and clean up
         if lock_file_check and lock_file_check.exists():
@@ -741,13 +840,7 @@ def main() -> None:
 
     print(f"[spawn] Notifying L1: ticket={ticket_id} status={status} pr={pr_url} source={ticket_source}")
     try:
-        data = json.dumps(completion_data).encode()
-        req = urllib.request.Request(
-            f"{l1_url}/api/agent-complete",
-            data=data,
-            headers={"Content-Type": "application/json"},
-        )
-        urllib.request.urlopen(req, timeout=10)
+        _post_l1_completion(l1_url, completion_data)
     except urllib.error.HTTPError as exc:
         # L1 responded with an error — likely a code bug, not transient
         print(f"[spawn] ERROR: L1 returned HTTP {exc.code}: {exc.reason}")

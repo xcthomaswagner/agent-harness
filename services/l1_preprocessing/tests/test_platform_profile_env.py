@@ -118,6 +118,39 @@ def test_pass_through_handles_malformed_json(tmp_path: Path) -> None:
         assert pass_through_vars("broken") == set()
 
 
+def test_pass_through_reads_explicit_profile_metadata(tmp_path: Path) -> None:
+    """Profiles can request secret pass-through without putting those secrets
+    in the generated .mcp.json env block."""
+    fake_profiles_dir = tmp_path / "platform-profiles" / "metadata-cms"
+    fake_profiles_dir.mkdir(parents=True)
+    (fake_profiles_dir / "harness-mcp.json").write_text(json.dumps({
+        "harness": {
+            "passThroughEnv": [
+                "FAKE_API_KEY",
+                "FAKE_TOKEN",
+                "lowercase_ignored",
+                "../BAD",
+            ],
+        },
+        "mcpServers": {
+            "metadata-cms": {
+                "command": "npx",
+                "args": ["-y", "@fake/mcp"],
+                "env": {
+                    "FAKE_REGION": "${FAKE_REGION:-US}",
+                },
+            },
+        },
+    }))
+
+    with patch("shared.platform_profile_env._PROFILES_DIR", tmp_path / "platform-profiles"):
+        assert pass_through_vars("metadata-cms") == {
+            "FAKE_API_KEY",
+            "FAKE_TOKEN",
+            "FAKE_REGION",
+        }
+
+
 def test_pass_through_real_contentstack_profile() -> None:
     """The shipped contentstack profile lists exactly the 6 vars we declared
     on Settings — pin this so adding/removing one in the JSON without

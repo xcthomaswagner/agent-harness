@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -99,7 +98,7 @@ def ado_profile_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     profiles_dir = tmp_path / "profiles"
     profiles_dir.mkdir()
     (profiles_dir / f"{profile_name}.yaml").write_text(
-        f"""
+        """
 client: "Test Client"
 ticket_source:
   type: "ado"
@@ -384,6 +383,115 @@ def test_spawn_deletes_askpass_even_when_session_times_out(
     assert not askpass_paths_during[0].exists(), (
         "askpass must be deleted on timeout too"
     )
+
+
+def test_completion_callback_sends_api_key_header(
+    ado_client_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When L1 protects /api/agent-complete with API_KEY, spawn_team must
+    send it as X-API-Key or completed tickets remain stuck in-flight."""
+    spawn_team = _load_spawn_team_module()
+
+    monkeypatch.setenv("API_KEY", "l1-control-plane-key")
+    ticket_json = tmp_path / "ticket.json"
+    ticket_json.write_text(json.dumps({"id": "TEST-4"}))
+
+    requests: list[object] = []
+    real_run = subprocess.run
+
+    def recording_run(*args, **kwargs):
+        argv = args[0] if args else kwargs.get("args", [])
+        if argv and argv[0] == "claude":
+            proc = MagicMock()
+            proc.returncode = 0
+            return proc
+        return real_run(*args, **kwargs)
+
+    def recording_urlopen(req, *args, **kwargs):
+        requests.append(req)
+        return _FakeUrlopenResponse()
+
+    argv = [
+        "spawn_team.py",
+        "--client-repo", str(ado_client_repo),
+        "--ticket-json", str(ticket_json),
+        "--branch-name", "ai/TEST-4",
+    ]
+
+    with patch.object(sys, "argv", argv), patch.object(
+        spawn_team.subprocess, "run", side_effect=recording_run,
+    ), patch.object(
+        spawn_team.urllib.request, "urlopen", side_effect=recording_urlopen,
+    ):
+        try:
+            spawn_team.main()
+        except SystemExit as exc:
+            assert exc.code == 0 or exc.code is None
+
+    completion_requests = [
+        req for req in requests if req.full_url.endswith("/api/agent-complete")
+    ]
+    assert completion_requests, "spawn_team never called /api/agent-complete"
+    assert completion_requests[-1].headers["X-api-key"] == "l1-control-plane-key"
+
+
+def test_contentstack_preflight_requires_minimum_env(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    spawn_team = _load_spawn_team_module()
+    for name in (
+        "CONTENTSTACK_API_KEY",
+        "CONTENTSTACK_DELIVERY_TOKEN",
+        "CONTENTSTACK_REGION",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(SystemExit) as exc:
+        spawn_team._preflight_platform_profile("contentstack")
+
+    assert exc.value.code == 1
+    assert "CONTENTSTACK_API_KEY" in capsys.readouterr().err
+
+
+def test_replays_pending_completion_with_api_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prior failed completion callback should be retried before its
+    worktree is cleaned up for a same-ticket rerun."""
+    spawn_team = _load_spawn_team_module()
+    monkeypatch.setenv("API_KEY", "l1-control-plane-key")
+
+    worktree_dir = tmp_path / "worktree"
+    pending = worktree_dir / ".harness" / "completion-pending.json"
+    pending.parent.mkdir(parents=True)
+    pending.write_text(json.dumps({
+        "ticket_id": "TEST-5",
+        "trace_id": "trace-5",
+        "status": "complete",
+        "pr_url": "https://example.test/pr/5",
+        "branch": "ai/TEST-5",
+        "failed_units": [],
+        "source": "ado",
+    }))
+
+    requests: list[object] = []
+
+    def recording_urlopen(req, *args, **kwargs):
+        requests.append(req)
+        return _FakeUrlopenResponse()
+
+    with patch.object(
+        spawn_team.urllib.request, "urlopen", side_effect=recording_urlopen,
+    ):
+        assert spawn_team._replay_completion_pending(worktree_dir)
+
+    assert not pending.exists()
+    assert requests
+    assert requests[-1].headers["X-api-key"] == "l1-control-plane-key"
 
 
 # ---------------------------------------------------------------------------

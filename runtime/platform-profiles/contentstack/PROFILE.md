@@ -42,6 +42,14 @@ This profile bundles the official `@contentstack/mcp` server. See `harness-mcp.j
 The agent gets full CRUD across the stack — destructive operations require explicit
 human confirmation per the code-review supplement.
 
+The generated worktree `.mcp.json` intentionally does not persist
+`CONTENTSTACK_API_KEY`, `CONTENTSTACK_DELIVERY_TOKEN`, or
+`CONTENTSTACK_MANAGEMENT_TOKEN`. `spawn_team.py` passes those values through the
+Claude process environment for the MCP child process to inherit, and it fails
+fast when the required API key, delivery token, or region is missing. Use
+`scripts/smoke-test-contentstack-mcp.sh` as the full MCP doctor before dispatching
+important ContentStack tickets.
+
 ## Runtime Posture
 
 Contentstack tickets are not generic React tickets. A valid run needs all of:

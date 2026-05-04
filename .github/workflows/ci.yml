@@ -81,3 +81,42 @@ jobs:
 
       - name: Run inject-runtime tests
         run: python3 tests/test_inject_runtime.py
+
+  operator-ui:
+    name: Operator UI
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: services/operator_ui
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: services/operator_ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build static bundle
+        run: npm run build
+
+      - name: Check committed static bundle drift
+        working-directory: .
+        run: |
+          git diff --exit-code -- \
+            services/l1_preprocessing/operator_static/index.html \
+            services/l1_preprocessing/operator_static/operator.css \
+            services/l1_preprocessing/operator_static/operator.js \
+            services/l1_preprocessing/operator_static/tokens.css
