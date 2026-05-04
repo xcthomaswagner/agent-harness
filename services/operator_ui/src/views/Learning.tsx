@@ -371,6 +371,15 @@ function LessonActions({
       </div>
     );
   }
+  if (status === "snoozed") {
+    return (
+      <div style={{ display: "flex", gap: "4px" }}>
+        <Button size="sm" variant="danger" disabled={disabled} onClick={() => onAction("reject")}>
+          Reject
+        </Button>
+      </div>
+    );
+  }
   return <span style={{ color: "var(--ink-500)" }}>—</span>;
 }
 
