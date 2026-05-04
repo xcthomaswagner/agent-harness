@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
+import { readableErrorText } from "../api/errors";
 import { fetchHeaders } from "../api/key";
 import type { ModelPolicyResponse, ModelPolicyRole } from "../api/types";
 import {
@@ -58,7 +59,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
       credentials: "same-origin",
     })
       .then(async (res) => {
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`${res.status}: ${readableErrorText(text)}`);
+        }
         return (await res.json()) as ModelPolicyResponse;
       })
       .then((data) => {
@@ -122,7 +126,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
       }),
     })
       .then(async (res) => {
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`${res.status}: ${readableErrorText(text)}`);
+        }
         return (await res.json()) as ModelPolicyResponse;
       })
       .then((data) => {
