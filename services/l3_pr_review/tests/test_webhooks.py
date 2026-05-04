@@ -169,6 +169,40 @@ async def test_ci_failure_triggers_fix() -> None:
         assert response.json()["event_type"] == "ci_failed"
 
 
+async def test_check_run_failure_fetches_workflow_run_logs() -> None:
+    payload = {
+        "action": "completed",
+        "repository": {"full_name": "org/repo"},
+        "check_run": {
+            "id": 999,
+            "run_id": 12345,
+            "conclusion": "failure",
+            "head_branch": "ai/PROJ-123",
+            "pull_requests": [{"number": 42}],
+        },
+    }
+
+    with (
+        patch.object(l3_main, "WEBHOOK_SECRET", TEST_SECRET),
+        patch.object(l3_main, "_get_spawner") as mock_get,
+        patch.object(
+            l3_main, "_fetch_ci_logs", new=AsyncMock(return_value="failure logs")
+        ) as fetch_logs,
+    ):
+        mock_spawner = MagicMock()
+        mock_spawner.spawn_ci_fix.return_value = True
+        mock_get.return_value = mock_spawner
+
+        async with await _make_client() as client:
+            response = await _post_webhook(client, payload, "check_run")
+
+    assert response.status_code == 202
+    assert response.json()["event_type"] == "ci_failed"
+    fetch_logs.assert_awaited_once_with("org/repo", 12345)
+    mock_spawner.spawn_ci_fix.assert_called_once()
+    assert mock_spawner.spawn_ci_fix.call_args.kwargs["failure_logs"] == "failure logs"
+
+
 # --- Review comment -> spawns response ---
 
 

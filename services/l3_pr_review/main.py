@@ -780,6 +780,27 @@ async def _fetch_ci_logs(repo: str, run_id: int) -> str:
         return f"Failed to fetch CI logs: {exc}"
 
 
+def _workflow_run_id_from_check(check: dict[str, Any]) -> int:
+    """Return the Actions workflow-run id for a check payload.
+
+    GitHub ``check_run.id`` is not the same as the Actions workflow-run id
+    needed by ``/actions/runs/{run_id}/jobs``. Prefer explicit ``run_id`` and
+    fall back to parsing Actions URLs before using legacy ``id``.
+    """
+    run_id = check.get("run_id")
+    if isinstance(run_id, int) and run_id > 0:
+        return run_id
+    for key in ("details_url", "html_url"):
+        value = check.get(key)
+        if not isinstance(value, str):
+            continue
+        match = re.search(r"/actions/runs/(\d+)", value)
+        if match:
+            return int(match.group(1))
+    legacy_id = check.get("id")
+    return int(legacy_id) if isinstance(legacy_id, int) and legacy_id > 0 else 0
+
+
 async def _fetch_pr_details(
     repo: str,
     pr_number: int,
@@ -855,7 +876,7 @@ async def _handle_ci_failed(payload: dict[str, Any]) -> None:
                      "ci_fix_spawned", branch=branch, pr_numbers=pr_numbers)
 
     # Fetch actual failure logs from GitHub Actions
-    run_id = check.get("id", 0)
+    run_id = _workflow_run_id_from_check(check)
     failure_logs = await _fetch_ci_logs(repo, run_id)
     if not failure_logs:
         failure_logs = f"CI {conclusion} on branch {branch}. Check the Actions tab for details."
