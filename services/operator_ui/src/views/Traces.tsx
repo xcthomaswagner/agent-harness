@@ -221,6 +221,18 @@ export function TracesView() {
                       >
                         Misfire
                       </Button>
+                      {t.lifecycle_state === "stale" && (
+                        <Button
+                          size="sm"
+                          disabled={busyId === t.id}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void markTrace(t.id, "open", feed.refresh, setBusyId);
+                          }}
+                        >
+                          Mark Active
+                        </Button>
+                      )}
                       {t.lifecycle_state !== "stale" && t.status !== "done" && (
                         <Button
                           size="sm"

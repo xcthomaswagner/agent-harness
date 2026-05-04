@@ -1364,7 +1364,9 @@ def post_trace_state(ticket_id: str, update: DashboardStateUpdate) -> dict[str, 
                 update.exclude_metrics if state in ("suppressed", "misfire") else False
             ),
             only_active=state not in ("open",),
-            source_states=("suppressed", "misfire") if state == "open" else None,
+            source_states=(
+                ("suppressed", "misfire", "stale") if state == "open" else None
+            ),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

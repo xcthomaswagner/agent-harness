@@ -1097,6 +1097,63 @@ def test_trace_state_mark_misfire_hides_trace_and_excludes_pr_run(
         conn.close()
 
 
+def test_trace_state_open_restores_stale_pr_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+    logs_dir = tmp_path / "logs"
+    import tracer as tracer_module
+
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    _write_trace(
+        logs_dir,
+        "HARN-STALE-OPEN",
+        events=[
+            ("webhook", "webhook_received"),
+            ("pipeline", "l2_dispatched"),
+        ],
+    )
+    _seed_pr_run(
+        db_path,
+        ticket_id="HARN-STALE-OPEN",
+        pr_number=78,
+        client_profile="alpha",
+        state="stale",
+    )
+
+    c = TestClient(_mk_app())
+    r = c.post(
+        "/api/operator/traces/HARN-STALE-OPEN/state",
+        json={
+            "state": "open",
+            "reason": "operator confirmed still active",
+            "exclude_metrics": False,
+        },
+    )
+
+    assert r.status_code == 200
+    assert r.json()["affected_pr_runs"] == 1
+    conn = open_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT state, state_reason FROM pr_runs WHERE ticket_id = ?",
+            ("HARN-STALE-OPEN",),
+        ).fetchone()
+        assert row["state"] == "open"
+        assert row["state_reason"] == "operator confirmed still active"
+    finally:
+        conn.close()
+
+
 def test_reconcile_stale_marks_old_active_pr_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

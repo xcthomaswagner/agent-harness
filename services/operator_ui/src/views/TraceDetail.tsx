@@ -106,6 +106,17 @@ export function TraceDetailView({ id }: Props) {
                 Misfire
               </Button>
             )}
+            {!t.hidden && t.lifecycle_state === "stale" && (
+              <Button
+                size="sm"
+                disabled={busy}
+                onClick={() => {
+                  void markTrace(id, "open", feed.refresh, setBusy);
+                }}
+              >
+                Mark Active
+              </Button>
+            )}
             {!t.hidden && t.lifecycle_state !== "stale" && t.status !== "done" && (
               <Button
                 size="sm"
