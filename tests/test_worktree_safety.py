@@ -16,7 +16,11 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from worktree_safety import safe_remove_worktree  # noqa: E402
 
 
-def _init_repo_and_worktree(tmp_path: Path) -> tuple[Path, Path]:
+def _init_repo_and_worktree(
+    tmp_path: Path,
+    *,
+    branch: str = "feat",
+) -> tuple[Path, Path]:
     """Initialise a git repo with one worktree under <tmp>/worktrees/feat.
 
     Returns ``(client_repo, worktree_dir)``.
@@ -45,11 +49,11 @@ def _init_repo_and_worktree(tmp_path: Path) -> tuple[Path, Path]:
 
     worktrees_parent = tmp_path / "worktrees"
     worktrees_parent.mkdir()
-    wt_dir = worktrees_parent / "feat"
+    wt_dir = worktrees_parent / branch
     subprocess.run(
         [
             "git", "-C", str(client_repo), "worktree", "add",
-            "-b", "feat", str(wt_dir),
+            "-b", branch, str(wt_dir),
         ],
         check=True,
     )
@@ -110,6 +114,25 @@ def test_archives_untracked_files_then_removes() -> None:
         assert not wt_dir.exists()
 
 
+def test_allows_nested_ai_branch_worktree_paths() -> None:
+    """Branch names like ai/TICKET create nested worktree paths and must clean up."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        client_repo, wt_dir = _init_repo_and_worktree(tmp_path, branch="ai/TEST-1")
+
+        (wt_dir / "README.md").write_text("hi\nnested branch change\n")
+        archive_dir = tmp_path / "archive"
+
+        safe_remove_worktree(
+            wt_dir,
+            archive_dir=archive_dir,
+            client_repo=client_repo,
+        )
+
+        assert not wt_dir.exists()
+        assert (archive_dir / "ai" / wt_dir.name / "uncommitted.patch").exists()
+
+
 def test_noop_when_worktree_missing() -> None:
     """Nonexistent worktree path should be a silent no-op."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -132,6 +155,20 @@ def test_rejects_path_outside_worktrees_parent() -> None:
             safe_remove_worktree(bad, archive_dir=None)
         # Defensive rmtree did not fire
         assert bad.exists()
+
+
+def test_rejects_traversal_outside_client_worktrees_root() -> None:
+    """A traversal-shaped path must not resolve outside the repo worktrees root."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        client_repo = tmp_path / "client"
+        client_repo.mkdir()
+        bad = tmp_path / "worktrees" / ".." / "client"
+
+        with pytest.raises(ValueError, match="outside expected worktrees root"):
+            safe_remove_worktree(bad, archive_dir=None, client_repo=client_repo)
+
+        assert client_repo.exists()
 
 
 def test_no_archive_when_archive_dir_none_but_dirty() -> None:

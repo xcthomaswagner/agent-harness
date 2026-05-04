@@ -10,12 +10,11 @@ safety improvements the inline version skipped:
    restart that triggers cleanup doesn't silently discard pending
    changes.
 
-2. **Path-prefix guard** against ``rm -rf /..``. The worktrees root
-   (``<wt_path>.parent``) must live beneath a well-known project
-   directory (we require ``worktrees`` as the last path segment of
-   the parent) before any destructive call runs. A typo'd caller
-   that hands us ``/`` or ``~`` fails loudly instead of erasing
-   the home directory.
+2. **Path-prefix guard** against ``rm -rf /..``. The target must live
+   under the repo sibling ``worktrees`` directory (including nested
+   branch paths such as ``worktrees/ai/TICKET``) before any destructive
+   call runs. A typo'd caller that hands us ``/`` or ``~`` fails loudly
+   instead of erasing the home directory.
 
 Callers: ``scripts/spawn_team.py`` (pre-flight stale cleanup + post-run
 removal), ``scripts/cleanup_worktree.py``, ``scripts/cleanup_stale_worktrees.py``.
@@ -29,9 +28,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-# Name the worktrees parent dir must have to satisfy the safety prefix
-# guard. Every caller constructs worktrees as ``<project>/worktrees/<branch>``
-# so the parent's last segment is ``worktrees`` by convention.
+# Name of the worktrees root dir used by every caller:
+# ``<project>/worktrees/<branch>``. Branch names can contain slashes, so
+# the worktree path can be nested below this root.
 _EXPECTED_PARENT_NAME = "worktrees"
 
 
@@ -104,6 +103,32 @@ def _archive_untracked_files(
         shutil.copy2(source, dest)
 
 
+def _worktrees_root_for(wt_path: Path, client_repo: Path | None) -> Path:
+    """Return the expected worktrees root for a worktree path."""
+    if client_repo is not None:
+        return client_repo.resolve().parent / _EXPECTED_PARENT_NAME
+
+    resolved = wt_path.resolve()
+    for parent in resolved.parents:
+        if parent.name == _EXPECTED_PARENT_NAME:
+            return parent
+    raise ValueError(
+        f"safe_remove_worktree: refusing to operate on {wt_path} — "
+        f"no {_EXPECTED_PARENT_NAME!r} ancestor found. Callers must construct "
+        f"worktree paths as <project>/worktrees/<branch>."
+    )
+
+
+def _archive_target_for(
+    archive_dir: Path,
+    wt_path: Path,
+    worktrees_root: Path,
+) -> Path:
+    """Return a collision-resistant archive target for a worktree."""
+    rel_path = wt_path.resolve().relative_to(worktrees_root)
+    return archive_dir.joinpath(*rel_path.parts)
+
+
 def safe_remove_worktree(
     wt_path: Path,
     *,
@@ -131,9 +156,9 @@ def safe_remove_worktree(
          braces fallback if the git command reported success but left
          the directory behind, or if the command failed.
 
-    Raises ``ValueError`` when the path's parent name is not
-    ``worktrees`` — a sanity check against typo'd callers that would
-    otherwise rmtree unrelated directory trees.
+    Raises ``ValueError`` when the path is not under the expected
+    ``worktrees`` root — a sanity check against typo'd callers that
+    would otherwise rmtree unrelated directory trees.
     """
     # Callers pass their own ``subprocess.run`` so test mocks patched on
     # the caller's module keep working. Fall back to the stdlib call when
@@ -141,13 +166,22 @@ def safe_remove_worktree(
     run = run_fn if run_fn is not None else subprocess.run
 
     # Step 7: prefix guard. Must fire BEFORE any destructive work so a
-    # bad path never reaches ``shutil.rmtree``.
-    if wt_path.parent.name != _EXPECTED_PARENT_NAME:
+    # bad path never reaches ``shutil.rmtree``. Normal harness branch
+    # names look like ``ai/TICKET`` and therefore resolve to nested
+    # paths below the worktrees root.
+    resolved_wt = wt_path.resolve()
+    worktrees_root = _worktrees_root_for(wt_path, client_repo)
+    try:
+        resolved_wt.relative_to(worktrees_root)
+    except ValueError as exc:
         raise ValueError(
             f"safe_remove_worktree: refusing to operate on {wt_path} — "
-            f"parent directory is {wt_path.parent.name!r}, expected "
-            f"{_EXPECTED_PARENT_NAME!r}. Callers must construct worktree "
-            f"paths as <project>/worktrees/<branch>."
+            f"resolved path {resolved_wt} is outside expected worktrees "
+            f"root {worktrees_root}."
+        ) from exc
+    if resolved_wt == worktrees_root:
+        raise ValueError(
+            f"safe_remove_worktree: refusing to operate on worktrees root {wt_path}"
         )
 
     # Step 1: no-op if the directory doesn't exist.
@@ -169,7 +203,7 @@ def safe_remove_worktree(
             patch_text = _run_git_diff(wt_path, run)
             untracked_files = _untracked_files(wt_path, run)
             if patch_text or untracked_files:
-                archive_target = archive_dir / wt_path.name
+                archive_target = _archive_target_for(archive_dir, wt_path, worktrees_root)
                 archive_target.mkdir(parents=True, exist_ok=True)
                 if patch_text:
                     (archive_target / "uncommitted.patch").write_text(patch_text)
