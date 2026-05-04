@@ -196,7 +196,9 @@ def inject(target_dir: Path, platform_profile: str = "") -> None:
         # Expand ${VAR} and ${VAR:-default} placeholders
         merged_mcp = expand_env_vars(base_mcp)
 
-        (target_dir / ".mcp.json").write_text(json.dumps(merged_mcp, indent=2) + "\n")
+        mcp_target = target_dir / ".mcp.json"
+        mcp_target.write_text(json.dumps(merged_mcp, indent=2) + "\n")
+        mcp_target.chmod(0o600)
         print("[inject] MCP config written")
 
     # --- Step 6: Create harness directories ---

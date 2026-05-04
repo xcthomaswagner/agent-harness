@@ -6,7 +6,8 @@
       "CONTENTSTACK_MANAGEMENT_TOKEN",
       "CONTENTSTACK_REGION",
       "CONTENTSTACK_ENVIRONMENT",
-      "CONTENTSTACK_BRANCH"
+      "CONTENTSTACK_BRANCH",
+      "CONTENTSTACK_MCP_GROUPS"
     ]
   },
   "mcpServers": {
@@ -14,10 +15,13 @@
       "command": "npx",
       "args": ["-y", "@contentstack/mcp"],
       "env": {
+        "CONTENTSTACK_API_KEY": "${CONTENTSTACK_API_KEY}",
+        "CONTENTSTACK_DELIVERY_TOKEN": "${CONTENTSTACK_DELIVERY_TOKEN}",
+        "CONTENTSTACK_MANAGEMENT_TOKEN": "${CONTENTSTACK_MANAGEMENT_TOKEN:-}",
         "CONTENTSTACK_REGION": "${CONTENTSTACK_REGION:-NA}",
         "CONTENTSTACK_ENVIRONMENT": "${CONTENTSTACK_ENVIRONMENT:-development}",
         "CONTENTSTACK_BRANCH": "${CONTENTSTACK_BRANCH:-ai}",
-        "GROUPS": "cma,cda"
+        "GROUPS": "${CONTENTSTACK_MCP_GROUPS:-cma,cda}"
       }
     }
   }

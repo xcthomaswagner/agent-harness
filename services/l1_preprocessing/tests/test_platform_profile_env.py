@@ -162,5 +162,6 @@ def test_pass_through_real_contentstack_profile() -> None:
         "CONTENTSTACK_REGION",
         "CONTENTSTACK_ENVIRONMENT",
         "CONTENTSTACK_BRANCH",
+        "CONTENTSTACK_MCP_GROUPS",
     }
     assert pass_through_vars("contentstack") == expected

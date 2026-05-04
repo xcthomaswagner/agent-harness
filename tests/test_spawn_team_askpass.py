@@ -456,6 +456,23 @@ def test_contentstack_preflight_requires_minimum_env(
     assert "CONTENTSTACK_API_KEY" in capsys.readouterr().err
 
 
+def test_contentstack_preflight_rejects_unsupported_groups(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    spawn_team = _load_spawn_team_module()
+    monkeypatch.setenv("CONTENTSTACK_API_KEY", "key")
+    monkeypatch.setenv("CONTENTSTACK_DELIVERY_TOKEN", "token")
+    monkeypatch.setenv("CONTENTSTACK_REGION", "NA")
+    monkeypatch.setenv("CONTENTSTACK_MCP_GROUPS", "all")
+
+    with pytest.raises(SystemExit) as exc:
+        spawn_team._preflight_platform_profile("contentstack")
+
+    assert exc.value.code == 1
+    assert "CONTENTSTACK_MCP_GROUPS" in capsys.readouterr().err
+
+
 def test_replays_pending_completion_with_api_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

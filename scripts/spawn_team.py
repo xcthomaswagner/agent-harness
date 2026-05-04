@@ -140,6 +140,17 @@ def _preflight_platform_profile(profile_name: str) -> None:
         )
         sys.exit(1)
 
+    groups = os.environ.get("CONTENTSTACK_MCP_GROUPS", "cma,cda")
+    allowed_groups = {"cma", "cda"}
+    selected = {part.strip() for part in groups.split(",") if part.strip()}
+    if not selected or selected - allowed_groups:
+        print(
+            "[spawn] ERROR: CONTENTSTACK_MCP_GROUPS must be a comma-separated "
+            f"subset of cma,cda; got {groups!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
 
 def run_git(client_repo: str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     """Run a git command in the client repo."""

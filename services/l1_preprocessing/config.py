@@ -121,6 +121,7 @@ class Settings(BaseSettings):
     contentstack_region: str = ""           # NA | EU | AZURE_NA | AZURE_EU
     contentstack_environment: str = ""      # e.g. "development"
     contentstack_branch: str = ""           # e.g. "ai" (Enterprise branching)
+    contentstack_mcp_groups: str = ""       # e.g. "cma,cda"
     # ------------------------------------------------------------------------
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
