@@ -346,8 +346,6 @@ async def _evaluate_core(
                     reason="build_sha_stale",
                     gates={
                         "build_sha_matches": False,
-                        "caller_sha": head_sha,
-                        "pr_head_sha": pr_state_sha_raw,
                     },
                     dry_run=not global_enabled,
                 )

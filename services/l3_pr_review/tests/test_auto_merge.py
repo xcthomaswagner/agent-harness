@@ -396,8 +396,6 @@ async def test_build_sha_stale_records_skipped_decision(
     assert kwargs["head_sha"] == "old_sha"
     assert kwargs["gates"] == {
         "build_sha_matches": False,
-        "caller_sha": "old_sha",
-        "pr_head_sha": "new_sha",
     }
 
 
