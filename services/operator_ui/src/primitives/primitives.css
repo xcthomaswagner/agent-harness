@@ -347,6 +347,45 @@
   font-weight: 400;
 }
 
+.op-tbl thead th.is-num .op-tbl-sort {
+  justify-content: flex-end;
+}
+
+.op-tbl-sort {
+  display: inline-flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.op-tbl-sort:hover {
+  color: var(--ink-900);
+}
+
+.op-tbl-sort-mark {
+  color: var(--ink-500);
+  font-size: 9px;
+  line-height: 1;
+}
+
+.op-tbl th[aria-sort="ascending"] .op-tbl-sort,
+.op-tbl th[aria-sort="descending"] .op-tbl-sort {
+  color: var(--accent);
+}
+
+.op-tbl th[aria-sort="ascending"] .op-tbl-sort-mark,
+.op-tbl th[aria-sort="descending"] .op-tbl-sort-mark {
+  color: var(--accent);
+}
+
 .op-tbl tbody td {
   padding: 12px;
   border-bottom: var(--rule-dim);

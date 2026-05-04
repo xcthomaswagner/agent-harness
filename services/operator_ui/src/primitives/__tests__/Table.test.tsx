@@ -77,4 +77,59 @@ describe("Table", () => {
     // The third column (count) is numeric.
     expect(countCells[2]?.classList.contains("is-num")).toBe(true);
   });
+
+  it("sorts by any header and toggles direction", () => {
+    const rows: Row[] = [
+      { id: "T-2", name: "bravo", count: 11 },
+      { id: "T-1", name: "alpha", count: 4 },
+      { id: "T-3", name: "charlie", count: 7 },
+    ];
+    const { container, getByRole } = render(
+      <Table columns={columns} rows={rows} rowKey={(r) => r.id} />,
+    );
+
+    fireEvent.click(getByRole("button", { name: /Name/ }));
+    expect(
+      [...container.querySelectorAll("tbody tr td:first-child")].map(
+        (td) => td.textContent,
+      ),
+    ).toEqual(["T-1", "T-2", "T-3"]);
+    expect(
+      container.querySelector("th[aria-sort='ascending']")?.textContent,
+    ).toContain("Name");
+
+    fireEvent.click(getByRole("button", { name: /Name/ }));
+    expect(
+      [...container.querySelectorAll("tbody tr td:first-child")].map(
+        (td) => td.textContent,
+      ),
+    ).toEqual(["T-3", "T-2", "T-1"]);
+    expect(
+      container.querySelector("th[aria-sort='descending']")?.textContent,
+    ).toContain("Name");
+  });
+
+  it("sorts rendered vnode text when no direct row key exists", () => {
+    const rows: Row[] = [
+      { id: "T-1", name: "zulu", count: 4 },
+      { id: "T-2", name: "alpha", count: 11 },
+    ];
+    const vnodeColumns = [
+      {
+        key: "display",
+        label: "Display",
+        render: (r: Row) => <span>{r.name}</span>,
+      },
+    ];
+    const { container, getByRole } = render(
+      <Table columns={vnodeColumns} rows={rows} rowKey={(r) => r.id} />,
+    );
+
+    fireEvent.click(getByRole("button", { name: /Display/ }));
+    expect(
+      [...container.querySelectorAll("tbody tr td:first-child")].map(
+        (td) => td.textContent,
+      ),
+    ).toEqual(["alpha", "zulu"]);
+  });
 });
