@@ -233,7 +233,11 @@ async def test_changes_requested_triggers_fix() -> None:
 async def test_issue_comment_on_pr_triggers_response() -> None:
     payload = {
         "action": "created",
-        "issue": {"number": 10, "pull_request": {"url": "..."}},
+        "repository": {"full_name": "org/repo"},
+        "issue": {
+            "number": 10,
+            "pull_request": {"url": "https://api.github.com/repos/org/repo/pulls/10"},
+        },
         "comment": {
             "body": "Can you explain this change?",
             "user": {"login": "human-reviewer"},
@@ -248,11 +252,30 @@ async def test_issue_comment_on_pr_triggers_response() -> None:
         mock_spawner.spawn_comment_response.return_value = True
         mock_get.return_value = mock_spawner
 
-        async with await _make_client() as client:
-            response = await _post_webhook(client, payload, "issue_comment")
+        with patch.object(
+            l3_main,
+            "_fetch_pr_details",
+            new=AsyncMock(
+                return_value={
+                    "number": 10,
+                    "head": {"ref": "ai/PROJ-123", "sha": "abc123"},
+                }
+            ),
+        ) as fetch_pr:
+            async with await _make_client() as client:
+                response = await _post_webhook(client, payload, "issue_comment")
 
         assert response.status_code == 202
         assert response.json()["event_type"] == "review_comment"
+        fetch_pr.assert_awaited_once_with(
+            "org/repo",
+            10,
+            api_url="https://api.github.com/repos/org/repo/pulls/10",
+        )
+        mock_spawner.spawn_comment_response.assert_called_once()
+        kwargs = mock_spawner.spawn_comment_response.call_args.kwargs
+        assert kwargs["branch"] == "ai/PROJ-123"
+        assert kwargs["repo"] == "org/repo"
 
 
 # --- Bot self-loop prevention ---

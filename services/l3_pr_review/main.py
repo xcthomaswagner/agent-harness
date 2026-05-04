@@ -780,6 +780,52 @@ async def _fetch_ci_logs(repo: str, run_id: int) -> str:
         return f"Failed to fetch CI logs: {exc}"
 
 
+async def _fetch_pr_details(
+    repo: str,
+    pr_number: int,
+    *,
+    api_url: str = "",
+) -> dict[str, Any]:
+    """Fetch a PR object when a webhook only carries issue-comment shape.
+
+    GitHub ``issue_comment`` events for PR conversations include
+    ``issue.number`` and ``issue.pull_request.url`` but not the
+    ``pull_request.head.ref`` payload that comment-response agents need to
+    checkout the branch. Fetch the PR before spawning so the spawner can fail
+    closed on missing branch/repo instead of launching without context.
+    """
+    if not pr_number:
+        return {}
+    url = api_url or (f"https://api.github.com/repos/{repo}/pulls/{pr_number}" if repo else "")
+    if not url:
+        return {}
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    gh_token = os.getenv("GITHUB_TOKEN", "")
+    if gh_token:
+        headers["Authorization"] = f"Bearer {gh_token}"
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers=headers, timeout=10.0)
+            if resp.status_code != 200:
+                logger.warning(
+                    "pr_detail_fetch_failed",
+                    pr_number=pr_number,
+                    repo=repo,
+                    status=resp.status_code,
+                )
+                return {}
+            data = resp.json()
+            return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logger.warning(
+            "pr_detail_fetch_failed",
+            pr_number=pr_number,
+            repo=repo,
+            error=str(exc)[:200],
+        )
+        return {}
+
+
 async def _handle_ci_failed(payload: dict[str, Any]) -> None:
     """Handle CI failure — fetch logs and spawn fix agent."""
     check = payload.get("check_suite", payload.get("check_run", {}))
@@ -829,6 +875,7 @@ async def _handle_review_comment(payload: dict[str, Any]) -> None:
     """Handle human review comment — spawn response agent."""
     # From pull_request_review event
     review = payload.get("review", {})
+    pr = payload.get("pull_request", {}) or {}
     if review:
         if _is_bot_comment(payload, ["review", "user"]):
             logger.debug("ignoring_bot_review_comment")
@@ -846,6 +893,12 @@ async def _handle_review_comment(payload: dict[str, Any]) -> None:
         comment = payload.get("comment", {})
         comment_body = comment.get("body", "")
         comment_author = comment.get("user", {}).get("login", "unknown")
+        repo = payload.get("repository", {}).get("full_name", "")
+        pr = await _fetch_pr_details(
+            repo,
+            pr_number if isinstance(pr_number, int) else 0,
+            api_url=(issue.get("pull_request") or {}).get("url", ""),
+        )
 
     if not comment_body.strip():
         return
@@ -868,7 +921,6 @@ async def _handle_review_comment(payload: dict[str, Any]) -> None:
                      "comment_response_spawned", pr_number=pr_number,
                      author=comment_author)
 
-    pr = payload.get("pull_request", {})
     branch = _pr_head_branch(pr)
     repo = payload.get("repository", {}).get("full_name", "")
     _get_spawner().spawn_comment_response(
