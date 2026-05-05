@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -36,6 +37,7 @@ def _write_profile(
     name: str,
     platform: str = "salesforce",
     project_key: str = "TEST",
+    local_path: str = "/tmp/x",
 ) -> None:
     """Write a minimal client-profile YAML the loader can parse."""
     profiles_dir.mkdir(parents=True, exist_ok=True)
@@ -52,7 +54,7 @@ def _write_profile(
                     "quick_label": "ai-quick",
                 },
                 "source_control": {"kind": "github", "owner": "x", "repo": "y"},
-                "client_repo": {"local_path": "/tmp/x"},
+                "client_repo": {"local_path": local_path},
             }
         )
     )
@@ -98,9 +100,7 @@ def _seed_pr_run(
 
 
 @pytest.fixture
-def client(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> TestClient:
+def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     db_path = tmp_path / "autonomy.db"
     monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
     monkeypatch.setattr(settings, "api_key", "")
@@ -191,9 +191,7 @@ def test_profiles_counts_in_flight_and_completed_24h(
     # Use NOW-1h so the row falls inside the 24h window.
     from datetime import UTC, datetime, timedelta
 
-    recent_iso = (
-        datetime.now(UTC) - timedelta(hours=1)
-    ).isoformat()
+    recent_iso = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
 
     _seed_pr_run(
         db_path,
@@ -233,9 +231,7 @@ def test_profiles_count_active_pre_pr_traces(
     monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
 
     profiles_dir = tmp_path / "client-profiles"
-    _write_profile(
-        profiles_dir, "alpha", platform="contentstack", project_key="ALPHA"
-    )
+    _write_profile(profiles_dir, "alpha", platform="contentstack", project_key="ALPHA")
     import client_profile as cp_module
     import tracer as tracer_module
 
@@ -420,9 +416,7 @@ def test_profiles_counts_long_running_and_recently_merged_by_correct_timestamps(
     assert p["completed_24h"] == 1
 
 
-def test_profiles_sorted_by_in_flight_desc(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_profiles_sorted_by_in_flight_desc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = tmp_path / "autonomy.db"
     monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
     monkeypatch.setattr(settings, "api_key", "")
@@ -484,9 +478,7 @@ def test_profiles_auto_merge_rate_computed_from_decisions(
     try:
         ensure_schema(conn)
         # 3 merged, 1 blocked, 1 skipped → 3/4 eligible = 0.75
-        for i, decision in enumerate(
-            ["merged", "merged", "merged", "blocked", "skipped"]
-        ):
+        for i, decision in enumerate(["merged", "merged", "merged", "blocked", "skipped"]):
             record_auto_merge_decision(
                 conn,
                 repo_full_name="acme/widgets",
@@ -547,9 +539,7 @@ def test_all_operator_endpoints_require_auth_when_key_set(
     assert r.status_code != 401
 
 
-def test_profiles_requires_auth(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_profiles_requires_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = tmp_path / "autonomy.db"
     monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
     monkeypatch.setattr(settings, "api_key", "secret-key")
@@ -569,9 +559,7 @@ def test_profiles_requires_auth(
 
     c = TestClient(_mk_app())
     assert c.get("/api/operator/profiles").status_code == 401
-    ok = c.get(
-        "/api/operator/profiles", headers={"X-API-Key": "secret-key"}
-    )
+    ok = c.get("/api/operator/profiles", headers={"X-API-Key": "secret-key"})
     assert ok.status_code == 200
 
 
@@ -623,9 +611,7 @@ def test_model_policy_put_persists_operator_choices(
     assert policy_path.is_file()
 
     round_trip = client.get("/api/operator/model-policy").json()
-    assert {
-        row["role"]: row for row in round_trip["roles"]
-    }["developer"]["model"] == "sonnet"
+    assert {row["role"]: row for row in round_trip["roles"]}["developer"]["model"] == "sonnet"
 
 
 def test_model_policy_write_is_atomic_on_replace_failure(
@@ -666,6 +652,129 @@ def test_model_policy_rejects_unknown_role(
         json={"roles": [{"role": "other_user", "model": "opus", "reasoning": "high"}]},
     )
     assert r.status_code == 400
+
+
+def _init_git_repo(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+
+
+def test_repo_workflow_options_include_profile_repo_state(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "client"
+    _init_git_repo(repo)
+    (repo / "WORKFLOW.md").write_text("# WORKFLOW.md\n", encoding="utf-8")
+    profiles_dir = tmp_path / "client-profiles"
+    _write_profile(
+        profiles_dir,
+        "alpha",
+        platform="contentstack",
+        project_key="ALPHA",
+        local_path=str(repo),
+    )
+    import client_profile as cp_module
+
+    monkeypatch.setattr(cp_module, "PROFILES_DIR", profiles_dir)
+
+    r = client.get("/api/operator/repo-workflow/options")
+    assert r.status_code == 200
+    [profile] = r.json()["profiles"]
+    assert profile["client_profile"] == "alpha"
+    assert profile["platform_profile"] == "contentstack"
+    assert profile["repo_exists"] is True
+    assert profile["workflow_exists"] is True
+
+
+def test_repo_workflow_draft_scans_next_repo(client: TestClient, tmp_path: Path) -> None:
+    repo = tmp_path / "next-client"
+    _init_git_repo(repo)
+    (repo / "package.json").write_text(
+        json.dumps(
+            {
+                "scripts": {
+                    "typecheck": "tsc --noEmit",
+                    "lint": "eslint .",
+                    "test": "vitest run",
+                    "build": "next build",
+                },
+                "dependencies": {"next": "15.0.0", "react": "19.0.0"},
+                "devDependencies": {"@playwright/test": "1.0.0", "vitest": "3.0.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (repo / "package-lock.json").write_text("{}", encoding="utf-8")
+    (repo / "README.md").write_text("# Client\n", encoding="utf-8")
+    workflow_dir = repo / ".github" / "workflows"
+    workflow_dir.mkdir(parents=True)
+    (workflow_dir / "ci.yml").write_text(
+        "name: ci\njobs:\n  test:\n    steps:\n      - run: npm run build\n",
+        encoding="utf-8",
+    )
+
+    r = client.post(
+        "/api/operator/repo-workflow/draft",
+        json={"repo_path": str(repo), "client_profile": ""},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["repo_path"] == str(repo)
+    assert data["workflow_exists"] is False
+    assert "Next.js" in data["detected"]["frameworks"]
+    assert "npm run typecheck" in data["detected"]["validation_commands"]
+    assert "## Next.js Rules" in data["draft_text"]
+    assert any(row["source"] == "package.json" for row in data["evidence"])
+    assert any(item["id"] == "workflow_missing" for item in data["validation"])
+
+
+def test_repo_workflow_draft_uses_client_profile_path(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "contentstack-client"
+    _init_git_repo(repo)
+    (repo / "package.json").write_text(
+        json.dumps({"dependencies": {"next": "15.0.0"}}),
+        encoding="utf-8",
+    )
+    profiles_dir = tmp_path / "client-profiles"
+    _write_profile(
+        profiles_dir,
+        "alpha",
+        platform="contentstack",
+        project_key="ALPHA",
+        local_path=str(repo),
+    )
+    import client_profile as cp_module
+
+    monkeypatch.setattr(cp_module, "PROFILES_DIR", profiles_dir)
+
+    r = client.post(
+        "/api/operator/repo-workflow/draft",
+        json={"client_profile": "alpha", "repo_path": ""},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["client_profile"] == "alpha"
+    assert data["platform_profile"] == "contentstack"
+    assert "ContentStack" in data["detected"]["frameworks"]
+    assert "## ContentStack Rules" in data["draft_text"]
+
+
+def test_repo_workflow_save_writes_workflow_md(client: TestClient, tmp_path: Path) -> None:
+    repo = tmp_path / "save-client"
+    _init_git_repo(repo)
+    body = "# WORKFLOW.md\n\n## Repository Context\n\n- Repository: save-client\n"
+
+    r = client.put(
+        "/api/operator/repo-workflow",
+        json={"repo_path": str(repo), "client_profile": "", "content": body},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["saved"] is True
+    assert data["workflow_path"] == str(repo / "WORKFLOW.md")
+    assert (repo / "WORKFLOW.md").read_text(encoding="utf-8") == body
 
 
 def test_system_endpoint_reports_runtime_metadata(client: TestClient) -> None:
@@ -714,9 +823,7 @@ def _write_trace(
 
 
 @pytest.fixture
-def traces_client(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> TestClient:
+def traces_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """Test client with isolated data/logs and autonomy.db."""
     db_path = tmp_path / "autonomy.db"
     monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
@@ -758,9 +865,7 @@ def test_traces_empty(traces_client: TestClient) -> None:
     }
 
 
-def test_traces_returns_shaped_rows(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_traces_returns_shaped_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = tmp_path / "autonomy.db"
     monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
     monkeypatch.setattr(settings, "api_key", "")
@@ -796,9 +901,7 @@ def test_traces_returns_shaped_rows(
     assert "elapsed" in row
 
 
-def test_traces_status_filter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_traces_status_filter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = tmp_path / "autonomy.db"
     monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
     monkeypatch.setattr(settings, "api_key", "")
@@ -920,9 +1023,7 @@ def test_traces_limit_caps_at_500(traces_client: TestClient) -> None:
     assert r.json()["limit"] == 500
 
 
-def test_traces_pr_created_bucket_is_done(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_traces_pr_created_bucket_is_done(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """PR Created / Review Done / QA Done should all land in 'done', not 'in-flight'."""
     db_path = tmp_path / "autonomy.db"
     monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
@@ -942,24 +1043,25 @@ def test_traces_pr_created_bucket_is_done(
     logs_dir.mkdir(parents=True, exist_ok=True)
     pr_path = logs_dir / "HARN-PR.jsonl"
     pr_path.write_text(
-        json.dumps({
-            "ticket_id": "HARN-PR",
-            "trace_id": "t-pr",
-            "phase": "pr",
-            "event": "pr_opened",
-            "pr_url": "https://github.com/org/repo/pull/1",
-            "timestamp": "2026-04-18T12:00:00+00:00",
-            "source": "pipeline",
-        }) + "\n"
+        json.dumps(
+            {
+                "ticket_id": "HARN-PR",
+                "trace_id": "t-pr",
+                "phase": "pr",
+                "event": "pr_opened",
+                "pr_url": "https://github.com/org/repo/pull/1",
+                "timestamp": "2026-04-18T12:00:00+00:00",
+                "source": "pipeline",
+            }
+        )
+        + "\n"
     )
 
     c = TestClient(_mk_app())
     rows = c.get("/api/operator/traces").json()["traces"]
     pr_row = next(r for r in rows if r["id"] == "HARN-PR")
     assert pr_row["raw_status"] == "PR Created"
-    assert pr_row["status"] == "done", (
-        "PR Created should bucket as 'done' — agent work is finished"
-    )
+    assert pr_row["status"] == "done", "PR Created should bucket as 'done' — agent work is finished"
 
 
 def test_traces_stale_active_or_queued_reclassified_as_stuck(
@@ -988,40 +1090,49 @@ def test_traces_stale_active_or_queued_reclassified_as_stuck(
     logs_dir.mkdir(parents=True, exist_ok=True)
     stale_path = logs_dir / "HARN-STALE.jsonl"
     stale_path.write_text(
-        json.dumps({
-            "ticket_id": "HARN-STALE",
-            "trace_id": "t-stale",
-            "phase": "implement",
-            "event": "l2_dispatched",
-            "timestamp": stale_ts,
-            "source": "pipeline",
-        }) + "\n"
+        json.dumps(
+            {
+                "ticket_id": "HARN-STALE",
+                "trace_id": "t-stale",
+                "phase": "implement",
+                "event": "l2_dispatched",
+                "timestamp": stale_ts,
+                "source": "pipeline",
+            }
+        )
+        + "\n"
     )
 
     queued_path = logs_dir / "HARN-QUEUED-STALE.jsonl"
     queued_path.write_text(
-        json.dumps({
-            "ticket_id": "HARN-QUEUED-STALE",
-            "trace_id": "t-queued-stale",
-            "phase": "webhook",
-            "event": "webhook_received",
-            "timestamp": stale_ts,
-            "source": "pipeline",
-        }) + "\n"
+        json.dumps(
+            {
+                "ticket_id": "HARN-QUEUED-STALE",
+                "trace_id": "t-queued-stale",
+                "phase": "webhook",
+                "event": "webhook_received",
+                "timestamp": stale_ts,
+                "source": "pipeline",
+            }
+        )
+        + "\n"
     )
 
     # Fresh ticket dispatched 30 minutes ago — should stay in-flight.
     fresh_ts = (datetime.now(UTC) - timedelta(minutes=30)).isoformat()
     fresh_path = logs_dir / "HARN-FRESH.jsonl"
     fresh_path.write_text(
-        json.dumps({
-            "ticket_id": "HARN-FRESH",
-            "trace_id": "t-fresh",
-            "phase": "implement",
-            "event": "l2_dispatched",
-            "timestamp": fresh_ts,
-            "source": "pipeline",
-        }) + "\n"
+        json.dumps(
+            {
+                "ticket_id": "HARN-FRESH",
+                "trace_id": "t-fresh",
+                "phase": "implement",
+                "event": "l2_dispatched",
+                "timestamp": fresh_ts,
+                "source": "pipeline",
+            }
+        )
+        + "\n"
     )
 
     c = TestClient(_mk_app())
@@ -1079,9 +1190,7 @@ def test_trace_detail_reuses_stale_status_override(
     list_rows = c.get("/api/operator/traces").json()["traces"]
     detail = c.get("/api/operator/traces/HARN-DETAIL-STALE").json()
 
-    assert next(r for r in list_rows if r["id"] == "HARN-DETAIL-STALE")[
-        "status"
-    ] == "stuck"
+    assert next(r for r in list_rows if r["id"] == "HARN-DETAIL-STALE")["status"] == "stuck"
     assert detail["status"] == "stuck"
 
 
@@ -1464,9 +1573,7 @@ def test_trace_detail_shapes_phases_and_events(
     assert any("Review complete" in m for m in messages)
 
 
-def test_trace_detail_marks_failed_phase(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_trace_detail_marks_failed_phase(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = tmp_path / "autonomy.db"
     monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
     monkeypatch.setattr(settings, "api_key", "")
@@ -1687,9 +1794,7 @@ def test_autonomy_includes_auto_merge_trend(
     assert today_entry["sample"] == 2
 
 
-def test_autonomy_ticket_type_breakdown(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_autonomy_ticket_type_breakdown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = tmp_path / "autonomy.db"
     monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
     monkeypatch.setattr(settings, "api_key", "")
@@ -1820,9 +1925,7 @@ def test_agents_empty_when_no_worktree(client: TestClient) -> None:
     assert r.json() == {"agents": []}
 
 
-def test_agents_lists_teammates_with_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_agents_lists_teammates_with_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from datetime import UTC, datetime
 
     db_path = tmp_path / "autonomy.db"
@@ -1844,8 +1947,7 @@ def test_agents_lists_teammates_with_state(
     main_stream.write_text(json.dumps({"timestamp": now, "type": "system"}) + "\n")
 
     sub_stream = (
-        worktree / ".claude" / "worktrees" / "dev-01" / ".harness" / "logs"
-        / "session-stream.jsonl"
+        worktree / ".claude" / "worktrees" / "dev-01" / ".harness" / "logs" / "session-stream.jsonl"
     )
     sub_stream.parent.mkdir(parents=True)
     old = "2024-01-01T00:00:00+00:00"
@@ -1853,9 +1955,7 @@ def test_agents_lists_teammates_with_state(
 
     import live_stream as ls
 
-    monkeypatch.setattr(
-        ls, "_worktree_root_for_ticket", lambda _tid: worktree
-    )
+    monkeypatch.setattr(ls, "_worktree_root_for_ticket", lambda _tid: worktree)
     # operator_api_data imports _worktree_root_for_ticket from live_stream
     # at module load — patch both sites.
     import operator_api_data as oad
@@ -1897,9 +1997,7 @@ def test_agents_handles_naive_fallback_timestamp(
     stream.parent.mkdir(parents=True)
     # A system-only stream falls back to _last_event_time; pin that
     # timezone-naive ISO values don't crash UTC age comparison.
-    stream.write_text(
-        json.dumps({"timestamp": "2026-05-04T12:00:00", "type": "system"}) + "\n"
-    )
+    stream.write_text(json.dumps({"timestamp": "2026-05-04T12:00:00", "type": "system"}) + "\n")
 
     import operator_api_data as oad
 
@@ -2372,9 +2470,7 @@ def test_lesson_counts_empty(client: TestClient) -> None:
     assert all(v == 0 for v in counts.values())
 
 
-def test_lesson_counts_tallies_every_state(
-    client: TestClient, tmp_path: Path
-) -> None:
+def test_lesson_counts_tallies_every_state(client: TestClient, tmp_path: Path) -> None:
     from autonomy_store.lessons import update_lesson_status
 
     db_path = Path(settings.autonomy_db_path)

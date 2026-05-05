@@ -130,6 +130,8 @@ function crumbFor(route: Route): Crumb[] {
       ];
     case "learning":
       return [{ label: "Ops" }, { label: "Lessons", strong: true }];
+    case "repo-workflow":
+      return [{ label: "Ops" }, { label: "Repo Workflow", strong: true }];
     case "pr-detail":
       return [
         { label: "Pipeline" },

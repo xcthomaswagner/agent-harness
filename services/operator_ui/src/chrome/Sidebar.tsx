@@ -33,6 +33,7 @@ const NAV: readonly NavGroup[] = [
     items: [
       { label: "Autonomy", target: { name: "autonomy" } },
       { label: "Learning", target: { name: "learning" } },
+      { label: "Repo Workflow", target: { name: "repo-workflow" } },
     ],
   },
 ];

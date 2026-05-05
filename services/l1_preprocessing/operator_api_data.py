@@ -60,6 +60,12 @@ from live_stream import (
     summarize_stream_teammates,
     summarize_ticket_activity,
 )
+from repo_workflow import (
+    RepoWorkflowError,
+    generate_repo_workflow,
+    profile_options,
+    save_repo_workflow,
+)
 from tracer import (
     append_trace,
     compute_phase_durations,
@@ -188,6 +194,17 @@ class ModelPolicyUpdate(BaseModel):
     roles: list[ModelRoleSelection]
 
 
+class RepoWorkflowDraftRequest(BaseModel):
+    client_profile: str = Field(default="", max_length=128)
+    repo_path: str = Field(default="", max_length=1024)
+
+
+class RepoWorkflowSaveRequest(BaseModel):
+    client_profile: str = Field(default="", max_length=128)
+    repo_path: str = Field(default="", max_length=1024)
+    content: str = Field(min_length=1, max_length=200_000)
+
+
 class DashboardStateUpdate(BaseModel):
     state: str = Field(min_length=1, max_length=32)
     reason: str = Field(default="", max_length=500)
@@ -245,15 +262,10 @@ def _read_model_policy_file() -> dict[str, Any]:
             "label": role_defaults[role]["label"],
             "model": model if model in _MODEL_OPTIONS else role_defaults[role]["model"],
             "reasoning": (
-                reasoning
-                if reasoning in _REASONING_OPTIONS
-                else role_defaults[role]["reasoning"]
+                reasoning if reasoning in _REASONING_OPTIONS else role_defaults[role]["reasoning"]
             ),
         }
-    roles = [
-        configured_by_role.get(r["role"], dict(r))
-        for r in defaults["roles"]
-    ]
+    roles = [configured_by_role.get(r["role"], dict(r)) for r in defaults["roles"]]
     return {
         **defaults,
         "source": "local",
@@ -369,6 +381,63 @@ def put_model_policy(update: ModelPolicyUpdate) -> dict[str, Any]:
     return _write_model_policy_file(update)
 
 
+@router.get("/repo-workflow/options")
+def get_repo_workflow_options() -> dict[str, Any]:
+    """Client-profile repo choices for generating WORKFLOW.md overlays."""
+    return {"profiles": profile_options(list_profiles(), load_profile)}
+
+
+def _repo_workflow_target(
+    client_profile: str,
+    repo_path: str,
+) -> tuple[str, str, str]:
+    profile_name = client_profile.strip()
+    profile = None
+    if profile_name:
+        profile = load_profile(profile_name)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="client profile not found")
+    path = repo_path.strip()
+    if not path and profile is not None:
+        path = profile.client_repo_path
+    if not path:
+        raise HTTPException(status_code=400, detail="repo_path is required")
+    platform_profile = (
+        str(getattr(profile, "platform_profile", "") or "") if profile is not None else ""
+    )
+    return profile_name, path, platform_profile
+
+
+@router.post("/repo-workflow/draft")
+def post_repo_workflow_draft(request: RepoWorkflowDraftRequest) -> dict[str, Any]:
+    """Scan a repo and return an editable WORKFLOW.md draft with evidence."""
+    profile_name, path, platform_profile = _repo_workflow_target(
+        request.client_profile,
+        request.repo_path,
+    )
+    try:
+        return generate_repo_workflow(
+            path,
+            client_profile=profile_name,
+            platform_profile=platform_profile,
+        )
+    except RepoWorkflowError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/repo-workflow")
+def put_repo_workflow(request: RepoWorkflowSaveRequest) -> dict[str, Any]:
+    """Persist edited WORKFLOW.md content to the selected repo root."""
+    _profile_name, path, _platform_profile = _repo_workflow_target(
+        request.client_profile,
+        request.repo_path,
+    )
+    try:
+        return save_repo_workflow(path, request.content)
+    except RepoWorkflowError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 # Decisions that signal "auto-merge was eligible" (i.e., count in the
 # denominator of the adoption rate). ``skipped`` / ``not_eligible``
 # / unset values are excluded — they mean the run never qualified
@@ -376,14 +445,10 @@ def put_model_policy(update: ModelPolicyUpdate) -> dict[str, Any]:
 _AUTO_MERGE_ELIGIBLE_DECISIONS: frozenset[str] = frozenset(
     {"merged", "auto_merged", "merge", "blocked", "hold"}
 )
-_AUTO_MERGE_SUCCEEDED_DECISIONS: frozenset[str] = frozenset(
-    {"merged", "auto_merged", "merge"}
-)
+_AUTO_MERGE_SUCCEEDED_DECISIONS: frozenset[str] = frozenset({"merged", "auto_merged", "merge"})
 
 
-def _compute_auto_merge_rate(
-    conn: Any, profile: str, window_days: int
-) -> float:
+def _compute_auto_merge_rate(conn: Any, profile: str, window_days: int) -> float:
     """Auto-merge adoption rate = succeeded / eligible decisions.
 
     Reads ``manual_overrides`` where ``override_type =
@@ -426,9 +491,7 @@ def _compute_auto_merge_rate(
     return round(merged / eligible, 3)
 
 
-def _count_pr_runs_in_window(
-    conn: Any, profile: str, hours: int
-) -> tuple[int, int]:
+def _count_pr_runs_in_window(conn: Any, profile: str, hours: int) -> tuple[int, int]:
     """Return (in_flight_count, completed_in_window_count).
 
     in_flight = active, fresh pr_runs that are not merged/closed/suppressed.
@@ -529,9 +592,7 @@ def _profile_from_trace(
         with suppress(OSError, ValueError):
             worktree = _worktree_root_for_ticket(ticket_id)
             sc_path = (
-                worktree / ".harness" / "source-control.json"
-                if worktree is not None
-                else None
+                worktree / ".harness" / "source-control.json" if worktree is not None else None
             )
             if sc_path is not None and sc_path.exists():
                 source_control = json.loads(sc_path.read_text())
@@ -639,9 +700,7 @@ def get_profiles() -> dict[str, Any]:
             display = profile.name or name
             sample = profile.platform_profile or ""
             metrics = compute_profile_metrics(conn, name, window_days=30)
-            in_flight, completed_24h = _count_pr_runs_in_window(
-                conn, name, hours=24
-            )
+            in_flight, completed_24h = _count_pr_runs_in_window(conn, name, hours=24)
             in_flight += active_trace_counts.get(name, 0)
             auto_merge = _compute_auto_merge_rate(conn, name, window_days=30)
             out.append(
@@ -718,14 +777,16 @@ _PR_HIDDEN_STATES = frozenset({"suppressed", "misfire"})
 _PR_DONE_STATES = frozenset({"merged", "closed"})
 _PR_STALE_STATES = frozenset({"stale", "escalated"})
 
-_TRACE_PROGRESS_EVENTS = frozenset({
-    "Pipeline started",
-    "processing_started",
-    "processing_completed",
-    "l2_dispatched",
-    "agent_finished",
-    "Pipeline complete",
-})
+_TRACE_PROGRESS_EVENTS = frozenset(
+    {
+        "Pipeline started",
+        "processing_started",
+        "processing_completed",
+        "l2_dispatched",
+        "agent_finished",
+        "Pipeline complete",
+    }
+)
 
 
 def _normalize_trace_status(status: str) -> str:
@@ -912,7 +973,7 @@ def get_traces(
             status_counts[trace_status] += 1
     if status is not None:
         shaped = [t for t in shaped if t["status"] == status]
-    page = shaped[offset: offset + capped_limit]
+    page = shaped[offset : offset + capped_limit]
     return {
         "traces": page,
         "count": len(shaped),
@@ -945,28 +1006,18 @@ def get_autonomy(profile: str, window_days: int = 30) -> dict[str, Any]:
         ensure_schema(conn)
         metrics = compute_profile_metrics(conn, profile, window_days=window_days)
         auto_merge = _compute_auto_merge_rate(conn, profile, window_days=window_days)
-        by_type = compute_ticket_type_breakdown(
-            conn, profile, window_days=window_days
-        )
+        by_type = compute_ticket_type_breakdown(conn, profile, window_days=window_days)
         trend_fpa = compute_daily_trend(conn, profile, window_days, "fpa")
-        trend_escape = compute_daily_trend(
-            conn, profile, window_days, "defect_escape"
-        )
-        trend_catch = compute_daily_trend(
-            conn, profile, window_days, "catch_rate"
-        )
-        trend_auto = compute_daily_trend(
-            conn, profile, window_days, "auto_merge"
-        )
+        trend_escape = compute_daily_trend(conn, profile, window_days, "defect_escape")
+        trend_catch = compute_daily_trend(conn, profile, window_days, "catch_rate")
+        trend_auto = compute_daily_trend(conn, profile, window_days, "auto_merge")
 
         # Recent escaped defects — list_confirmed_escaped_defects needs a
         # pr_run_ids list; pull all merged pr_runs in window and feed
         # them. Caller filters to the top-N most recent for display.
         pr_rows = list_pr_runs(conn, client_profile=profile)
         merged_ids = [int(r["id"]) for r in pr_rows if int(r["merged"])]
-        escaped_rows = list_confirmed_escaped_defects(
-            conn, merged_ids, window_days=30
-        )
+        escaped_rows = list_confirmed_escaped_defects(conn, merged_ids, window_days=30)
         escaped: list[dict[str, Any]] = []
         for r in escaped_rows[:20]:
             escaped.append(
@@ -1021,9 +1072,7 @@ def _shape_trend(
     series: list[tuple[str, float | None, int]],
 ) -> list[dict[str, Any]]:
     """Turn compute_daily_trend tuples into JSON-friendly dicts."""
-    return [
-        {"date": d, "value": v, "sample": n} for (d, v, n) in series
-    ]
+    return [{"date": d, "value": v, "sample": n} for (d, v, n) in series]
 
 
 # --- Trace detail --------------------------------------------------------
@@ -1146,7 +1195,7 @@ def _shape_trace_detail(
 
     run_start_idx = find_run_start_idx(entries)
     run_entries = entries[run_start_idx:]
-    timeline_entries = entries[_timeline_start_idx(entries, run_start_idx):]
+    timeline_entries = entries[_timeline_start_idx(entries, run_start_idx) :]
     metadata = _extract_trace_metadata_local(entries)
     raw_status = metadata["status"]
     bucket = _normalize_trace_status(raw_status)
@@ -1221,8 +1270,7 @@ def _shape_trace_detail(
             state = "active"
         elif per_bucket_events[key] > 0:
             later_active = any(
-                per_bucket_events[phase_order[j]] > 0
-                for j in range(i + 1, len(phase_order))
+                per_bucket_events[phase_order[j]] > 0 for j in range(i + 1, len(phase_order))
             )
             state = "done" if later_active or bucket in {"done", "hidden"} else "active"
         else:
@@ -1375,9 +1423,7 @@ def post_trace_state(ticket_id: str, update: DashboardStateUpdate) -> dict[str, 
         )
 
     entries = read_trace(ticket_id)
-    trace_id = (
-        str(entries[-1].get("trace_id") or "") if entries else generate_trace_id()
-    )
+    trace_id = str(entries[-1].get("trace_id") or "") if entries else generate_trace_id()
     event_by_state = {
         "suppressed": "trace_suppressed",
         "misfire": "trace_marked_misfire",
@@ -1416,9 +1462,7 @@ def post_trace_state(ticket_id: str, update: DashboardStateUpdate) -> dict[str, 
                 update.exclude_metrics if state in ("suppressed", "misfire") else False
             ),
             only_active=state not in ("open",),
-            source_states=(
-                ("suppressed", "misfire", "stale") if state == "open" else None
-            ),
+            source_states=(("suppressed", "misfire", "stale") if state == "open" else None),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1591,9 +1635,7 @@ def post_dashboard_reconcile_stale(
     request: DashboardCleanupRequest,
 ) -> dict[str, Any]:
     """Backfill trace lifecycle, then mark old active pr_runs stale."""
-    cutoff = (
-        datetime.now(UTC) - timedelta(hours=request.stale_after_hours)
-    ).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(hours=request.stale_after_hours)).isoformat()
     reason = f"no lifecycle observation since {cutoff}"
     conn = open_connection(_db_path_from_settings())
     try:
@@ -1663,11 +1705,7 @@ def _last_event_time(path: Path) -> datetime | None:
         last = json.loads(lines[-1])
     except (ValueError, TypeError):
         return None
-    ts = (
-        last.get("timestamp")
-        or last.get("started_at")
-        or last.get("t")
-    )
+    ts = last.get("timestamp") or last.get("started_at") or last.get("t")
     if not isinstance(ts, str):
         return None
     try:
@@ -1873,9 +1911,7 @@ def get_pr_detail(pr_run_id: int) -> dict[str, Any]:
     conn = open_connection(_db_path_from_settings())
     try:
         ensure_schema(conn)
-        pr_row = conn.execute(
-            "SELECT * FROM pr_runs WHERE id = ?", (pr_run_id,)
-        ).fetchone()
+        pr_row = conn.execute("SELECT * FROM pr_runs WHERE id = ?", (pr_run_id,)).fetchone()
         if pr_row is None:
             raise HTTPException(status_code=404, detail=f"pr_run {pr_run_id} not found")
 
@@ -1947,9 +1983,7 @@ def get_pr_detail(pr_run_id: int) -> dict[str, Any]:
             }
             for issue in issues
         ]
-        issues_shaped.sort(
-            key=lambda i: (_severity_order(i["severity"]), -int(i["id"]))
-        )
+        issues_shaped.sort(key=lambda i: (_severity_order(i["severity"]), -int(i["id"])))
 
         # Collapse multiple lesson_evidence rows for the same lesson into one
         # "lesson match" row — the design shows one per lesson, not per hit.
@@ -1981,9 +2015,7 @@ def get_pr_detail(pr_run_id: int) -> dict[str, Any]:
             "closed_at": pr_row["closed_at"] or "",
             "lifecycle_state": pr_row["state"] or "",
             "state_reason": pr_row["state_reason"] or "",
-            "excluded_from_metrics": bool(
-                int(pr_row["excluded_from_metrics"] or 0)
-            ),
+            "excluded_from_metrics": bool(int(pr_row["excluded_from_metrics"] or 0)),
             "first_pass_accepted": bool(int(pr_row["first_pass_accepted"] or 0)),
             "commits": [
                 {
@@ -2061,11 +2093,7 @@ async def remove_trigger_label(ticket_id: str) -> dict[str, Any]:
     if profile is None:
         raise HTTPException(status_code=404, detail=f"No profile for project prefix '{prefix}'")
 
-    labels = [
-        label
-        for label in dict.fromkeys([profile.ai_label, profile.quick_label])
-        if label
-    ]
+    labels = [label for label in dict.fromkeys([profile.ai_label, profile.quick_label]) if label]
     adapter = _get_ado_adapter()
 
     try:

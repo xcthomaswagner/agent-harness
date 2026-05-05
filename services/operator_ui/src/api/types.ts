@@ -56,6 +56,73 @@ export interface ModelPolicyResponse {
   roles: ModelPolicyRole[];
 }
 
+export interface RepoWorkflowProfileOption {
+  client_profile: string;
+  platform_profile: string;
+  repo_path: string;
+  repo_exists: boolean;
+  workflow_exists: boolean;
+}
+
+export interface RepoWorkflowOptionsResponse {
+  profiles: RepoWorkflowProfileOption[];
+}
+
+export type RepoWorkflowSeverity = "info" | "warning" | "error";
+
+export interface RepoWorkflowFinding {
+  id: string;
+  area: string;
+  severity: RepoWorkflowSeverity;
+  message: string;
+  recommendation: string;
+}
+
+export interface RepoWorkflowEvidence {
+  area: string;
+  source: string;
+  message: string;
+  value: string;
+}
+
+export interface RepoWorkflowDetected {
+  repo_name: string;
+  git_branch: string;
+  git_remote: string;
+  package_manager: string;
+  frameworks: string[];
+  test_tools: string[];
+  ci_files: string[];
+  docs: string[];
+  env_examples: string[];
+  validation_commands: string[];
+  package_json_count: number;
+}
+
+export interface RepoWorkflowDraftResponse {
+  repo_path: string;
+  client_profile: string;
+  platform_profile: string;
+  workflow_path: string;
+  workflow_exists: boolean;
+  existing_text: string;
+  draft_text: string;
+  detected: RepoWorkflowDetected;
+  evidence: RepoWorkflowEvidence[];
+  warnings: RepoWorkflowFinding[];
+  validation: RepoWorkflowFinding[];
+  generated_at: string;
+}
+
+export interface RepoWorkflowSaveResponse {
+  saved: boolean;
+  repo_path: string;
+  workflow_path: string;
+  workflow_exists: boolean;
+  bytes: number;
+  updated_at: string;
+}
+
 export interface OperatorSystemResponse {
   service: string;
   version: string;

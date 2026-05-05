@@ -6,6 +6,7 @@ import {
   HomeView,
   LearningView,
   PRDetailView,
+  RepoWorkflowView,
   TicketsView,
   TraceDetailView,
   TracesView,
@@ -41,6 +42,8 @@ function ViewFor({ route }: { route: Route }) {
       return <AutonomyView profile={route.profile} />;
     case "learning":
       return <LearningView />;
+    case "repo-workflow":
+      return <RepoWorkflowView />;
     case "pr-detail":
       return <PRDetailView id={route.id} />;
     default:

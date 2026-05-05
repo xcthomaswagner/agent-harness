@@ -33,6 +33,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from shared.env_sanitize import sanitized_env  # noqa: E402
 from shared.model_policy import claude_cli_model_args, resolve_model  # noqa: E402
 from shared.platform_profile_env import pass_through_vars  # noqa: E402
+from l1_preprocessing.repo_workflow import copy_repo_workflow_overlay  # noqa: E402
 from worktree_safety import safe_remove_worktree  # noqa: E402
 
 
@@ -81,11 +82,17 @@ def _replay_completion_pending(worktree_dir: Path) -> bool:
     try:
         completion_data = json.loads(pending.read_text())
     except (json.JSONDecodeError, OSError) as exc:
-        print(f"[spawn] ERROR: Cannot read pending completion at {pending}: {exc}", file=sys.stderr)
+        print(
+            f"[spawn] ERROR: Cannot read pending completion at {pending}: {exc}",
+            file=sys.stderr,
+        )
         return False
 
     if not isinstance(completion_data, dict):
-        print(f"[spawn] ERROR: Invalid pending completion payload at {pending}", file=sys.stderr)
+        print(
+            f"[spawn] ERROR: Invalid pending completion payload at {pending}",
+            file=sys.stderr,
+        )
         return False
 
     l1_url = os.environ.get("L1_SERVICE_URL", "http://localhost:8000")
@@ -93,10 +100,16 @@ def _replay_completion_pending(worktree_dir: Path) -> bool:
         print(f"[spawn] Replaying pending completion before cleanup: {pending}")
         _post_l1_completion(l1_url, completion_data)
     except urllib.error.HTTPError as exc:
-        print(f"[spawn] ERROR: Pending completion replay got HTTP {exc.code}: {exc.reason}", file=sys.stderr)
+        print(
+            f"[spawn] ERROR: Pending completion replay got HTTP {exc.code}: {exc.reason}",
+            file=sys.stderr,
+        )
         return False
     except (urllib.error.URLError, OSError) as exc:
-        print(f"[spawn] ERROR: Pending completion replay could not reach L1: {exc}", file=sys.stderr)
+        print(
+            f"[spawn] ERROR: Pending completion replay could not reach L1: {exc}",
+            file=sys.stderr,
+        )
         return False
 
     pending.unlink(missing_ok=True)
@@ -170,7 +183,9 @@ def _package_deps(package_json: dict[str, object]) -> dict[str, str]:
 
 
 def _has_any(worktree_dir: Path, patterns: tuple[str, ...]) -> bool:
-    return any(next(worktree_dir.glob(pattern), None) is not None for pattern in patterns)
+    return any(
+        next(worktree_dir.glob(pattern), None) is not None for pattern in patterns
+    )
 
 
 def _tracked_files(worktree_dir: Path) -> set[str]:
@@ -185,7 +200,9 @@ def _tracked_files(worktree_dir: Path) -> set[str]:
     return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
-def _client_readiness_report(worktree_dir: Path, profile: object | None) -> dict[str, object]:
+def _client_readiness_report(
+    worktree_dir: Path, profile: object | None
+) -> dict[str, object]:
     """Detect repo-level constraints that should shape agent prompts."""
     package_json = _read_package_json(worktree_dir)
     deps = _package_deps(package_json)
@@ -211,9 +228,11 @@ def _client_readiness_report(worktree_dir: Path, profile: object | None) -> dict
             }
         )
 
-    is_next = "next" in deps or (worktree_dir / "next.config.js").exists() or (
-        worktree_dir / "next.config.mjs"
-    ).exists()
+    is_next = (
+        "next" in deps
+        or (worktree_dir / "next.config.js").exists()
+        or (worktree_dir / "next.config.mjs").exists()
+    )
     claude_text = ""
     try:
         claude_text = (worktree_dir / "CLAUDE.md").read_text(errors="replace")
@@ -329,11 +348,27 @@ def _write_client_readiness(worktree_dir: Path, profile: object | None) -> None:
         print("[spawn] Client readiness: no warnings")
 
 
-def run_git(client_repo: str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _write_repo_workflow_overlay(worktree_dir: Path) -> None:
+    """Copy optional repo WORKFLOW.md into .harness for agent reference."""
+
+    try:
+        report = copy_repo_workflow_overlay(worktree_dir)
+    except OSError as exc:
+        print(f"[spawn] WARNING: repo workflow overlay failed: {exc}")
+        return
+    if report["available"]:
+        print("[spawn] Repo workflow overlay: .harness/repo-workflow.md")
+
+
+def run_git(
+    client_repo: str, *args: str, check: bool = True
+) -> subprocess.CompletedProcess[str]:
     """Run a git command in the client repo."""
     return subprocess.run(
         ["git", "-C", client_repo, *args],
-        capture_output=True, text=True, check=check,
+        capture_output=True,
+        text=True,
+        check=check,
     )
 
 
@@ -496,13 +531,27 @@ def _trace_watcher(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Spawn an Agent Team session")
-    parser.add_argument("--client-repo", required=True, help="Path to the client git repository")
-    parser.add_argument("--ticket-json", required=True, help="Path to the enriched ticket JSON file")
-    parser.add_argument("--branch-name", required=True, help="Branch name (e.g., ai/PROJ-123)")
-    parser.add_argument("--platform-profile", default="", help="Platform profile (sitecore, salesforce)")
-    parser.add_argument("--client-profile", default="", help="Client profile name (e.g., xcsf30)")
-    parser.add_argument("--trace-id", default="", help="Trace ID from L1 for live trace reporting")
-    parser.add_argument("--mode", default="multi", choices=["multi", "quick"], help="Pipeline mode")
+    parser.add_argument(
+        "--client-repo", required=True, help="Path to the client git repository"
+    )
+    parser.add_argument(
+        "--ticket-json", required=True, help="Path to the enriched ticket JSON file"
+    )
+    parser.add_argument(
+        "--branch-name", required=True, help="Branch name (e.g., ai/PROJ-123)"
+    )
+    parser.add_argument(
+        "--platform-profile", default="", help="Platform profile (sitecore, salesforce)"
+    )
+    parser.add_argument(
+        "--client-profile", default="", help="Client profile name (e.g., xcsf30)"
+    )
+    parser.add_argument(
+        "--trace-id", default="", help="Trace ID from L1 for live trace reporting"
+    )
+    parser.add_argument(
+        "--mode", default="multi", choices=["multi", "quick"], help="Pipeline mode"
+    )
     args = parser.parse_args()
 
     client_repo = Path(args.client_repo).resolve()
@@ -518,7 +567,9 @@ def main() -> None:
         sys.exit(1)
 
     if not (client_repo / ".git").exists() and not (client_repo / ".git").is_file():
-        print(f"Error: Not a git repository (no .git at {client_repo})", file=sys.stderr)
+        print(
+            f"Error: Not a git repository (no .git at {client_repo})", file=sys.stderr
+        )
         sys.exit(1)
 
     if not ticket_json.exists():
@@ -582,18 +633,25 @@ def main() -> None:
 
         # Extract ticket ID for trace
         stale_ticket_id = branch_name
-        stale_ticket_json = harness_dir / "ticket.json" if harness_dir.exists() else None
+        stale_ticket_json = (
+            harness_dir / "ticket.json" if harness_dir.exists() else None
+        )
         if stale_ticket_json and stale_ticket_json.exists():
             try:
-                stale_ticket_id = json.loads(stale_ticket_json.read_text()).get("id", branch_name)
+                stale_ticket_id = json.loads(stale_ticket_json.read_text()).get(
+                    "id", branch_name
+                )
             except (json.JSONDecodeError, OSError):
                 pass
 
-        print(f"[spawn] Pre-flight: cleaning prior worktree for {branch_name} (ticket: {stale_ticket_id}, reason: {stale_reason})")
+        print(
+            f"[spawn] Pre-flight: cleaning prior worktree for {branch_name} (ticket: {stale_ticket_id}, reason: {stale_reason})"
+        )
 
         # Record cleanup in the trace
         try:
             from l1_preprocessing.tracer import append_trace, generate_trace_id
+
             append_trace(
                 stale_ticket_id,
                 generate_trace_id(),
@@ -618,7 +676,15 @@ def main() -> None:
     # --- Step 1: Create worktree ---
     worktree_dir = client_repo.parent / "worktrees" / branch_name
     print(f"[spawn] Creating worktree at: {worktree_dir}")
-    result = run_git(str(client_repo), "worktree", "add", str(worktree_dir), "-b", branch_name, check=False)
+    result = run_git(
+        str(client_repo),
+        "worktree",
+        "add",
+        str(worktree_dir),
+        "-b",
+        branch_name,
+        check=False,
+    )
     if result.returncode != 0:
         run_git(str(client_repo), "worktree", "add", str(worktree_dir), branch_name)
 
@@ -630,7 +696,12 @@ def main() -> None:
     print(f"[spawn] Git identity: {agent_name} <{agent_email}>")
 
     # --- Step 2: Inject runtime ---
-    inject_args = ["python3", str(SCRIPT_DIR / "inject_runtime.py"), "--target-dir", str(worktree_dir)]
+    inject_args = [
+        "python3",
+        str(SCRIPT_DIR / "inject_runtime.py"),
+        "--target-dir",
+        str(worktree_dir),
+    ]
     if args.platform_profile:
         inject_args.extend(["--platform-profile", args.platform_profile])
 
@@ -671,7 +742,9 @@ def main() -> None:
             sc_path.parent.mkdir(parents=True, exist_ok=True)
             with sc_path.open("w") as f:
                 json.dump(sc_context, f, indent=2)
-            print(f"[spawn] Source control context written ({profile.source_control_type})")
+            print(
+                f"[spawn] Source control context written ({profile.source_control_type})"
+            )
 
             # Rewrite git remote for Azure Repos PAT auth.
             #
@@ -706,12 +779,14 @@ def main() -> None:
                         .rstrip("/")
                     )
                     # Plain remote URL — NO embedded credentials.
-                    plain_url = (
-                        f"https://{host}/{ado_project}/_git/{repo_name}"
-                    )
+                    plain_url = f"https://{host}/{ado_project}/_git/{repo_name}"
                     result = run_git(
-                        str(worktree_dir), "remote", "set-url", "origin",
-                        plain_url, check=False,
+                        str(worktree_dir),
+                        "remote",
+                        "set-url",
+                        "origin",
+                        plain_url,
+                        check=False,
                     )
                     if result.returncode != 0:
                         print("[spawn] ERROR: Failed to set Azure Repos remote URL")
@@ -729,26 +804,22 @@ def main() -> None:
                     # Writing to ``.git/.harness-askpass`` mkdir'd over
                     # the git-worktree pointer-file and broke git in
                     # the process.
-                    askpass_path = (
-                        worktree_dir / ".harness" / ".harness-askpass"
-                    )
+                    askpass_path = worktree_dir / ".harness" / ".harness-askpass"
                     askpass_path.parent.mkdir(parents=True, exist_ok=True)
-                    askpass_path.write_text(
-                        '#!/bin/sh\necho "$ADO_PAT"\n'
-                    )
+                    askpass_path.write_text('#!/bin/sh\necho "$ADO_PAT"\n')
                     askpass_path.chmod(0o700)
                     # Configure the username for this origin so git's
                     # credential helper knows to pair it with the PAT
                     # from askpass. Using ``url.<origin>.username`` is
                     # shorter and survives future ``set-url`` rewrites.
                     run_git(
-                        str(worktree_dir), "config",
-                        f"credential.{plain_url}.username", "ado-agent",
+                        str(worktree_dir),
+                        "config",
+                        f"credential.{plain_url}.username",
+                        "ado-agent",
                         check=False,
                     )
-                    print(
-                        "[spawn] ADO credential helper installed (askpass mode)"
-                    )
+                    print("[spawn] ADO credential helper installed (askpass mode)")
                 else:
                     missing = []
                     if not ado_pat:
@@ -759,11 +830,14 @@ def main() -> None:
                         missing.append("source_control.ado_project")
                     if not repo_name:
                         missing.append("source_control.repo")
-                    print(f"[spawn] WARNING: Azure Repos auth incomplete, missing: {', '.join(missing)}")
+                    print(
+                        f"[spawn] WARNING: Azure Repos auth incomplete, missing: {', '.join(missing)}"
+                    )
         else:
             print(f"[spawn] WARNING: Client profile '{args.client_profile}' not found")
 
     _write_client_readiness(worktree_dir, profile)
+    _write_repo_workflow_overlay(worktree_dir)
 
     # --- Step 3: Write ticket, mode, trace config, and copy attachments ---
     harness_dir = worktree_dir / ".harness"
@@ -815,12 +889,16 @@ def main() -> None:
                 copied_count += 1
             except (OSError, shutil.Error) as e:
                 print(f"[spawn] WARNING: Failed to copy {local_path}: {e}")
-                att["local_path"] = ""  # clear broken path so agent doesn't chase a ghost
+                att["local_path"] = (
+                    ""  # clear broken path so agent doesn't chase a ghost
+                )
     if copied_count:
         # Re-write ticket.json with updated local_paths
         with (worktree_dir / ".harness" / "ticket.json").open("w") as f:
             json.dump(ticket_data, f, indent=2)
-        print(f"[spawn] Copied {copied_count} image attachment(s) to .harness/attachments/")
+        print(
+            f"[spawn] Copied {copied_count} image attachment(s) to .harness/attachments/"
+        )
 
     # --- Step 4: Launch Claude Code ---
     print("[spawn] Launching Claude Code session...")
@@ -839,14 +917,16 @@ def main() -> None:
         quick_prompt_file = SCRIPT_DIR.parent / "runtime" / "quick-mode-prompt.md"
         prompt = (
             "Before making changes, read .harness/client-readiness.md for repo "
-            "constraints and validation caveats.\n\n"
+            "constraints and validation caveats. If .harness/repo-workflow.md "
+            "exists, read it as the repo-local workflow overlay.\n\n"
             + quick_prompt_file.read_text()
         )
     else:
         prompt = (
             "You are the team lead. Read the enriched ticket at .harness/ticket.json "
-            "and .harness/client-readiness.md, then execute the pipeline per the "
-            "Agentic Harness Pipeline Instructions in CLAUDE.md."
+            "and .harness/client-readiness.md. If .harness/repo-workflow.md exists, "
+            "read it as the repo-local workflow overlay. Then execute the pipeline "
+            "per the Agentic Harness Pipeline Instructions in CLAUDE.md."
         )
 
     env = sanitized_env()
@@ -893,7 +973,9 @@ def main() -> None:
     trace_stop = threading.Event()
     _watcher_jsonl = worktree_dir / ".harness" / "logs" / "pipeline.jsonl"
     _watcher_config = worktree_dir / ".harness" / "trace-config.json"
-    print(f"[spawn] Starting trace watcher (config={_watcher_config.exists()}, log={_watcher_jsonl.exists()})")
+    print(
+        f"[spawn] Starting trace watcher (config={_watcher_config.exists()}, log={_watcher_jsonl.exists()})"
+    )
     trace_watcher = threading.Thread(
         target=_trace_watcher,
         args=(_watcher_jsonl, _watcher_config, trace_stop),
@@ -916,9 +998,12 @@ def main() -> None:
         with session_stream.open("w") as stream_file:
             try:
                 claude_cmd = [
-                    "claude", "-p", prompt,
+                    "claude",
+                    "-p",
+                    prompt,
                     "--dangerously-skip-permissions",
-                    "--output-format", "stream-json",
+                    "--output-format",
+                    "stream-json",
                     "--verbose",  # required by Claude Code headless when output-format=stream-json
                 ]
                 claude_cmd.extend(claude_cli_model_args(model_selection))
@@ -972,7 +1057,11 @@ def main() -> None:
                             if text:
                                 summary_lines.append(text)
         session_log.write_text(
-            ("\n\n".join(summary_lines) if summary_lines else "(no assistant text in stream)")
+            (
+                "\n\n".join(summary_lines)
+                if summary_lines
+                else "(no assistant text in stream)"
+            )
             + "\n"
         )
     except Exception as exc:
@@ -1024,11 +1113,15 @@ def main() -> None:
                 ev = entry.get("event", "")
                 if "blocked" in ev.lower() or "failed" in ev.lower():
                     unit_id = entry.get("unit", entry.get("unit_id", ev))
-                    failed_units.append({
-                        "unit_id": str(unit_id),
-                        "description": entry.get("event", ""),
-                        "failure_reason": entry.get("reason", entry.get("error", "Unknown")),
-                    })
+                    failed_units.append(
+                        {
+                            "unit_id": str(unit_id),
+                            "description": entry.get("event", ""),
+                            "failure_reason": entry.get(
+                                "reason", entry.get("error", "Unknown")
+                            ),
+                        }
+                    )
             except json.JSONDecodeError:
                 continue
 
@@ -1048,7 +1141,9 @@ def main() -> None:
         "source": ticket_source,
     }
 
-    print(f"[spawn] Notifying L1: ticket={ticket_id} status={status} pr={pr_url} source={ticket_source}")
+    print(
+        f"[spawn] Notifying L1: ticket={ticket_id} status={status} pr={pr_url} source={ticket_source}"
+    )
     try:
         _post_l1_completion(l1_url, completion_data)
     except urllib.error.HTTPError as exc:
@@ -1080,7 +1175,12 @@ def main() -> None:
                 for log_file in harness_logs.iterdir():
                     if log_file.is_file():
                         shutil.copy2(log_file, trace_archive / log_file.name)
-            for readiness_name in ("client-readiness.json", "client-readiness.md"):
+            for readiness_name in (
+                "client-readiness.json",
+                "client-readiness.md",
+                "repo-workflow.json",
+                "repo-workflow.md",
+            ):
                 readiness_file = worktree_dir / ".harness" / readiness_name
                 if readiness_file.is_file():
                     shutil.copy2(readiness_file, trace_archive / readiness_name)
