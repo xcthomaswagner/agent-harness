@@ -41,3 +41,26 @@ Three views:
 - **Table** (default) — filterable trace list with phase dots, duration bars, stats
 - **Board** — Kanban columns (In-Flight / Stuck / Completed)
 - **Detail** — click any ticket for L1/L2/L3 span tree with expandable artifacts
+
+## Testing
+
+The repo has service-local Python import paths, so root pytest is intentionally
+limited to root-level tests:
+
+```bash
+python -m pytest -q
+```
+
+Run the full validation suite with the service-aware runner:
+
+```bash
+python scripts/test_all.py
+```
+
+The runner executes L1 and L3 from their service directories, then runs the
+operator UI typecheck, tests, and build. If L3 reports a missing `respx`
+dependency, install the L3 dev extras:
+
+```bash
+python -m pip install -e "services/l3_pr_review[dev]"
+```

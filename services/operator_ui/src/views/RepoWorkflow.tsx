@@ -41,6 +41,12 @@ export function RepoWorkflowView() {
     [clientProfile, profiles],
   );
   const warningCount = (draft?.warnings.length ?? 0) + (draft?.validation.length ?? 0);
+  const clearDraftForTargetChange = () => {
+    setDraft(null);
+    setEditorText("");
+    setMessage("");
+    setState("idle");
+  };
 
   const scan = async (preferExisting: boolean) => {
     setState("busy");
@@ -116,6 +122,7 @@ export function RepoWorkflowView() {
                 setClientProfile(next);
                 const option = profiles.find((profile) => profile.client_profile === next);
                 if (option) setRepoPath(option.repo_path);
+                clearDraftForTargetChange();
               }}
             >
               <option value={MANUAL_PROFILE_VALUE}>Manual path</option>
@@ -141,6 +148,7 @@ export function RepoWorkflowView() {
                 if (selected && selected.repo_path !== value) {
                   setClientProfile("");
                 }
+                clearDraftForTargetChange();
               }}
             />
           </label>

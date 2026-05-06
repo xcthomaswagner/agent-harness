@@ -375,7 +375,7 @@ class TestConsolidateWorktreeLogs:
         #   wt = <tmp_path>/worktrees/ai-C-7
         #   wt.parent = <tmp_path>/worktrees
         #   wt.parent.parent = <tmp_path> (== client_repo.parent)
-        archive_dir = tmp_path / "trace-archive" / "C-7"
+        archive_dir = tmp_path / "trace-archive" / "C-7" / "logs"
         archive_dir.mkdir(parents=True)
         archive_stream = archive_dir / "session-stream.jsonl"
         archive_stream.write_text(
@@ -406,6 +406,55 @@ class TestConsolidateWorktreeLogs:
         assert idx["tool_call_count"] == 2
         assert idx["mcp_servers_used"] == ["salesforce"]
         assert idx["mcp_servers_unused"] == ["playwright"]
+
+    def test_imports_archived_json_handoffs_and_plans(
+        self, trace_dir: Path, tmp_path: Path
+    ) -> None:
+        wt = tmp_path / "worktrees" / "ai-C-JSON"
+        logs = wt / ".harness" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "pipeline.jsonl").write_text(
+            json.dumps({"phase": "impl", "event": "done"}) + "\n"
+        )
+
+        archive = tmp_path / "trace-archive" / "C-JSON"
+        archive_logs = archive / "logs"
+        archive_plans = archive / "plans"
+        archive_logs.mkdir(parents=True)
+        archive_plans.mkdir(parents=True)
+        for filename in (
+            "code-review.json",
+            "qa-matrix.json",
+            "judge-verdict.json",
+            "plan-review.json",
+            "risk-challenge.json",
+            "plan-decision.json",
+            "merge-report.json",
+            "retrospective.json",
+            "implementation-result-unit-1.json",
+        ):
+            (archive_logs / filename).write_text('{"ok":true}\n')
+        (archive_logs / "retrospective.md").write_text("# Retrospective\n")
+        (archive_plans / "plan-v1.json").write_text('{"units":[]}\n')
+
+        with patch("tracer.LOGS_DIR", trace_dir):
+            consolidate_worktree_logs("C-JSON", "trace-json", str(wt))
+            entries = read_trace("C-JSON")
+
+        event_names = {e.get("event") for e in entries}
+        assert {
+            "code_review_json_artifact",
+            "qa_matrix_json_artifact",
+            "judge_verdict_json_artifact",
+            "plan_review_json_artifact",
+            "risk_challenge_json_artifact",
+            "plan_decision_json_artifact",
+            "merge_report_json_artifact",
+            "retrospective_json_artifact",
+            "retrospective_artifact",
+            "implementation_result_artifact",
+            "plan_artifact",
+        }.issubset(event_names)
 
     def test_session_stream_falls_back_to_live_path_when_no_archive(
         self, trace_dir: Path, tmp_path: Path

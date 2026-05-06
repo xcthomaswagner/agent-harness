@@ -24,6 +24,18 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from shared.model_policy import (
+    DEFAULT_POLICY_PATH as _MODEL_POLICY_PATH,
+)
+from shared.model_policy import (
+    MODEL_OPTIONS as _MODEL_OPTIONS,
+)
+from shared.model_policy import (
+    REASONING_OPTIONS as _REASONING_OPTIONS,
+)
+from shared.model_policy import (
+    default_policy as _shared_default_model_policy,
+)
 
 from auth import _require_dashboard_auth
 from autonomy_metrics import (
@@ -119,77 +131,6 @@ def _db_path_from_settings() -> Path:
     return resolve_db_path(main.settings.autonomy_db_path)
 
 
-_MODEL_POLICY_PATH = Path(__file__).resolve().parents[2] / "data" / "operator_model_policy.json"
-_MODEL_OPTIONS: tuple[str, ...] = (
-    "default",
-    "opus",
-    "sonnet",
-    "claude-opus-4-20250514",
-    "claude-sonnet-4-20250514",
-)
-_REASONING_OPTIONS: tuple[str, ...] = ("default", "low", "standard", "high")
-_MODEL_POLICY_ROLES: tuple[dict[str, str], ...] = (
-    {
-        "role": "analyst",
-        "label": "Analyst",
-        "model": "claude-opus-4-20250514",
-        "reasoning": "high",
-    },
-    {"role": "team_lead", "label": "Team Lead", "model": "opus", "reasoning": "high"},
-    {"role": "planner", "label": "Planner", "model": "opus", "reasoning": "high"},
-    {
-        "role": "developer",
-        "label": "Developer",
-        "model": "opus",
-        "reasoning": "high",
-    },
-    {
-        "role": "code_reviewer",
-        "label": "Code Reviewer",
-        "model": "opus",
-        "reasoning": "high",
-    },
-    {
-        "role": "challenger",
-        "label": "Challenger",
-        "model": "opus",
-        "reasoning": "high",
-    },
-    {"role": "judge", "label": "Judge", "model": "sonnet", "reasoning": "standard"},
-    {"role": "qa", "label": "QA", "model": "opus", "reasoning": "high"},
-    {
-        "role": "merge_coordinator",
-        "label": "Merge Coordinator",
-        "model": "sonnet",
-        "reasoning": "standard",
-    },
-    {
-        "role": "run_reflector",
-        "label": "Run Reflector",
-        "model": "opus",
-        "reasoning": "high",
-    },
-    {
-        "role": "l3_pr_review",
-        "label": "L3 PR Review",
-        "model": "opus",
-        "reasoning": "high",
-    },
-    {
-        "role": "l3_ci_fix",
-        "label": "L3 CI Fix",
-        "model": "sonnet",
-        "reasoning": "standard",
-    },
-    {
-        "role": "l3_comment_response",
-        "label": "L3 Comment Response",
-        "model": "sonnet",
-        "reasoning": "standard",
-    },
-)
-
-
 class ModelRoleSelection(BaseModel):
     role: str = Field(min_length=1, max_length=64)
     model: str = Field(min_length=1, max_length=128)
@@ -230,13 +171,7 @@ class _TraceLifecycleDecision(BaseModel):
 
 
 def _default_model_policy() -> dict[str, Any]:
-    return {
-        "version": 1,
-        "source": "default",
-        "model_options": list(_MODEL_OPTIONS),
-        "reasoning_options": list(_REASONING_OPTIONS),
-        "roles": [dict(r) for r in _MODEL_POLICY_ROLES],
-    }
+    return _shared_default_model_policy()
 
 
 def _read_model_policy_file() -> dict[str, Any]:

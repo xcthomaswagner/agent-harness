@@ -372,6 +372,68 @@ def run_git(
     )
 
 
+def _copy_if_file(source: Path, target: Path) -> bool:
+    """Copy ``source`` to ``target`` when it is a file."""
+    if not source.is_file():
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    return True
+
+
+def archive_run_artifacts(worktree_dir: Path, trace_archive: Path) -> dict[str, int]:
+    """Archive completed-run artifacts using the learning detector layout.
+
+    Canonical layout:
+      trace-archive/<ticket>/
+        ticket.json
+        plans/plan-v*.json
+        logs/*.json|*.md|*.jsonl|*.log
+        client-readiness.{json,md}
+        repo-workflow.{json,md}
+
+    Older traces stored logs directly under ``trace-archive/<ticket>/``.
+    Readers support that legacy shape, but new archives use ``logs/`` so
+    detector expectations, retrospective ingest, and human bundles agree.
+    """
+    harness_dir = worktree_dir / ".harness"
+    logs_dir = harness_dir / "logs"
+    plans_dir = harness_dir / "plans"
+    copied = {"logs": 0, "plans": 0, "root": 0}
+
+    trace_archive.mkdir(parents=True, exist_ok=True)
+
+    if logs_dir.is_dir():
+        logs_archive = trace_archive / "logs"
+        logs_archive.mkdir(parents=True, exist_ok=True)
+        for log_file in logs_dir.iterdir():
+            if log_file.is_file():
+                shutil.copy2(log_file, logs_archive / log_file.name)
+                copied["logs"] += 1
+
+    if _copy_if_file(harness_dir / "ticket.json", trace_archive / "ticket.json"):
+        copied["root"] += 1
+
+    if plans_dir.is_dir():
+        plans_archive = trace_archive / "plans"
+        plans_archive.mkdir(parents=True, exist_ok=True)
+        for plan_file in sorted(plans_dir.glob("plan-v*.json")):
+            if plan_file.is_file():
+                shutil.copy2(plan_file, plans_archive / plan_file.name)
+                copied["plans"] += 1
+
+    for readiness_name in (
+        "client-readiness.json",
+        "client-readiness.md",
+        "repo-workflow.json",
+        "repo-workflow.md",
+    ):
+        if _copy_if_file(harness_dir / readiness_name, trace_archive / readiness_name):
+            copied["root"] += 1
+
+    return copied
+
+
 _AGENT_ROLE_BY_FILE: dict[str, str] = {
     "challenger.md": "challenger",
     "code-reviewer.md": "code_reviewer",
@@ -1142,6 +1204,20 @@ def main() -> None:
         "source": ticket_source,
     }
 
+    trace_archive = client_repo.parent / "trace-archive" / ticket_id
+    if status == "complete":
+        try:
+            archive_summary = archive_run_artifacts(worktree_dir, trace_archive)
+            print(
+                "[spawn] Logs archived to "
+                f"{trace_archive} "
+                f"(logs={archive_summary['logs']} "
+                f"plans={archive_summary['plans']} "
+                f"root={archive_summary['root']})"
+            )
+        except OSError as exc:
+            print(f"[spawn] WARNING: Log archival failed before completion: {exc}")
+
     print(
         f"[spawn] Notifying L1: ticket={ticket_id} status={status} pr={pr_url} source={ticket_source}"
     )
@@ -1167,25 +1243,18 @@ def main() -> None:
     completion_pending = worktree_dir / ".harness" / "completion-pending.json"
     if status == "complete" and not completion_pending.exists():
         print(f"[spawn] Cleaning up worktree (status={status})")
-        # Archive key logs to the persistent trace directory before removing
-        trace_archive = client_repo.parent / "trace-archive" / ticket_id
+        # Archive key logs to the persistent trace directory before removing.
+        # This is idempotent with the pre-completion archive above; running it
+        # again captures any files written during the L1 callback window.
         try:
-            trace_archive.mkdir(parents=True, exist_ok=True)
-            harness_logs = worktree_dir / ".harness" / "logs"
-            if harness_logs.exists():
-                for log_file in harness_logs.iterdir():
-                    if log_file.is_file():
-                        shutil.copy2(log_file, trace_archive / log_file.name)
-            for readiness_name in (
-                "client-readiness.json",
-                "client-readiness.md",
-                "repo-workflow.json",
-                "repo-workflow.md",
-            ):
-                readiness_file = worktree_dir / ".harness" / readiness_name
-                if readiness_file.is_file():
-                    shutil.copy2(readiness_file, trace_archive / readiness_name)
-            print(f"[spawn] Logs archived to {trace_archive}")
+            archive_summary = archive_run_artifacts(worktree_dir, trace_archive)
+            print(
+                "[spawn] Logs archived to "
+                f"{trace_archive} "
+                f"(logs={archive_summary['logs']} "
+                f"plans={archive_summary['plans']} "
+                f"root={archive_summary['root']})"
+            )
         except OSError as exc:
             print(f"[spawn] WARNING: Log archival failed: {exc}")
 

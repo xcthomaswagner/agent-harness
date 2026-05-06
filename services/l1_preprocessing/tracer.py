@@ -879,17 +879,26 @@ def _generate_hint(last_event: str, errors: list[dict[str, Any]]) -> str:
 # diagnostic checklist, bundle endpoint). Symbolic references protect against
 # typos and make it easy to grep for where an artifact type is rendered.
 ARTIFACT_CODE_REVIEW = "code_review_artifact"
+ARTIFACT_CODE_REVIEW_JSON = "code_review_json_artifact"
 ARTIFACT_QA_MATRIX = "qa_matrix_artifact"
+ARTIFACT_QA_MATRIX_JSON = "qa_matrix_json_artifact"
 ARTIFACT_JUDGE_VERDICT = "judge_verdict_artifact"
+ARTIFACT_JUDGE_VERDICT_JSON = "judge_verdict_json_artifact"
 ARTIFACT_MERGE_REPORT = "merge_report_artifact"
+ARTIFACT_MERGE_REPORT_JSON = "merge_report_json_artifact"
 ARTIFACT_PLAN_REVIEW = "plan_review_artifact"
+ARTIFACT_PLAN_REVIEW_JSON = "plan_review_json_artifact"
 ARTIFACT_RISK_CHALLENGE = "risk_challenge_artifact"
+ARTIFACT_RISK_CHALLENGE_JSON = "risk_challenge_json_artifact"
 ARTIFACT_PLAN_DECISION = "plan_decision_artifact"
+ARTIFACT_PLAN_DECISION_JSON = "plan_decision_json_artifact"
 ARTIFACT_IMPLEMENTATION_RESULT = "implementation_result_artifact"
 ARTIFACT_PLAN = "plan_artifact"
 ARTIFACT_BLOCKED_UNITS = "blocked_units_artifact"
 ARTIFACT_SIMPLIFY = "simplify_artifact"
 ARTIFACT_ESCALATION = "escalation_artifact"
+ARTIFACT_RETROSPECTIVE = "retrospective_artifact"
+ARTIFACT_RETROSPECTIVE_JSON = "retrospective_json_artifact"
 ARTIFACT_SESSION_LOG = "session_log_artifact"
 ARTIFACT_EFFECTIVE_CLAUDE_MD = "effective_claude_md_artifact"
 ARTIFACT_SESSION_STREAM = "session_stream_artifact"
@@ -897,17 +906,26 @@ ARTIFACT_TOOL_INDEX = "tool_index"
 
 _ARTIFACT_PHASE_MAP: dict[str, str] = {
     ARTIFACT_CODE_REVIEW: "code_review",
+    ARTIFACT_CODE_REVIEW_JSON: "code_review",
     ARTIFACT_QA_MATRIX: "qa_validation",
-    ARTIFACT_JUDGE_VERDICT: "code_review",
+    ARTIFACT_QA_MATRIX_JSON: "qa_validation",
+    ARTIFACT_JUDGE_VERDICT: "judge",
+    ARTIFACT_JUDGE_VERDICT_JSON: "judge",
     ARTIFACT_MERGE_REPORT: "merge",
+    ARTIFACT_MERGE_REPORT_JSON: "merge",
     ARTIFACT_PLAN_REVIEW: "plan_review",
+    ARTIFACT_PLAN_REVIEW_JSON: "plan_review",
     ARTIFACT_RISK_CHALLENGE: "risk_challenge",
+    ARTIFACT_RISK_CHALLENGE_JSON: "risk_challenge",
     ARTIFACT_PLAN_DECISION: "plan_review",
+    ARTIFACT_PLAN_DECISION_JSON: "plan_review",
     ARTIFACT_IMPLEMENTATION_RESULT: "implementation",
     ARTIFACT_PLAN: "planning",
     ARTIFACT_BLOCKED_UNITS: "implementation",
     ARTIFACT_SIMPLIFY: "simplify",
     ARTIFACT_ESCALATION: "complete",
+    ARTIFACT_RETROSPECTIVE: "reflection",
+    ARTIFACT_RETROSPECTIVE_JSON: "reflection",
 }
 
 # Phase icon types for the span tree UI
@@ -1390,17 +1408,26 @@ def consolidate_worktree_logs(
 
     # Import span detail files — matches the Observability Model in harness-CLAUDE.md
     artifact_files = {
-        "code-review.md": ARTIFACT_CODE_REVIEW,
-        "qa-matrix.md": ARTIFACT_QA_MATRIX,
-        "judge-verdict.md": ARTIFACT_JUDGE_VERDICT,
-        "merge-report.md": ARTIFACT_MERGE_REPORT,
-        "plan-review.md": ARTIFACT_PLAN_REVIEW,
-        "risk-challenge.md": ARTIFACT_RISK_CHALLENGE,
-        "plan-decision.md": ARTIFACT_PLAN_DECISION,
-        "blocked-units.md": ARTIFACT_BLOCKED_UNITS,
-        "simplify.md": ARTIFACT_SIMPLIFY,
-        "escalation.md": ARTIFACT_ESCALATION,
-        "session.log": ARTIFACT_SESSION_LOG,
+        "code-review.md": (ARTIFACT_CODE_REVIEW, "markdown"),
+        "code-review.json": (ARTIFACT_CODE_REVIEW_JSON, "json"),
+        "qa-matrix.md": (ARTIFACT_QA_MATRIX, "markdown"),
+        "qa-matrix.json": (ARTIFACT_QA_MATRIX_JSON, "json"),
+        "judge-verdict.md": (ARTIFACT_JUDGE_VERDICT, "markdown"),
+        "judge-verdict.json": (ARTIFACT_JUDGE_VERDICT_JSON, "json"),
+        "merge-report.md": (ARTIFACT_MERGE_REPORT, "markdown"),
+        "merge-report.json": (ARTIFACT_MERGE_REPORT_JSON, "json"),
+        "plan-review.md": (ARTIFACT_PLAN_REVIEW, "markdown"),
+        "plan-review.json": (ARTIFACT_PLAN_REVIEW_JSON, "json"),
+        "risk-challenge.md": (ARTIFACT_RISK_CHALLENGE, "markdown"),
+        "risk-challenge.json": (ARTIFACT_RISK_CHALLENGE_JSON, "json"),
+        "plan-decision.md": (ARTIFACT_PLAN_DECISION, "markdown"),
+        "plan-decision.json": (ARTIFACT_PLAN_DECISION_JSON, "json"),
+        "blocked-units.md": (ARTIFACT_BLOCKED_UNITS, "markdown"),
+        "simplify.md": (ARTIFACT_SIMPLIFY, "markdown"),
+        "escalation.md": (ARTIFACT_ESCALATION, "markdown"),
+        "retrospective.md": (ARTIFACT_RETROSPECTIVE, "markdown"),
+        "retrospective.json": (ARTIFACT_RETROSPECTIVE_JSON, "json"),
+        "session.log": (ARTIFACT_SESSION_LOG, "text"),
     }
 
     logs_dir = wt / ".harness" / "logs"
@@ -1415,16 +1442,28 @@ def consolidate_worktree_logs(
         if (archive_root / "trace-archive").is_dir():
             break
         archive_root = archive_root.parent
-    archive_logs_dir = archive_root / "trace-archive" / ticket_id
-    for filename, event_name in artifact_files.items():
-        artifact_path = logs_dir / filename
-        if not artifact_path.exists():
-            artifact_path = archive_logs_dir / filename
+    archive_ticket_dir = archive_root / "trace-archive" / ticket_id
+    archive_logs_dir = archive_ticket_dir / "logs"
+
+    def _artifact_path(filename: str) -> Path:
+        for candidate in (
+            logs_dir / filename,
+            archive_logs_dir / filename,
+            archive_ticket_dir / filename,  # legacy pre-logs/ archive shape
+        ):
+            if candidate.is_file():
+                return candidate
+        return logs_dir / filename
+
+    for filename, (event_name, artifact_format) in artifact_files.items():
+        artifact_path = _artifact_path(filename)
         if artifact_path.exists():
             append_trace(
                 ticket_id, trace_id,
                 phase="artifact",
                 event=event_name,
+                artifact_filename=filename,
+                artifact_format=artifact_format,
                 content=_redact_and_count(
                     artifact_path.read_text(
                         encoding="utf-8", errors="replace"
@@ -1432,15 +1471,22 @@ def consolidate_worktree_logs(
                 ),
             )
 
-    for artifact_path in sorted(logs_dir.glob("implementation-result-*.json")):
-        append_trace(
-            ticket_id, trace_id,
-            phase="artifact",
-            event=ARTIFACT_IMPLEMENTATION_RESULT,
-            content=_redact_and_count(
-                artifact_path.read_text(encoding="utf-8", errors="replace")[:5000]
-            ),
-        )
+    seen_implementation_results: set[str] = set()
+    for result_dir in (logs_dir, archive_logs_dir, archive_ticket_dir):
+        for artifact_path in sorted(result_dir.glob("implementation-result-*.json")):
+            if artifact_path.name in seen_implementation_results:
+                continue
+            seen_implementation_results.add(artifact_path.name)
+            append_trace(
+                ticket_id, trace_id,
+                phase="artifact",
+                event=ARTIFACT_IMPLEMENTATION_RESULT,
+                artifact_filename=artifact_path.name,
+                artifact_format="json",
+                content=_redact_and_count(
+                    artifact_path.read_text(encoding="utf-8", errors="replace")[:5000]
+                ),
+            )
 
     # Effective CLAUDE.md — injected at worktree root, captures the instructions
     # the agent was actually operating under for this run.
@@ -1471,8 +1517,13 @@ def consolidate_worktree_logs(
     # back to the live worktree path which is still on disk for those runs.
     # If neither exists, skip the reference entry entirely.
     stream_path = logs_dir / "session-stream.jsonl"
-    archive_path = (
-        archive_root / "trace-archive" / ticket_id / "session-stream.jsonl"
+    archive_stream_paths = (
+        archive_logs_dir / "session-stream.jsonl",
+        archive_ticket_dir / "session-stream.jsonl",  # legacy pre-logs/ archive shape
+    )
+    archive_path = next(
+        (candidate for candidate in archive_stream_paths if candidate.is_file()),
+        archive_stream_paths[0],
     )
     # Prefer archive (stable — survives worktree cleanup), fall back to
     # live worktree path for in-progress or failed runs.
@@ -1524,8 +1575,13 @@ def consolidate_worktree_logs(
         except Exception:
             logger.exception("tool_index_build_failed", ticket_id=ticket_id)
 
-    # Import plan if exists
-    for plan_path in sorted((wt / ".harness" / "plans").glob("plan-v*.json")):
+    # Import plans if present. Prefer the live worktree, but fall back to the
+    # completed-run archive so a manual reconsolidation after cleanup keeps
+    # the planner's canonical state.
+    live_plans_dir = wt / ".harness" / "plans"
+    archive_plans_dir = archive_ticket_dir / "plans"
+    plans_dir = live_plans_dir if live_plans_dir.is_dir() else archive_plans_dir
+    for plan_path in sorted(plans_dir.glob("plan-v*.json")):
         append_trace(
             ticket_id, trace_id,
             phase="artifact",

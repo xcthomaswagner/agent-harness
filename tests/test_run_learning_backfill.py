@@ -8,6 +8,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +17,18 @@ SCRIPT = REPO_ROOT / "scripts" / "run_learning_backfill.py"
 SERVICE_SRC = REPO_ROOT / "services" / "l1_preprocessing"
 
 sys.path.insert(0, str(SERVICE_SRC))
+
+
+def _load_backfill_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "run_learning_backfill_under_test", str(SCRIPT)
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def _run_script(*args: str) -> subprocess.CompletedProcess:
@@ -86,18 +99,9 @@ class TestDetectorRegistration:
     """
 
     def test_all_production_detectors_are_loaded(self) -> None:
-        import importlib.util
-
         from learning_miner import all_production_detectors
 
-        # Load the backfill script as a module without colliding with
-        # the ``scripts`` package inside services/l1_preprocessing/.
-        spec = importlib.util.spec_from_file_location(
-            "run_learning_backfill_under_test", str(SCRIPT)
-        )
-        assert spec is not None and spec.loader is not None
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        mod = _load_backfill_module()
 
         loaded = mod._load_detectors()
         loaded_names = {d.name for d in loaded}
@@ -117,6 +121,31 @@ class TestDetectorRegistration:
             "simplify_no_sidecar",
             "reviewer_judge_rejection_rate",
         }
+
+
+class TestRetrospectiveRoots:
+    def test_default_root_uses_default_client_repo_parent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import config
+
+        mod = _load_backfill_module()
+        client_repo = tmp_path / "client"
+        monkeypatch.setattr(config.settings, "default_client_repo", str(client_repo))
+        args = SimpleNamespace(no_retrospectives=False, retrospective_root=[])
+
+        assert mod._retrospective_search_roots(args) == [
+            tmp_path / "trace-archive"
+        ]
+
+    def test_no_retrospectives_disables_ingest(self) -> None:
+        mod = _load_backfill_module()
+        args = SimpleNamespace(
+            no_retrospectives=True,
+            retrospective_root=["/tmp/trace-archive"],
+        )
+
+        assert mod._retrospective_search_roots(args) is None
 
 
 class TestDryRunPersistence:

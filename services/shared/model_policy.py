@@ -35,6 +35,12 @@ DEFAULT_ROLES: tuple[dict[str, str], ...] = (
     {"role": "team_lead", "label": "Team Lead", "model": "opus", "reasoning": "high"},
     {"role": "planner", "label": "Planner", "model": "opus", "reasoning": "high"},
     {
+        "role": "plan_reviewer",
+        "label": "Plan Reviewer",
+        "model": "opus",
+        "reasoning": "high",
+    },
+    {
         "role": "developer",
         "label": "Developer",
         "model": "opus",

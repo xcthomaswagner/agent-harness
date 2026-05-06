@@ -582,6 +582,8 @@ def test_model_policy_returns_defaults(
     roles = {row["role"]: row for row in data["roles"]}
     assert roles["analyst"]["model"] == "claude-opus-4-20250514"
     assert roles["team_lead"]["reasoning"] == "high"
+    assert roles["plan_reviewer"]["model"] == "opus"
+    assert roles["plan_reviewer"]["reasoning"] == "high"
     assert roles["developer"]["model"] == "opus"
     assert roles["challenger"]["reasoning"] == "high"
     assert roles["qa"]["model"] == "opus"

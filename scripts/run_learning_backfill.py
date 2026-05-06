@@ -57,6 +57,21 @@ def _parse_args() -> argparse.Namespace:
             "threshold or detector tweaks without polluting the DB."
         ),
     )
+    parser.add_argument(
+        "--retrospective-root",
+        action="append",
+        default=[],
+        help=(
+            "Directory to scan for run-reflector retrospective.json files. "
+            "May be supplied multiple times. Defaults to "
+            "<DEFAULT_CLIENT_REPO parent>/trace-archive when configured."
+        ),
+    )
+    parser.add_argument(
+        "--no-retrospectives",
+        action="store_true",
+        help="Disable run-reflector retrospective ingestion for this backfill.",
+    )
     return parser.parse_args()
 
 
@@ -108,6 +123,25 @@ def _load_detectors():
     return list(all_production_detectors())
 
 
+def _default_retrospective_roots() -> list[Path]:
+    """Return the conventional trace archive root for reflector lessons."""
+    from config import settings
+
+    repo = settings.default_client_repo
+    if not repo:
+        return []
+    return [Path(repo).expanduser().parent / "trace-archive"]
+
+
+def _retrospective_search_roots(args: argparse.Namespace) -> list[Path] | None:
+    if args.no_retrospectives:
+        return None
+    roots = [Path(raw).expanduser() for raw in args.retrospective_root]
+    if not roots:
+        roots = _default_retrospective_roots()
+    return roots or None
+
+
 def _top_scope_keys(conn, limit: int = 10) -> list[tuple[str, int]]:
     """Return (scope_key, frequency) for the top-frequency candidates."""
     rows = conn.execute(
@@ -155,12 +189,23 @@ def main() -> int:
 
     try:
         detectors = _load_detectors()
-        result = run_miner(conn, detectors, window_days=args.window_days)
+        retrospective_roots = _retrospective_search_roots(args)
+        result = run_miner(
+            conn,
+            detectors,
+            window_days=args.window_days,
+            retrospective_search_roots=retrospective_roots,
+        )
 
         summary: dict[str, object] = {
             "db_path": str(display_path),
             "window_days": args.window_days,
             "dry_run": bool(args.dry_run),
+            "retrospective_search_roots": (
+                [str(path) for path in retrospective_roots]
+                if retrospective_roots is not None
+                else []
+            ),
             "total_candidates": result.total_candidates,
             "total_evidence": result.total_evidence,
             "total_failures": result.total_failures,
@@ -210,6 +255,13 @@ def _print_human_report(summary: dict[str, object]) -> None:
     print(f"Window: last {summary['window_days']} days")
     if summary["dry_run"]:
         print("Mode: DRY RUN (rolled back, no DB writes retained)")
+    roots = summary.get("retrospective_search_roots") or []
+    if roots:
+        print("Retrospective roots:")
+        for root in roots:
+            print(f"  - {root}")
+    else:
+        print("Retrospective roots: none")
     print()
     print("Per-detector run stats:")
     per_det = summary["per_detector"]

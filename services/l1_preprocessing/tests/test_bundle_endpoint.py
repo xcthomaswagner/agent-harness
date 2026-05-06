@@ -19,8 +19,12 @@ from httpx import ASGITransport, AsyncClient
 from main import app
 from tracer import (
     ARTIFACT_CODE_REVIEW,
+    ARTIFACT_CODE_REVIEW_JSON,
     ARTIFACT_EFFECTIVE_CLAUDE_MD,
+    ARTIFACT_IMPLEMENTATION_RESULT,
     ARTIFACT_QA_MATRIX,
+    ARTIFACT_QA_MATRIX_JSON,
+    ARTIFACT_RETROSPECTIVE_JSON,
     ARTIFACT_SESSION_LOG,
     ARTIFACT_SESSION_STREAM,
     ARTIFACT_TOOL_INDEX,
@@ -58,8 +62,20 @@ def _seed_trace(
                      ticket_type="story", source="jira")
         append_trace(ticket_id, "t0", "artifact", ARTIFACT_CODE_REVIEW,
                      content="# Code Review\n\nLGTM.")
+        append_trace(ticket_id, "t0", "artifact", ARTIFACT_CODE_REVIEW_JSON,
+                     artifact_filename="code-review.json",
+                     content='{"verdict":"approved"}')
         append_trace(ticket_id, "t0", "artifact", ARTIFACT_QA_MATRIX,
                      content="# QA Matrix\n\nAll pass.")
+        append_trace(ticket_id, "t0", "artifact", ARTIFACT_QA_MATRIX_JSON,
+                     artifact_filename="qa-matrix.json",
+                     content='{"overall":"PASS"}')
+        append_trace(ticket_id, "t0", "artifact", ARTIFACT_IMPLEMENTATION_RESULT,
+                     artifact_filename="implementation-result-unit-1.json",
+                     content='{"status":"complete"}')
+        append_trace(ticket_id, "t0", "artifact", ARTIFACT_RETROSPECTIVE_JSON,
+                     artifact_filename="retrospective.json",
+                     content='{"status":"ok","lesson_candidates":[]}')
         append_trace(ticket_id, "t0", "artifact", ARTIFACT_SESSION_LOG,
                      content="session narrative content here")
         append_trace(ticket_id, "t0", "artifact", ARTIFACT_EFFECTIVE_CLAUDE_MD,
@@ -122,7 +138,11 @@ async def test_bundle_contents_have_expected_files(
         assert "ticket.json" in names
         # Seeded artifacts
         assert "code-review.md" in names
+        assert "code-review.json" in names
         assert "qa-matrix.md" in names
+        assert "qa-matrix.json" in names
+        assert "implementation-result-unit-1.json" in names
+        assert "retrospective.json" in names
         assert "session.log" in names
         assert "effective-CLAUDE.md" in names
         assert "tool-index.json" in names

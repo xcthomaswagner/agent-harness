@@ -40,8 +40,23 @@ from investigate_command import (
 from redaction import redact
 from tracer import (
     ARTIFACT_CODE_REVIEW,
+    ARTIFACT_CODE_REVIEW_JSON,
     ARTIFACT_EFFECTIVE_CLAUDE_MD,
+    ARTIFACT_IMPLEMENTATION_RESULT,
+    ARTIFACT_JUDGE_VERDICT,
+    ARTIFACT_JUDGE_VERDICT_JSON,
+    ARTIFACT_MERGE_REPORT,
+    ARTIFACT_MERGE_REPORT_JSON,
+    ARTIFACT_PLAN_DECISION,
+    ARTIFACT_PLAN_DECISION_JSON,
+    ARTIFACT_PLAN_REVIEW,
+    ARTIFACT_PLAN_REVIEW_JSON,
     ARTIFACT_QA_MATRIX,
+    ARTIFACT_QA_MATRIX_JSON,
+    ARTIFACT_RETROSPECTIVE,
+    ARTIFACT_RETROSPECTIVE_JSON,
+    ARTIFACT_RISK_CHALLENGE,
+    ARTIFACT_RISK_CHALLENGE_JSON,
     ARTIFACT_SESSION_LOG,
     ARTIFACT_SESSION_STREAM,
     ARTIFACT_TOOL_INDEX,
@@ -185,8 +200,7 @@ Files:
   session-stream.jsonl   Raw Claude Code stream (if captured)
   session.log            Narrative session log (preview, up to 5000 chars)
   effective-CLAUDE.md    CLAUDE.md the agent was operating under
-  qa-matrix.md           QA validator report (if present)
-  code-review.md         Code reviewer report (if present)
+  *.md / *.json          Consolidated handoff artifacts (if present)
   tool-index.json        Declarative tool-call index from the stream (if present)
   diagnostic.json        Six-item diagnostic checklist (always present)
   ticket.json            Normalized ticket payload (models.TicketPayload shape)
@@ -312,15 +326,41 @@ def _build_bundle(ticket_id: str, entries: list[dict[str, Any]]) -> bytes:
         if claude_md_entry and claude_md_entry.get("content"):
             _add_bytes("effective-CLAUDE.md", str(claude_md_entry["content"]).encode())
 
-        # qa-matrix.md
-        qa_entry = artifacts.get(ARTIFACT_QA_MATRIX)
-        if qa_entry and qa_entry.get("content"):
-            _add_bytes("qa-matrix.md", str(qa_entry["content"]).encode())
+        # Canonical handoff artifacts. Markdown remains useful for humans;
+        # JSON sidecars are the authoritative state for downstream tooling.
+        handoff_artifacts = {
+            "code-review.md": ARTIFACT_CODE_REVIEW,
+            "code-review.json": ARTIFACT_CODE_REVIEW_JSON,
+            "qa-matrix.md": ARTIFACT_QA_MATRIX,
+            "qa-matrix.json": ARTIFACT_QA_MATRIX_JSON,
+            "judge-verdict.md": ARTIFACT_JUDGE_VERDICT,
+            "judge-verdict.json": ARTIFACT_JUDGE_VERDICT_JSON,
+            "merge-report.md": ARTIFACT_MERGE_REPORT,
+            "merge-report.json": ARTIFACT_MERGE_REPORT_JSON,
+            "plan-review.md": ARTIFACT_PLAN_REVIEW,
+            "plan-review.json": ARTIFACT_PLAN_REVIEW_JSON,
+            "risk-challenge.md": ARTIFACT_RISK_CHALLENGE,
+            "risk-challenge.json": ARTIFACT_RISK_CHALLENGE_JSON,
+            "plan-decision.md": ARTIFACT_PLAN_DECISION,
+            "plan-decision.json": ARTIFACT_PLAN_DECISION_JSON,
+            "retrospective.md": ARTIFACT_RETROSPECTIVE,
+            "retrospective.json": ARTIFACT_RETROSPECTIVE_JSON,
+        }
+        for filename, event_name in handoff_artifacts.items():
+            entry = artifacts.get(event_name)
+            if entry and entry.get("content"):
+                _add_bytes(filename, str(entry["content"]).encode())
 
-        # code-review.md
-        review_entry = artifacts.get(ARTIFACT_CODE_REVIEW)
-        if review_entry and review_entry.get("content"):
-            _add_bytes("code-review.md", str(review_entry["content"]).encode())
+        implementation_entries = [
+            entry
+            for entry in entries
+            if entry.get("phase") == "artifact"
+            and entry.get("event") == ARTIFACT_IMPLEMENTATION_RESULT
+            and entry.get("content")
+        ]
+        for idx, entry in enumerate(implementation_entries, start=1):
+            filename = str(entry.get("artifact_filename") or f"implementation-result-{idx}.json")
+            _add_bytes(filename, str(entry["content"]).encode())
 
         # diagnostic.json — computed inline at bundle time. Commit 3's
         # `run_diagnostic_checklist` is a pure analyzer (no persistence), so

@@ -77,11 +77,17 @@ def judge_verdict_path(ticket_id: str, override: Path | None) -> Path | None:
     root = archive_root(override)
     if root is None or not ticket_id:
         return None
-    candidate = root / ticket_id / "logs" / "judge-verdict.json"
-    try:
-        return candidate if candidate.is_file() else None
-    except OSError:
-        return None
+    candidates = (
+        root / ticket_id / "logs" / "judge-verdict.json",
+        root / ticket_id / "judge-verdict.json",  # legacy pre-logs/ archive shape
+    )
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
 
 
 def load_json_object(

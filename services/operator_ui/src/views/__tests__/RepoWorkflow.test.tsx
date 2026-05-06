@@ -119,6 +119,57 @@ describe("RepoWorkflowView", () => {
       expect(input.value).toBe("/tmp/manual-repo");
     });
   });
+
+  it("clears a loaded draft when the repository target changes", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/operator/repo-workflow/options") {
+        return jsonResponse({
+          profiles: [
+            {
+              client_profile: "harness-test-client",
+              platform_profile: "contentstack",
+              repo_path: "/tmp/harness-test-client",
+              repo_exists: true,
+              workflow_exists: false,
+            },
+          ],
+        });
+      }
+      if (url === "/api/operator/repo-workflow/draft") {
+        return jsonResponse(draftResponse(false));
+      }
+      if (url === "/api/operator/repo-workflow") {
+        throw new Error("stale save should be disabled");
+      }
+      return jsonResponse({}, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { container, findByText } = render(<RepoWorkflowView />);
+
+    await waitFor(() => {
+      const input = container.querySelector("input") as HTMLInputElement;
+      expect(input.value).toBe("/tmp/harness-test-client");
+    });
+    fireEvent.click(await findByText("Generate Draft"));
+    await waitFor(() => {
+      const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+      expect(textarea.value).toContain("## Validation Commands");
+    });
+
+    const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+    fireEvent.input(textarea, { target: { value: "# WORKFLOW.md\n\nrepo A" } });
+    const input = container.querySelector("input") as HTMLInputElement;
+    fireEvent.input(input, { target: { value: "/tmp/manual-repo" } });
+
+    await waitFor(() => {
+      expect(textarea.value).toBe("");
+      expect((findButton(container, "Save WORKFLOW.md") as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+    });
+  });
 });
 
 function draftResponse(saved = false) {
@@ -172,4 +223,14 @@ function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
     status: init.status ?? 200,
     headers: { "Content-Type": "application/json", ...(init.headers ?? {}) },
   });
+}
+
+function findButton(container: ParentNode, label: string): HTMLButtonElement {
+  const button = [...container.querySelectorAll("button")].find(
+    (candidate) => candidate.textContent === label,
+  );
+  if (!(button instanceof HTMLButtonElement)) {
+    throw new Error(`button not found: ${label}`);
+  }
+  return button;
 }
