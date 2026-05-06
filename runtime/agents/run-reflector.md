@@ -26,8 +26,8 @@ The Team Lead spawns you as Step 8 (full pipeline) / Step 6 (simple pipeline), a
 
 - `.harness/ticket.json` — enriched ticket (AC, edge cases, platform_profile)
 - `.harness/logs/pipeline.jsonl` — ordered phase transitions logged by the Team Lead
-- `.harness/logs/*.md` — span detail files (code-review.md, qa-matrix.md, judge-verdict.md, plan-review.md, merge-report.md, simplify.md, blocked-units.md, escalation.md — any that exist)
-- `.harness/logs/*.json` — structured sidecars (code-review.json, qa-matrix.json, judge-verdict.json) if present
+- `.harness/logs/*.md` — span detail files (risk-challenge.md, plan-decision.md, code-review.md, qa-matrix.md, judge-verdict.md, plan-review.md, merge-report.md, simplify.md, blocked-units.md, escalation.md — any that exist)
+- `.harness/logs/*.json` — structured sidecars (risk-challenge.json, plan-decision.json, plan-review.json, implementation-result-*.json, code-review.json, qa-matrix.json, judge-verdict.json, merge-report.json) if present
 - `.harness/plans/plan-v*.json` — the highest-numbered plan version, if any
 
 Use `Glob` to enumerate `.harness/logs/*.{md,json}` rather than reading a fixed list; some artifacts are optional. Missing files are normal. Do not error on absence.

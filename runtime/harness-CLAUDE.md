@@ -17,6 +17,33 @@ Read the enriched ticket at `.harness/ticket.json`. Check `size_assessment.estim
 - **Single unit (estimated_units == 1 or missing):** Use the Simple Pipeline
 - **Multiple units (estimated_units > 1):** Use the Full Pipeline
 
+## Structured Shared State Contract
+
+Use `.claude/skills/structured-handoff/SKILL.md` for every inter-agent handoff.
+
+**Chat summaries are not authoritative.** Every phase must write its canonical
+artifact before the Team Lead routes the next phase. The Team Lead MUST read the
+artifact from disk and make decisions from that structured state, not from
+transient chat alone.
+
+Canonical handoff files:
+
+| Handoff | Required artifact |
+|---------|-------------------|
+| Plan | `.harness/plans/plan-v<N>.json` |
+| Risk challenge | `.harness/logs/risk-challenge.md` and `.harness/logs/risk-challenge.json` |
+| Plan review | `.harness/logs/plan-review.md` and `.harness/logs/plan-review.json` |
+| Plan decision | `.harness/logs/plan-decision.md` and `.harness/logs/plan-decision.json` when the Challenger runs |
+| Implementation result | `.harness/logs/implementation-result-<unit_id>.json` |
+| Merge result | `.harness/logs/merge-report.md` and `.harness/logs/merge-report.json` |
+| Code review | `.harness/logs/code-review.md` and `.harness/logs/code-review.json` |
+| Judge verdict | `.harness/logs/judge-verdict.md` and `.harness/logs/judge-verdict.json` |
+| QA verdict | `.harness/logs/qa-matrix.md` and `.harness/logs/qa-matrix.json` |
+| Reflection | `.harness/logs/retrospective.md` and `.harness/logs/retrospective.json` |
+
+If a required artifact is missing or malformed, re-prompt that teammate once.
+If it is still missing or malformed, escalate instead of routing from memory.
+
 ## Platform Detection (pre-flight, run once)
 
 Before you spawn any sub-agent, detect what platform the repo is. This determines which skills the developer must invoke. Run these checks at the repo root and remember the result — you'll inject it into every developer prompt.
@@ -135,6 +162,7 @@ Agent(
          Write tests for every change per the test scenarios in the ticket.
          Run the full test suite. Fix failures (up to 3 attempts).
          If figma_design_spec is present, follow .claude/skills/implement/FIGMA_INTEGRATION.md.
+         Write .harness/logs/implementation-result-unit-1.json per .claude/skills/structured-handoff/SKILL.md.
          Stage and commit: feat(<ticket-id>): <description>
          Do NOT push or open a PR.",
   description="Implement <ticket-id>",
@@ -221,6 +249,67 @@ Read `.harness/plans/plan-v1.json`. If the planner failed after 2 attempts, esca
 
 Log: `{"phase": "planning", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Plan complete", "units": N}`
 
+### Step 2b: Risk Challenge Gate
+
+Run this gate only for high-risk full-pipeline tickets. Skip it for simple
+tickets and routine full-pipeline tickets.
+
+Run the Challenger when any trigger from `.claude/skills/risk-challenge/SKILL.md`
+matches, including:
+
+- estimated_units >= 3
+- auth, permissions, payment, pricing, PII, migrations, schema/CMS writes,
+  production config, shared API, or integration contract changes
+- Salesforce/ContentStack metadata, schema, permission, content model, or
+  deployment changes
+- SAP, Oracle, ERP, CRM, middleware, or external-system contract changes
+- a new abstraction where a similar repo abstraction already exists
+- more than five source files, or both backend/API and frontend/UI surfaces
+- explicit high-risk notes in the ticket, analyst notes, or `WORKFLOW.md`
+
+If no trigger matches, write `.harness/logs/plan-decision.json` with:
+
+```json
+{"risk_challenge_ran": false, "reason": "No high-risk trigger matched."}
+```
+
+If a trigger matches, spawn the Challenger:
+
+```
+Agent(
+  prompt="Follow the /risk-challenge skill at .claude/skills/risk-challenge/SKILL.md.
+         Read .harness/ticket.json, CLAUDE.md, .harness/repo-workflow.md if present,
+         and the highest-numbered .harness/plans/plan-v<N>.json.
+         Challenge the plan before implementation starts.
+         Write .harness/logs/risk-challenge.md and .harness/logs/risk-challenge.json.
+         Do not modify source code or plan files.",
+  description="Challenge plan <ticket-id>",
+  mode="bypassPermissions"
+)
+```
+
+Read `.harness/logs/risk-challenge.json`.
+
+Then write `.harness/logs/plan-decision.md` and `.harness/logs/plan-decision.json`
+summarizing:
+
+```json
+{
+  "risk_challenge_ran": true,
+  "challenge_artifact": ".harness/logs/risk-challenge.json",
+  "requires_plan_revision": true,
+  "accepted_objections": ["risk-1"],
+  "rejected_objections": [],
+  "rationale": "Short Team Lead synthesis."
+}
+```
+
+If `requires_plan_revision` is true, send the challenge artifact to the Plan
+Reviewer. The Plan Reviewer must either write `plan-v<N+1>.json` or explicitly
+reject the objection in `plan-review.json`.
+
+Log: `{"phase": "risk_challenge", "ticket_id": "<id>", "timestamp": "<ISO>", "event": "Risk challenge complete", "ran": true|false, "blocking": true|false, "objections": N}`
+
 ### Step 3: Plan Review
 
 Spawn a plan reviewer:
@@ -229,10 +318,14 @@ Spawn a plan reviewer:
 Agent(
   prompt="You are a plan reviewer. Read the implementation plan at .harness/plans/plan-v1.json
          and the enriched ticket at .harness/ticket.json.
+         If .harness/logs/risk-challenge.json exists, read it and either incorporate
+         accepted blocking objections into plan-v<N+1>.json or explicitly reject them
+         with evidence in .harness/logs/plan-review.json.
          Follow the /review-plan skill in .claude/skills/review-plan/SKILL.md.
          Check: no parallel conflicts (same file in independent units), all AC covered,
          valid dependency graph, descriptions specific enough to implement.
          Write your review to .harness/logs/plan-review.md.
+         Write .harness/logs/plan-review.json.
          If corrections needed, write the corrected plan to .harness/plans/plan-v2.json.",
   description="Review plan <ticket-id>",
   mode="bypassPermissions"
@@ -265,6 +358,7 @@ Agent(
          Implement ONLY the files listed for your unit: <affected_files>.
          Write tests for your unit's test_criteria.
          Run tests. Fix failures (up to 3 attempts).
+         Write .harness/logs/implementation-result-unit-1.json per .claude/skills/structured-handoff/SKILL.md.
          Commit: feat(<ticket-id>): <unit description>
          Do NOT push.",
   description="Dev unit-1 <ticket-id>",
@@ -324,7 +418,7 @@ Agent(
          Read the plan at .harness/plans/plan-v<N>.json.
          Merge ONLY the following completed unit branches (skip blocked/failed):
          <list of branches, e.g., ai/<ticket-id>/unit-1, ai/<ticket-id>/unit-2>
-         Write results to .harness/logs/merge-report.md.",
+         Write results to .harness/logs/merge-report.md and .harness/logs/merge-report.json.",
   description="Merge <ticket-id>",
   mode="bypassPermissions"
 )
@@ -645,7 +739,14 @@ The harness uses a two-tier observability model inspired by OpenTelemetry:
 | `qa-matrix.md` | QA | `qa_validation` |
 | `qa-matrix.json` | QA | `qa_validation` |
 | `merge-report.md` | Merge Coordinator | `merge` |
+| `merge-report.json` | Merge Coordinator | `merge` |
 | `plan-review.md` | Plan Reviewer | `plan_review` |
+| `plan-review.json` | Plan Reviewer | `plan_review` |
+| `risk-challenge.md` | Challenger | `risk_challenge` |
+| `risk-challenge.json` | Challenger | `risk_challenge` |
+| `plan-decision.md` | Team Lead | `plan_review` |
+| `plan-decision.json` | Team Lead | `plan_review` |
+| `implementation-result-<unit_id>.json` | Developer | `implementation` |
 | `blocked-units.md` | Team Lead | `implementation` |
 | `escalation.md` | Team Lead | escalation events |
 | `simplify.md` | Simplify agent | `simplify` |

@@ -1,6 +1,6 @@
 ---
 name: qa
-model: sonnet
+model: opus
 description: >
   Validates implementations against acceptance criteria through unit,
   integration, and E2E tests. Produces a pass/fail QA matrix.

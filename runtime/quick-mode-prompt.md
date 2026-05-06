@@ -45,6 +45,9 @@ Write findings to `.harness/logs/code-review.md` with format:
 
 If CHANGES_NEEDED with critical issues: fix them, re-run tests, amend the commit, then re-review and update the file.
 
+Also write `.harness/logs/code-review.json` using the same schema as the
+`/code-review` skill. The JSON file is the authoritative handoff artifact.
+
 ## STEP 3 — QA MATRIX
 
 For each acceptance criterion in the ticket, determine PASS/FAIL/NOT_TESTED with evidence.
@@ -59,6 +62,9 @@ Write to `.harness/logs/qa-matrix.md` with format:
 ```
 
 If `figma_design_spec` is NOT present in the ticket, write: "Design Compliance: skipped — no Figma design spec provided"
+
+Also write `.harness/logs/qa-matrix.json` using the same schema as the
+`/qa-validation` skill. The JSON file is the authoritative QA handoff artifact.
 
 ## STEP 4 — SIMPLIFY
 

@@ -8,8 +8,8 @@ Every teammate writes structured JSON Lines logs to `/.harness/logs/`.
 {
   "timestamp": "2026-03-21T15:30:00.123Z",
   "ticket_id": "PROJ-123",
-  "phase": "planning|plan_review|implementation|code_review|qa|merge|pr_review",
-  "teammate_role": "team_lead|planner|plan_reviewer|developer|code_reviewer|qa|merge_coordinator",
+  "phase": "planning|risk_challenge|plan_review|implementation|code_review|judge|qa_validation|merge|reflection|pr_review",
+  "teammate_role": "team_lead|planner|challenger|plan_reviewer|developer|code_reviewer|judge|qa|merge_coordinator|run_reflector",
   "event_type": "phase_started|phase_completed|phase_failed|decision|tool_call|message_sent|message_received|escalation",
   "details": {
     "description": "Human-readable description of what happened",

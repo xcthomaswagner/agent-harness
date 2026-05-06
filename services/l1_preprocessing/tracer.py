@@ -883,6 +883,9 @@ ARTIFACT_QA_MATRIX = "qa_matrix_artifact"
 ARTIFACT_JUDGE_VERDICT = "judge_verdict_artifact"
 ARTIFACT_MERGE_REPORT = "merge_report_artifact"
 ARTIFACT_PLAN_REVIEW = "plan_review_artifact"
+ARTIFACT_RISK_CHALLENGE = "risk_challenge_artifact"
+ARTIFACT_PLAN_DECISION = "plan_decision_artifact"
+ARTIFACT_IMPLEMENTATION_RESULT = "implementation_result_artifact"
 ARTIFACT_PLAN = "plan_artifact"
 ARTIFACT_BLOCKED_UNITS = "blocked_units_artifact"
 ARTIFACT_SIMPLIFY = "simplify_artifact"
@@ -898,6 +901,9 @@ _ARTIFACT_PHASE_MAP: dict[str, str] = {
     ARTIFACT_JUDGE_VERDICT: "code_review",
     ARTIFACT_MERGE_REPORT: "merge",
     ARTIFACT_PLAN_REVIEW: "plan_review",
+    ARTIFACT_RISK_CHALLENGE: "risk_challenge",
+    ARTIFACT_PLAN_DECISION: "plan_review",
+    ARTIFACT_IMPLEMENTATION_RESULT: "implementation",
     ARTIFACT_PLAN: "planning",
     ARTIFACT_BLOCKED_UNITS: "implementation",
     ARTIFACT_SIMPLIFY: "simplify",
@@ -912,6 +918,7 @@ _PHASE_ICON_TYPE: dict[str, str] = {
     "ticket_read": "span",
     "planning": "agent",
     "plan_review": "span",
+    "risk_challenge": "span",
     "implementation": "tool",
     "merge": "span",
     "code_review": "span",
@@ -1210,6 +1217,7 @@ def build_trace_list_row(
         "ticket_read": "#64748B",
         "planning": "#9333EA",
         "plan_review": "#9333EA",
+        "risk_challenge": "#0F766E",
         "implementation": "#EA580C",
         "merge": "#82CB15",
         "code_review": "#6466F1",
@@ -1387,6 +1395,8 @@ def consolidate_worktree_logs(
         "judge-verdict.md": ARTIFACT_JUDGE_VERDICT,
         "merge-report.md": ARTIFACT_MERGE_REPORT,
         "plan-review.md": ARTIFACT_PLAN_REVIEW,
+        "risk-challenge.md": ARTIFACT_RISK_CHALLENGE,
+        "plan-decision.md": ARTIFACT_PLAN_DECISION,
         "blocked-units.md": ARTIFACT_BLOCKED_UNITS,
         "simplify.md": ARTIFACT_SIMPLIFY,
         "escalation.md": ARTIFACT_ESCALATION,
@@ -1421,6 +1431,16 @@ def consolidate_worktree_logs(
                     )[:5000]
                 ),
             )
+
+    for artifact_path in sorted(logs_dir.glob("implementation-result-*.json")):
+        append_trace(
+            ticket_id, trace_id,
+            phase="artifact",
+            event=ARTIFACT_IMPLEMENTATION_RESULT,
+            content=_redact_and_count(
+                artifact_path.read_text(encoding="utf-8", errors="replace")[:5000]
+            ),
+        )
 
     # Effective CLAUDE.md — injected at worktree root, captures the instructions
     # the agent was actually operating under for this run.

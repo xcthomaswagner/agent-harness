@@ -126,6 +126,21 @@ mcp__ado__repo_create_pull_request(
 
 `workItems` links the work item automatically. Use the numeric ID only (e.g., "123"), not the composite key.
 
+Write `.harness/logs/merge-report.md` and `.harness/logs/merge-report.json`.
+
+`merge-report.json` must include:
+
+```json
+{
+  "status": "complete|partial|failed",
+  "integration_branch": "ai/{ticket-id}",
+  "units_merged": ["unit-1"],
+  "units_failed": [],
+  "conflicts": [],
+  "test_summary": "45 passed, 0 failed"
+}
+```
+
 PR description should include:
 - Link to the source ticket
 - Summary of all units implemented

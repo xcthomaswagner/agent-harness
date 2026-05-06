@@ -8,6 +8,10 @@ import sys
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+SERVICES_DIR = Path(__file__).resolve().parents[1] / "services"
+
+if str(SERVICES_DIR) not in sys.path:
+    sys.path.insert(0, str(SERVICES_DIR))
 
 
 def _load_spawn_team_module():
@@ -74,3 +78,17 @@ def test_claude_cli_model_args_passes_explicit_opus_and_sonnet() -> None:
     ) == ["--model", "opus"]
     assert claude_cli_model_args("sonnet") == ["--model", "sonnet"]
     assert claude_cli_model_args("claude-opus-4-20250514") == []
+
+
+def test_default_policy_uses_high_reasoning_qa_and_challenger(monkeypatch) -> None:
+    monkeypatch.delenv("HARNESS_MODEL_POLICY", raising=False)
+
+    from shared.model_policy import resolve_model
+
+    qa = resolve_model("qa")
+    challenger = resolve_model("challenger")
+
+    assert qa.model == "opus"
+    assert qa.reasoning == "high"
+    assert challenger.model == "opus"
+    assert challenger.reasoning == "high"

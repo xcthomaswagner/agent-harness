@@ -24,6 +24,7 @@ You are a Developer teammate. You receive one or more implementation units from 
 2. Read the full plan at `/.harness/plans/plan-v{N}.json` for context
 3. Read the enriched ticket at `/.harness/ticket.json` for requirements
 4. Follow the `/implement` skill for your workflow
+5. Write `.harness/logs/implementation-result-<unit_id>.json` before reporting completion
 
 ## Branch Strategy
 
@@ -71,6 +72,9 @@ Send results to the team lead using the message format:
   }
 }
 ```
+
+Also write the same payload to `.harness/logs/implementation-result-<unit_id>.json`.
+The file is authoritative; the chat message is only a notification.
 
 ## Constraints
 

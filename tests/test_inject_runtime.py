@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import json
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -48,6 +48,11 @@ def test_basic_injection() -> None:
 
         # Agents injected
         assert (client / ".claude" / "agents" / "team-lead.md").exists()
+        assert (client / ".claude" / "agents" / "challenger.md").exists()
+
+        # Risk challenge / structured handoff skills injected
+        assert (client / ".claude" / "skills" / "risk-challenge").is_dir()
+        assert (client / ".claude" / "skills" / "structured-handoff").is_dir()
 
         # CLAUDE.md merged (client first, harness second)
         content = (client / "CLAUDE.md").read_text()
@@ -86,7 +91,10 @@ def test_skill_collision() -> None:
         assert result.returncode == 0
 
         # Client's original preserved
-        assert "Client's custom" in (client / ".claude" / "skills" / "implement" / "SKILL.md").read_text()
+        client_skill_text = (
+            client / ".claude" / "skills" / "implement" / "SKILL.md"
+        ).read_text()
+        assert "Client's custom" in client_skill_text
         # Harness skill prefixed
         assert (client / ".claude" / "skills" / "harness-implement").is_dir()
 

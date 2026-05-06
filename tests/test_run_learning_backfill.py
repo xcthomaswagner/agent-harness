@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,7 @@ def _seed_live_cluster(db_path: Path) -> None:
     )
 
     conn = open_connection(db_path)
+    opened_at = (datetime.now(UTC) - timedelta(days=2)).isoformat()
     try:
         ensure_schema(conn)
         for i in range(3):
@@ -51,7 +53,7 @@ def _seed_live_cluster(db_path: Path) -> None:
                     repo_full_name="acme/app",
                     head_sha=f"sha-{i}",
                     client_profile="xcsf30",
-                    opened_at="2026-04-16T00:00:00+00:00",
+                    opened_at=opened_at,
                 ),
             )
             insert_review_issue(

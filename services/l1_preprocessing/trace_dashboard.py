@@ -69,6 +69,7 @@ from dashboard_common import STATUS_BADGE as _STATUS_BADGE  # noqa: E402
 # Phase colors for duration bar and span icons
 _PHASE_COLORS: dict[str, str] = {
     "ticket_read": "#64748B", "planning": "#9333EA", "plan_review": "#9333EA",
+    "risk_challenge": "#0F766E",
     "implementation": "#EA580C", "merge": "#82CB15", "code_review": "#6466F1",
     "judge": "#6466F1", "qa_validation": "#124D49", "simplify": "#64748B",
     "pr_created": "#64748B", "complete": "#64748B",

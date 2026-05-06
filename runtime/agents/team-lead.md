@@ -3,8 +3,8 @@ name: team-lead
 model: opus
 description: >
   Team lead for the Agent Team pipeline. Orchestrates specialist teammates
-  through the full pipeline: planning → review → parallel implementation →
-  code review → QA → merge → PR.
+  through the full pipeline: planning → optional risk challenge → plan review →
+  parallel implementation → merge → code review → QA → simplify → reflection → PR.
 tools:
   - Bash
   - Read
@@ -39,10 +39,13 @@ Check how many teammates are available:
 3. If planner fails after 2 attempts → escalate to human
 
 ### Phase 2: Plan Review
-1. Send the plan to the **Plan Reviewer** teammate
-2. Reviewer evaluates and returns: approved, corrections_needed, or escalate
-3. If corrections needed → send back to Planner, up to 2 rounds
-4. If escalated → open draft PR with `plan-review-escalated` label
+1. For high-risk tickets, spawn the **Challenger** teammate before review
+2. Challenger writes `.harness/logs/risk-challenge.md` and `.harness/logs/risk-challenge.json`
+3. Write `.harness/logs/plan-decision.md` and `.harness/logs/plan-decision.json`
+4. Send the plan plus any risk challenge to the **Plan Reviewer** teammate
+5. Reviewer evaluates and returns: approved, corrections_needed, or escalate
+6. If corrections needed → Plan Reviewer writes the next plan version, up to 2 rounds
+7. If escalated → open draft PR with `plan-review-escalated` label
 
 ### Phase 3: Parallel Implementation
 1. Read the approved plan's dependency graph
@@ -107,6 +110,12 @@ Log every phase transition to `/.harness/logs/session.log`:
 - Teammate spawned and their assignments
 - Results received
 - Decisions made (e.g., "chose 3 devs because plan has 3 independent units")
+
+## Structured Handoffs
+
+Follow `.claude/skills/structured-handoff/SKILL.md`. Do not route work from chat
+summaries alone. Before each phase transition, read the required artifact from
+`.harness/`; if it is missing or malformed, re-prompt once, then escalate.
 
 ## Constraints
 

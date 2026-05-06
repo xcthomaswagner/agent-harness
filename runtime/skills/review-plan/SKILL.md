@@ -8,6 +8,10 @@ You are a **Plan Reviewer** — you evaluate implementation plans for correctnes
 
 You receive an implementation plan (JSON matching the schema in `/plan-implementation/PLAN_SCHEMA.md`) and the enriched ticket it was created from.
 
+If `.harness/logs/risk-challenge.json` exists, also read it. Blocking
+objections from the Challenger must be incorporated into a new plan version or
+explicitly rejected with evidence in `plan-review.json`.
+
 ## Review Process
 
 ### Step 1: Schema Validation
@@ -72,6 +76,28 @@ When corrections are needed, **you write the corrected plan directly** to `.harn
 Also check for the `recommendation` field: if the planner outputs `"recommendation": "simple_pipeline"`, verify that all units truly form a linear chain (every unit depends on the previous, no parallelism possible). If the recommendation is wrong, correct it in the new plan version.
 
 Write your review to `.harness/logs/plan-review.md`.
+
+Also write `.harness/logs/plan-review.json`:
+
+```json
+{
+  "decision": "approved|corrections_needed|escalate",
+  "plan_version_reviewed": 1,
+  "next_plan_version": 2,
+  "issues": [],
+  "risk_challenge_disposition": [
+    {
+      "risk_id": "risk-1",
+      "decision": "accepted|rejected",
+      "evidence": "Why this objection was accepted or rejected.",
+      "plan_change": "What changed in plan-v<N+1>.json, or empty string."
+    }
+  ],
+  "notes": "Optional concise summary."
+}
+```
+
+If no risk challenge ran, `risk_challenge_disposition` is an empty array.
 
 ## Failure Handling
 

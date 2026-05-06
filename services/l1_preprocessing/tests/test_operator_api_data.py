@@ -583,6 +583,9 @@ def test_model_policy_returns_defaults(
     assert roles["analyst"]["model"] == "claude-opus-4-20250514"
     assert roles["team_lead"]["reasoning"] == "high"
     assert roles["developer"]["model"] == "opus"
+    assert roles["challenger"]["reasoning"] == "high"
+    assert roles["qa"]["model"] == "opus"
+    assert roles["qa"]["reasoning"] == "high"
     assert roles["run_reflector"]["model"] == "opus"
     assert "sonnet" in data["model_options"]
 

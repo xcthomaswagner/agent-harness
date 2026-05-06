@@ -373,6 +373,7 @@ def run_git(
 
 
 _AGENT_ROLE_BY_FILE: dict[str, str] = {
+    "challenger.md": "challenger",
     "code-reviewer.md": "code_reviewer",
     "developer.md": "developer",
     "judge.md": "judge",
