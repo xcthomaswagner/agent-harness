@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
@@ -541,7 +541,7 @@ class TestDownloadAttachment:
         if content_length is not None:
             headers["content-length"] = content_length
         stream_response.headers = headers
-        stream_response.raise_for_status = AsyncMock()
+        stream_response.raise_for_status = Mock()
 
         async def aiter_bytes():
             yield data
@@ -721,7 +721,7 @@ class TestDownloadImageAttachments:
         stream_ctx = AsyncMock()
         stream_response = AsyncMock()
         stream_response.headers = {"content-length": str(len(image_bytes))}
-        stream_response.raise_for_status = AsyncMock()
+        stream_response.raise_for_status = Mock()
 
         async def aiter_bytes():
             yield image_bytes

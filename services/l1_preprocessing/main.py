@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -113,10 +115,17 @@ from webhooks import router as webhook_router
 logger = structlog.get_logger()
 
 
+@asynccontextmanager
+async def _app_lifespan(_: FastAPI) -> AsyncIterator[None]:
+    await _validate_config()
+    yield
+
+
 app = FastAPI(
     title="Agentic Harness L1 Pre-Processing",
     description="Receives Jira/ADO webhooks, enriches tickets, dispatches to Agent Teams.",
     version="0.1.0",
+    lifespan=_app_lifespan,
 )
 
 
@@ -226,7 +235,6 @@ def _export_platform_pass_through() -> None:
             os.environ[var] = value
 
 
-@app.on_event("startup")
 async def _validate_config() -> None:
     """Warn about missing configuration at startup."""
     _export_platform_pass_through()

@@ -42,17 +42,30 @@ export const ACCENT_PRESETS: readonly AccentPreset[] = [
 /** Identifier stored in localStorage. May be a preset id or a hex string. */
 export type AccentValue = string;
 
-function readStored(key: string): string | null {
+function browserStorage(): Storage | null {
+  if (typeof window === "undefined") return null;
   try {
-    return localStorage.getItem(key);
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function readStored(key: string): string | null {
+  const storage = browserStorage();
+  if (!storage) return null;
+  try {
+    return storage.getItem(key);
   } catch {
     return null;
   }
 }
 
 function writeStored(key: string, value: string): void {
+  const storage = browserStorage();
+  if (!storage) return;
   try {
-    localStorage.setItem(key, value);
+    storage.setItem(key, value);
   } catch {
     /* ignore — embedded previews may disable storage */
   }

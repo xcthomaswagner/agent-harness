@@ -10,7 +10,8 @@ import os
 import re
 import sys
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,10 +55,18 @@ BOT_COMMENT_MARKER = "<!-- xcagent -->"
 _processed_deliveries: OrderedDict[str, None] = OrderedDict()
 _MAX_DELIVERY_CACHE = 500
 
+
+@asynccontextmanager
+async def _app_lifespan(_: FastAPI) -> AsyncIterator[None]:
+    await _drain_backlog_on_startup()
+    yield
+
+
 app = FastAPI(
     title="Agentic Harness L3 PR Review",
     description="Receives GitHub PR webhooks, classifies events, spawns review/fix sessions.",
     version="0.1.0",
+    lifespan=_app_lifespan,
 )
 
 _spawner: SessionSpawner | None = None
@@ -1296,7 +1305,6 @@ _HANDLERS: dict[EventType, Any] = {
 # --- Endpoints ---
 
 
-@app.on_event("startup")
 async def _drain_backlog_on_startup() -> None:
     async def _drain() -> None:
         forwarders: dict[str, Callable[[dict[str, Any]], Awaitable[bool]]] = {
