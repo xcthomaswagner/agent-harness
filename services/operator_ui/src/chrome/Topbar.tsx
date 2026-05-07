@@ -109,32 +109,33 @@ interface Crumb {
 function crumbFor(route: Route): Crumb[] {
   switch (route.name) {
     case "home":
-      return [{ label: "Overview" }, { label: "Home", strong: true }];
+      return [{ label: "Operate" }, { label: "Command Center", strong: true }];
+    case "runs":
+      return [{ label: "Operate" }, { label: "Runs", strong: true }];
     case "tickets":
-      return [{ label: "Pipeline" }, { label: "Tickets", strong: true }];
     case "traces":
-      return [{ label: "Pipeline" }, { label: "Traces", strong: true }];
+      return [{ label: "Operate" }, { label: "Runs", strong: true }];
     case "trace-detail":
       return [
-        { label: "Pipeline" },
-        { label: "Traces" },
+        { label: "Operate" },
+        { label: "Runs" },
         { label: route.id, strong: true },
       ];
     case "autonomy":
       return [
-        { label: "Ops" },
+        { label: "Improve" },
         {
-          label: route.profile ? `Autonomy · ${route.profile}` : "Autonomy",
+          label: route.profile ? `Client Health · ${route.profile}` : "Client Health",
           strong: true,
         },
       ];
     case "learning":
-      return [{ label: "Ops" }, { label: "Lessons", strong: true }];
+      return [{ label: "Improve" }, { label: "Learning", strong: true }];
     case "repo-workflow":
-      return [{ label: "Ops" }, { label: "Repo Workflow", strong: true }];
+      return [{ label: "Setup" }, { label: "Repo Workflow", strong: true }];
     case "pr-detail":
       return [
-        { label: "Pipeline" },
+        { label: "Operate" },
         { label: "PR" },
         { label: route.id, strong: true },
       ];

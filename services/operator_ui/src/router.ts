@@ -16,6 +16,7 @@ const BASE = "/operator";
 
 export type Route =
   | { name: "home" }
+  | { name: "runs" }
   | { name: "tickets" }
   | { name: "traces" }
   | { name: "trace-detail"; id: string }
@@ -48,6 +49,7 @@ function withApiKey(path: string): string {
 export function parseRoute(path: string): Route {
   const p = stripBase(path).replace(/\/+$/, "") || "/";
   if (p === "/") return { name: "home" };
+  if (p === "/runs") return { name: "runs" };
   if (p === "/tickets") return { name: "tickets" };
   if (p === "/traces") return { name: "traces" };
   if (p === "/learning") return { name: "learning" };
@@ -136,6 +138,9 @@ export function href(route: Route): string {
   switch (route.name) {
     case "home":
       path = joinBase("/");
+      break;
+    case "runs":
+      path = joinBase("/runs");
       break;
     case "tickets":
       path = joinBase("/tickets");

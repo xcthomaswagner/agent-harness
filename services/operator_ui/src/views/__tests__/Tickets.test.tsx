@@ -19,7 +19,7 @@ class FakeEventSource {
   close() {}
 }
 
-describe("TicketsView", () => {
+describe("RunsView", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -38,8 +38,8 @@ describe("TicketsView", () => {
             {
               id: "HARN-1",
               title: "Test ticket",
-              status: "in-flight",
-              raw_status: "In Flight",
+              status: "stuck",
+              raw_status: "Stuck",
               hidden: false,
               lifecycle_state: "",
               state_reason: "",
@@ -56,8 +56,8 @@ describe("TicketsView", () => {
           count: 1,
           status_counts: {
             all: 1,
-            "in-flight": 1,
-            stuck: 0,
+            "in-flight": 0,
+            stuck: 1,
             queued: 0,
             done: 0,
             hidden: 0,
@@ -160,24 +160,15 @@ describe("TicketsView", () => {
     expect(counts["in-flight"]).toBe(0);
   });
 
-  it("uses the unfiltered response for filter chip counts", async () => {
+  it("uses the run model for operator bucket chip counts", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.startsWith("/api/operator/traces") && url.includes("status=in-flight")) {
-        return jsonResponse({
-          traces: [],
-          count: 0,
-          offset: 0,
-          limit: 200,
-          include_hidden: false,
-        });
-      }
       if (url.startsWith("/api/operator/traces")) {
         return jsonResponse({
           traces: [
-            { ...traceSummary("HARN-1"), status: "done" },
-            { ...traceSummary("HARN-2"), status: "stuck" },
-            { ...traceSummary("HARN-3"), status: "done" },
+            { ...traceSummary("HARN-1"), status: "done", raw_status: "Complete" },
+            { ...traceSummary("HARN-2"), status: "stuck", raw_status: "Stuck" },
+            { ...traceSummary("HARN-3"), status: "done", raw_status: "Failed" },
           ],
           count: 3,
           offset: 0,
@@ -189,14 +180,11 @@ describe("TicketsView", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const { findByText } = render(<TicketsView />);
+    const { findByRole } = render(<TicketsView />);
 
-    expect(await findByText("All")).toBeTruthy();
-    expect(await findByText("3")).toBeTruthy();
-    expect(await findByText("Done")).toBeTruthy();
-    expect(await findByText("2")).toBeTruthy();
-    expect(await findByText("Stuck")).toBeTruthy();
-    expect(await findByText("1")).toBeTruthy();
+    expect(await findByRole("button", { name: "Recent 3" })).toBeTruthy();
+    expect(await findByRole("button", { name: "Needs attention 2" })).toBeTruthy();
+    expect(await findByRole("button", { name: "Successful 1" })).toBeTruthy();
   });
 
   it("shows backend detail when trigger removal fails", async () => {
@@ -209,8 +197,8 @@ describe("TicketsView", () => {
             {
               id: "HARN-2",
               title: "Broken trigger",
-              status: "in-flight",
-              raw_status: "In Flight",
+              status: "stuck",
+              raw_status: "Stuck",
               hidden: false,
               lifecycle_state: "",
               state_reason: "",
@@ -227,8 +215,8 @@ describe("TicketsView", () => {
           count: 1,
           status_counts: {
             all: 1,
-            "in-flight": 1,
-            stuck: 0,
+            "in-flight": 0,
+            stuck: 1,
             queued: 0,
             done: 0,
             hidden: 0,
@@ -275,8 +263,8 @@ describe("TicketsView", () => {
           count: 1,
           status_counts: {
             all: 1,
-            "in-flight": 1,
-            stuck: 0,
+            "in-flight": 0,
+            stuck: 1,
             queued: 0,
             done: 0,
             hidden: 0,
@@ -376,8 +364,8 @@ function traceSummary(id: string) {
   return {
     id,
     title: "Test ticket",
-    status: "in-flight",
-    raw_status: "In Flight",
+    status: "stuck",
+    raw_status: "Stuck",
     hidden: false,
     lifecycle_state: "",
     state_reason: "",

@@ -89,7 +89,7 @@ export function RepoWorkflowView() {
   return (
     <>
       <ViewHead
-        sup="Ops · repo workflow"
+        sup="Setup · repo workflow"
         title="Repo Workflow"
         sub="Generate and maintain repo-local WORKFLOW.md overlays."
         rnum={String(profiles.length)}

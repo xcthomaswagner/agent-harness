@@ -16,23 +16,22 @@ interface NavGroup {
 
 const NAV: readonly NavGroup[] = [
   {
-    label: "Overview",
+    label: "Operate",
     items: [
-      { label: "Home", target: { name: "home" } },
+      { label: "Command Center", target: { name: "home" } },
+      { label: "Runs", target: { name: "runs" } },
     ],
   },
   {
-    label: "Pipeline",
+    label: "Improve",
     items: [
-      { label: "Tickets", target: { name: "tickets" } },
-      { label: "Traces", target: { name: "traces" } },
-    ],
-  },
-  {
-    label: "Ops",
-    items: [
-      { label: "Autonomy", target: { name: "autonomy" } },
+      { label: "Client Health", target: { name: "autonomy" } },
       { label: "Learning", target: { name: "learning" } },
+    ],
+  },
+  {
+    label: "Setup",
+    items: [
       { label: "Repo Workflow", target: { name: "repo-workflow" } },
     ],
   },
@@ -40,9 +39,16 @@ const NAV: readonly NavGroup[] = [
 
 function isActive(current: Route, target: Route): boolean {
   if (current.name === target.name) return true;
-  // Trace detail nests under "Traces"; PR detail doesn't match any sidebar
+  // Run detail nests under "Runs"; PR detail doesn't match any sidebar
   // entry because it's reached from Traces or PR links, not direct nav.
-  if (target.name === "traces" && current.name === "trace-detail") return true;
+  if (
+    target.name === "runs" &&
+    (current.name === "trace-detail" ||
+      current.name === "tickets" ||
+      current.name === "traces")
+  ) {
+    return true;
+  }
   return false;
 }
 

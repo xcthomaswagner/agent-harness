@@ -7,17 +7,15 @@ import {
   LearningView,
   PRDetailView,
   RepoWorkflowView,
-  TicketsView,
+  RunsView,
   TraceDetailView,
-  TracesView,
 } from "./views";
 
 /**
  * Top-level app. Layout renders the sidebar + topbar; the route decides
  * which view renders in the content slot. Real view components land in
- * subsequent commits (Home, Traces, Trace Detail, Autonomy, Learning,
- * PR, Tickets) — for now each shows a placeholder so the router can be
- * exercised end-to-end.
+ * subsequent commits (Command Center, Runs, Trace Detail, Client Health,
+ * Learning, PR, Setup) — route compatibility remains for older links.
  */
 export function App() {
   const route = useRoute();
@@ -32,10 +30,10 @@ function ViewFor({ route }: { route: Route }) {
   switch (route.name) {
     case "home":
       return <HomeView />;
+    case "runs":
     case "tickets":
-      return <TicketsView />;
     case "traces":
-      return <TracesView />;
+      return <RunsView />;
     case "trace-detail":
       return <TraceDetailView id={route.id} />;
     case "autonomy":

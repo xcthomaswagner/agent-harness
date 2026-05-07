@@ -1,57 +1,90 @@
 import { ViewHead } from "../chrome";
 import { Pill, SectionHeader, Table } from "../primitives";
-import type { PillTone } from "../primitives";
 import { useFeed } from "../hooks/useFeed";
 import type {
   LessonCountsResponse,
   ProfileSummary,
   ProfilesResponse,
-  TraceStatus,
   TraceSummary,
   TracesResponse,
 } from "../api/types";
 import { href, navigate } from "../router";
 import { intOrDash, pct } from "./format";
+import {
+  filterRuns,
+  runBucketCounts,
+  runOutcomeLabel,
+  runOutcomeTone,
+} from "./runModel";
 import "./views.css";
 
-const STATUS_TONE: Record<TraceStatus, PillTone> = {
-  "in-flight": "active",
-  stuck: "warn",
-  queued: "cool",
-  done: "ok",
-  hidden: "err",
-};
-
 /**
- * Home view: profile cards + lessons strip + recent-runs summary.
+ * Home view: command-center summary for operator decisions.
  *
  * Data sources:
- *   - GET /api/operator/profiles — 4-card profile summaries
+ *   - GET /api/operator/profiles — client readiness/performance summaries
  *   - GET /api/operator/lessons/counts — 8-state lesson count strip
- *   - Recent runs land in commit 6 when the traces endpoint exists.
+ *   - GET /api/operator/traces — run list used for attention buckets
  */
 export function HomeView() {
   const profiles = useFeed<ProfilesResponse>("/api/operator/profiles");
   const lessons = useFeed<LessonCountsResponse>("/api/operator/lessons/counts");
-  const traces = useFeed<TracesResponse>("/api/operator/traces?limit=6");
+  const traces = useFeed<TracesResponse>("/api/operator/traces?limit=500");
 
-  const totalInFlight = profiles.data
-    ? profiles.data.profiles.reduce((acc, p) => acc + p.in_flight, 0)
-    : null;
+  const rows = traces.data?.traces ?? [];
+  const runCounts = runBucketCounts(rows);
+  const attentionRows = filterRuns(rows, "attention").slice(0, 5);
+  const activeRows = filterRuns(rows, "active").slice(0, 5);
+  const successfulRows = filterRuns(rows, "successful").slice(0, 5);
 
   return (
     <>
       <ViewHead
-        sup="Overview · home"
-        title="Mission control"
-        sub="Harness activity across every client profile."
-        rnum={totalInFlight === null ? "—" : String(totalInFlight)}
-        rlabel="In-flight · now"
+        sup="Operate · command center"
+        title="Command Center"
+        sub="Current work, intervention points, and improvement signals."
+        rnum={traces.status === "loading" && !traces.data ? "—" : String(runCounts.attention)}
+        rlabel="Need attention"
       />
 
       <section class="op-section">
         <SectionHeader
-          label="Client profiles"
+          label="Needs attention"
+          right={<a href={href({ name: "runs" })}>All runs →</a>}
+        />
+        <RunFocusList
+          state={traces.status}
+          rows={attentionRows}
+          empty="No runs need attention."
+        />
+      </section>
+
+      <section class="op-command-grid">
+        <div>
+          <SectionHeader
+            label="Active runs"
+            right={`${runCounts.active} active`}
+          />
+          <RunFocusList
+            state={traces.status}
+            rows={activeRows}
+            empty="No active runs."
+            compact
+          />
+        </div>
+
+        <div>
+          <SectionHeader
+            label="Lessons"
+            right={<a href={href({ name: "learning" })}>Review lessons →</a>}
+          />
+          <LessonsStrip counts={lessons.data?.counts} state={lessons.status} />
+        </div>
+      </section>
+
+      <section class="op-section">
+        <SectionHeader
+          label="Client health"
           right={
             profiles.data
               ? `${profiles.data.profiles.length} total`
@@ -63,18 +96,14 @@ export function HomeView() {
 
       <section class="op-section">
         <SectionHeader
-          label="Lessons"
-          right={<a href={href({ name: "learning" })}>All lessons →</a>}
+          label="Recent successful runs"
+          right={<a href={href({ name: "runs" })}>All runs →</a>}
         />
-        <LessonsStrip counts={lessons.data?.counts} state={lessons.status} />
-      </section>
-
-      <section class="op-section">
-        <SectionHeader
-          label="Recent runs"
-          right={<a href={href({ name: "traces" })}>All traces →</a>}
+        <RunFocusList
+          state={traces.status}
+          rows={successfulRows}
+          empty="No successful runs in this window."
         />
-        <RecentRuns state={traces.status} rows={traces.data?.traces} />
       </section>
     </>
   );
@@ -115,9 +144,9 @@ function ProfileCard({ profile: p }: { profile: ProfileSummary }) {
       </div>
 
       <div class="op-profile-metrics">
-        <ProfileMetric label="FPA" value={p.fpa} />
-        <ProfileMetric label="Escape" value={p.escape} />
-        <ProfileMetric label="Auto" value={p.auto_merge} />
+        <ProfileMetric label="First-pass" value={p.fpa} />
+        <ProfileMetric label="Escapes" value={p.escape} />
+        <ProfileMetric label="Auto-merge" value={p.auto_merge} />
       </div>
 
       <div class="op-profile-footer">
@@ -154,24 +183,29 @@ function ProfileMetric({
   );
 }
 
-function RecentRuns({
+function RunFocusList({
   state,
   rows,
+  empty,
+  compact = false,
 }: {
   state: string;
   rows: readonly TraceSummary[] | undefined;
+  empty: string;
+  compact?: boolean;
 }) {
   if (state === "loading") return <div class="op-loading">Loading runs…</div>;
   if (state === "error") return <div class="op-error">Failed to load runs</div>;
   if (!rows || rows.length === 0) {
-    return <div class="op-empty">No runs in the last window.</div>;
+    return <div class="op-empty">{empty}</div>;
   }
   return (
     <Table<TraceSummary>
       rowKey={(t) => t.id}
-      rows={rows.slice(0, 6)}
-      isLive={(t) => t.status === "in-flight"}
+      rows={rows}
+      isLive={(t) => t.status === "in-flight" || t.status === "queued"}
       onRowClick={(t) => navigate(`/traces/${encodeURIComponent(t.id)}`)}
+      large={!compact}
       columns={[
         {
           key: "id",
@@ -182,10 +216,12 @@ function RecentRuns({
         { key: "title", label: "Title", render: (t) => t.title || "—" },
         {
           key: "status",
-          label: "Status",
-          width: "130px",
+          label: "Outcome",
+          width: "150px",
           render: (t) => (
-            <Pill tone={STATUS_TONE[t.status]}>{t.raw_status}</Pill>
+            <span title={t.raw_status}>
+              <Pill tone={runOutcomeTone(t)}>{runOutcomeLabel(t)}</Pill>
+            </span>
           ),
         },
         {

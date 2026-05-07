@@ -30,8 +30,8 @@ export function AutonomyView({ profile }: Props) {
     return (
       <>
         <ViewHead
-          sup="Ops · autonomy"
-          title="Autonomy report"
+          sup="Improve · client health"
+          title="Client Health"
           sub="No client profiles configured yet."
         />
         <div class="op-empty">
@@ -45,13 +45,13 @@ export function AutonomyView({ profile }: Props) {
   return (
     <>
       <ViewHead
-        sup={`Ops · autonomy${activeProfile ? ` · ${activeProfile}` : ""}`}
+        sup={`Improve · client health${activeProfile ? ` · ${activeProfile}` : ""}`}
         title={
           activeProfile
-            ? `Autonomy report — ${activeProfile}`
-            : "Autonomy report"
+            ? `Client Health — ${activeProfile}`
+            : "Client Health"
         }
-        sub="First-pass accept, escape, catch, and auto-merge over 30 days."
+        sub="Delivery quality and automation over 30 days."
         right={
           profiles.data && (
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>

@@ -7,7 +7,8 @@ describe("parseRoute", () => {
     expect(parseRoute("/operator")).toEqual({ name: "home" });
   });
 
-  it("tickets / traces / learning", () => {
+  it("runs / legacy tickets / legacy traces / learning", () => {
+    expect(parseRoute("/operator/runs")).toEqual({ name: "runs" });
     expect(parseRoute("/operator/tickets")).toEqual({ name: "tickets" });
     expect(parseRoute("/operator/traces")).toEqual({ name: "traces" });
     expect(parseRoute("/operator/learning")).toEqual({ name: "learning" });
@@ -56,6 +57,7 @@ describe("href", () => {
   it("round-trips every route shape", () => {
     const routes = [
       { name: "home" } as const,
+      { name: "runs" } as const,
       { name: "tickets" } as const,
       { name: "traces" } as const,
       { name: "trace-detail", id: "HARN-42" } as const,
@@ -79,8 +81,8 @@ describe("href", () => {
     vi.resetModules();
     document.head.innerHTML = '<meta name="operator-api-key" content="sekret">';
     const freshRouter = await import("../router");
-    expect(freshRouter.href({ name: "traces" })).toBe(
-      "/operator/traces?api_key=sekret",
+    expect(freshRouter.href({ name: "runs" })).toBe(
+      "/operator/runs?api_key=sekret",
     );
     expect(freshRouter.href({ name: "trace-detail", id: "HARN-1" })).toBe(
       "/operator/traces/HARN-1?api_key=sekret",

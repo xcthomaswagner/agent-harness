@@ -13,34 +13,23 @@ import type {
   ActivitySummaryItem,
   ClientReadinessResponse,
   ClientReadinessWarning,
-  TraceStatus,
   TraceSummary,
   TracesResponse,
 } from "../api/types";
 import { href } from "../router";
 import { readableErrorText } from "../api/errors";
-import { traceCountsFromResponse } from "./format";
+import {
+  RUN_BUCKETS,
+  filterRuns,
+  isLiveRun,
+  runBucketCounts,
+  runOutcomeLabel,
+  runOutcomeTone,
+} from "./runModel";
+import type { RunBucket } from "./runModel";
 
-type StatusFilter = TraceStatus | "all";
 type LiveFilter = "all" | "team_lead" | "dev" | "review" | "qa" | "other";
 const PAGE_SIZE = 200;
-
-const FILTERS: readonly { label: string; value: StatusFilter }[] = [
-  { label: "All", value: "all" },
-  { label: "In-flight", value: "in-flight" },
-  { label: "Stuck", value: "stuck" },
-  { label: "Queued", value: "queued" },
-  { label: "Done", value: "done" },
-  { label: "Hidden", value: "hidden" },
-];
-
-const STATUS_TONE: Record<TraceStatus, PillTone> = {
-  "in-flight": "active",
-  stuck: "warn",
-  queued: "cool",
-  done: "ok",
-  hidden: "err",
-};
 
 const LIVE_FILTERS: readonly { label: string; value: LiveFilter }[] = [
   { label: "All", value: "all" },
@@ -51,61 +40,64 @@ const LIVE_FILTERS: readonly { label: string; value: LiveFilter }[] = [
   { label: "Other", value: "other" },
 ];
 
-export function TicketsView() {
-  const [filter, setFilter] = useState<StatusFilter>("in-flight");
+export function RunsView() {
+  const [bucket, setBucket] = useState<RunBucket>("attention");
   const [offset, setOffset] = useState(0);
   const [includeHidden, setIncludeHidden] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
-  const statusQuery = filter === "all" ? "" : `&status=${encodeURIComponent(filter)}`;
   const feed = useFeed<TracesResponse>(
-    `/api/operator/traces?limit=${PAGE_SIZE}&offset=${offset}&include_hidden=${includeHidden ? "true" : "false"}${statusQuery}`,
+    `/api/operator/traces?limit=500&offset=0&include_hidden=${includeHidden ? "true" : "false"}`,
     { clearOnUrlChange: true },
   );
-  const countFeed = useFeed<TracesResponse>(
-    `/api/operator/traces?limit=500&offset=0&include_hidden=${includeHidden ? "true" : "false"}`,
-  );
 
-  const counts = useMemo(() => {
-    const source = countFeed.data ?? (filter === "all" ? feed.data : undefined);
-    return traceCountsFromResponse(source);
-  }, [countFeed.data, feed.data, filter]);
+  const sourceRows = feed.data?.traces ?? [];
+  const counts = useMemo(() => runBucketCounts(sourceRows), [sourceRows]);
+  const filteredRows = useMemo(
+    () => filterRuns(sourceRows, bucket),
+    [sourceRows, bucket],
+  );
+  const pageRows = useMemo(
+    () => filteredRows.slice(offset, offset + PAGE_SIZE),
+    [filteredRows, offset],
+  );
 
   const selectedRow = useMemo(
-    () => feed.data?.traces.find((t) => t.id === selected) ?? null,
-    [feed.data, selected],
+    () => pageRows.find((t) => t.id === selected) ?? null,
+    [pageRows, selected],
   );
 
-  // Auto-select first in-flight row so the rail renders live data on load.
+  // Auto-select the first row in the current operator bucket so the rail
+  // renders immediately instead of looking empty on the common "no active
+  // runs" day.
   // MUST be in an effect, not a render-body setState call (that triggers a
   // Preact "cannot update during render" warning and re-render loop).
   useEffect(() => {
     if (!feed.data) return;
-    if (selected && feed.data.traces.some((t) => t.id === selected)) return;
-    const firstLive = feed.data.traces.find((t) => t.status === "in-flight");
-    const firstRow = firstLive ?? feed.data.traces[0];
+    if (selected && pageRows.some((t) => t.id === selected)) return;
+    const firstRow = pageRows[0];
     if (firstRow) setSelected(firstRow.id);
-  }, [feed.data, selected]);
+  }, [feed.data, pageRows, selected]);
 
   return (
     <>
       <ViewHead
-        sup="Pipeline · tickets"
-        title="Tickets"
-        sub="Live pipeline board. Click a row to see its live log."
-        rnum={String(counts["in-flight"])}
-        rlabel="In-flight"
+        sup="Operate · runs"
+        title="Runs"
+        sub="Operational queue and completed run evidence."
+        rnum={String(counts.attention)}
+        rlabel="Need attention"
       />
 
       <div style={{ display: "flex", gap: "8px", marginBottom: "20px", flexWrap: "wrap" }}>
-        {FILTERS.map((f) => (
+        {RUN_BUCKETS.map((f) => (
           f.value === "hidden" && !includeHidden ? null : (
             <Chip
               key={f.value}
               label={f.label}
               count={counts[f.value]}
-              on={filter === f.value}
+              on={bucket === f.value}
               onClick={() => {
-                setFilter(f.value);
+                setBucket(f.value);
                 setOffset(0);
                 setSelected(null);
               }}
@@ -117,7 +109,7 @@ export function TicketsView() {
           variant={includeHidden ? "danger" : "default"}
           onClick={() => {
             setIncludeHidden((v) => !v);
-            if (filter === "hidden") setFilter("all");
+            if (bucket === "hidden") setBucket("recent");
             setOffset(0);
             setSelected(null);
           }}
@@ -129,7 +121,7 @@ export function TicketsView() {
       <div class="op-tickets-grid" style={{ border: "var(--rule)" }}>
         <div class="op-tickets-list">
           {feed.status === "loading" && !feed.data && (
-            <div class="op-loading">Loading tickets…</div>
+            <div class="op-loading">Loading runs…</div>
           )}
           {feed.status === "error" && (
             <div class="op-error">Failed to load: {feed.error}</div>
@@ -138,8 +130,8 @@ export function TicketsView() {
             <>
               <div class="op-table-tools">
                 <span class="op-muted">
-                  Showing {feed.data.traces.length} of {feed.data.count} · offset{" "}
-                  {feed.data.offset}
+                  Showing {pageRows.length} of {filteredRows.length} · offset{" "}
+                  {offset}
                 </span>
                 <div style={{ display: "flex", gap: "8px" }}>
                   <Button
@@ -154,7 +146,7 @@ export function TicketsView() {
                   </Button>
                   <Button
                     size="sm"
-                    disabled={offset + PAGE_SIZE >= feed.data.count}
+                    disabled={offset + PAGE_SIZE >= filteredRows.length}
                     onClick={() => {
                       setOffset(offset + PAGE_SIZE);
                       setSelected(null);
@@ -166,10 +158,10 @@ export function TicketsView() {
               </div>
               <Table<TraceSummary>
                 rowKey={(t) => t.id}
-                rows={feed.data.traces}
-                isLive={(t) => t.status === "in-flight"}
+                rows={pageRows}
+                isLive={isLiveRun}
                 onRowClick={(t) => setSelected(t.id)}
-                empty={`No ${filter === "all" ? "tickets" : filter + " tickets"} right now.`}
+                empty={`No ${RUN_BUCKETS.find((f) => f.value === bucket)?.label.toLowerCase() ?? "matching"} runs.`}
                 columns={[
                   {
                     key: "id",
@@ -196,10 +188,12 @@ export function TicketsView() {
                   },
                   {
                     key: "status",
-                    label: "Status",
-                    width: "120px",
+                    label: "Outcome",
+                    width: "150px",
                     render: (t) => (
-                      <Pill tone={STATUS_TONE[t.status]}>{t.raw_status}</Pill>
+                      <span title={t.raw_status}>
+                        <Pill tone={runOutcomeTone(t)}>{runOutcomeLabel(t)}</Pill>
+                      </span>
                     ),
                   },
                   {
@@ -215,6 +209,7 @@ export function TicketsView() {
                     label: "Elapsed",
                     width: "80px",
                     numeric: true,
+                    className: "op-col-elapsed",
                     render: (t) => t.elapsed || "—",
                   },
                 ]}
@@ -231,8 +226,11 @@ export function TicketsView() {
   );
 }
 
+export const TicketsView = RunsView;
+
 function TicketRail({ row }: { row: TraceSummary | null }) {
-  const log = useLiveLog(row?.id ?? null);
+  const liveEnabled = isLiveRun(row);
+  const log = useLiveLog(liveEnabled ? (row?.id ?? null) : null);
   const roster = useFeed<AgentRosterResponse>(
     row ? `/api/operator/tickets/${encodeURIComponent(row.id)}/agents` : null,
     { clearOnUrlChange: true },
@@ -291,7 +289,7 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
   }, [row, triggerState]);
 
   if (!row) {
-    return <div class="op-rail-empty">Select a ticket to see its live log</div>;
+    return <div class="op-rail-empty">Select a run to inspect details</div>;
   }
 
   return (
@@ -303,14 +301,16 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
       </div>
 
       <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-        <Pill tone={STATUS_TONE[row.status]}>{row.raw_status}</Pill>
+        <span title={row.raw_status}>
+          <Pill tone={runOutcomeTone(row)}>{runOutcomeLabel(row)}</Pill>
+        </span>
         {row.phase && <Pill tone="cool">phase · {row.phase}</Pill>}
       </div>
 
       <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
         <a href={href({ name: "trace-detail", id: row.id })}>
           <Button size="sm" variant="ghost">
-            Trace →
+            Run detail →
           </Button>
         </a>
         {row.pr_url && (
@@ -366,37 +366,43 @@ function TicketRail({ row }: { row: TraceSummary | null }) {
       )}
 
       <SectionHeader
-        label="Live log"
-        right={<ConnBadge state={log.state} />}
+        label={liveEnabled ? "Live log" : "Archived log"}
+        right={liveEnabled ? <ConnBadge state={log.state} /> : <Pill tone="cool">closed</Pill>}
       />
-      <div class="op-live-filter-row">
-        {LIVE_FILTERS.map((f) => (
-          <Chip
-            key={f.value}
-            label={f.label}
-            on={liveFilter === f.value}
-            onClick={() => setLiveFilter(f.value)}
-          />
-        ))}
-      </div>
-      <div class="op-rail-live-log">
-        {visibleEntries.length === 0 && (
-          <div class="op-rail-log-conn">
-            {log.state === "connecting"
-              ? "Connecting…"
-              : log.state === "connected"
-                ? log.entries.length === 0
-                  ? "Waiting for activity…"
-                  : "No activity for this filter."
-                : log.state === "error"
-                  ? log.error ?? "Disconnected"
-                  : "Idle"}
+      {liveEnabled ? (
+        <>
+          <div class="op-live-filter-row">
+            {LIVE_FILTERS.map((f) => (
+              <Chip
+                key={f.value}
+                label={f.label}
+                on={liveFilter === f.value}
+                onClick={() => setLiveFilter(f.value)}
+              />
+            ))}
           </div>
-        )}
-        {visibleEntries.map((e, i) => (
-          <LogLine key={`${e.event_id ?? e.timestamp}-${i}`} entry={e} />
-        ))}
-      </div>
+          <div class="op-rail-live-log">
+            {visibleEntries.length === 0 && (
+              <div class="op-rail-log-conn">
+                {log.state === "connecting"
+                  ? "Connecting…"
+                  : log.state === "connected"
+                    ? log.entries.length === 0
+                      ? "Waiting for activity…"
+                      : "No activity for this filter."
+                    : log.state === "error"
+                      ? log.error ?? "Disconnected"
+                      : "Idle"}
+              </div>
+            )}
+            {visibleEntries.map((e, i) => (
+              <LogLine key={`${e.event_id ?? e.timestamp}-${i}`} entry={e} />
+            ))}
+          </div>
+        </>
+      ) : (
+        <div class="op-rail-log-conn">Archived run. Live stream closed.</div>
+      )}
     </>
   );
 }
@@ -643,7 +649,7 @@ export function TeamActivity({
     );
   }
   if (!agents || agents.length === 0) {
-    return <div class="op-rail-log-conn">No agents spawned for this ticket.</div>;
+    return <div class="op-rail-log-conn">No agents spawned for this run.</div>;
   }
   return (
     <div class={compact ? "op-team-activity is-compact" : "op-team-activity"}>

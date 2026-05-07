@@ -47,7 +47,7 @@ export function TraceDetailView({ id }: Props) {
   if (feed.status === "loading" && !feed.data) {
     return (
       <>
-        <ViewHead sup={`Traces · ${id}`} title={id} sub="Loading…" />
+        <ViewHead sup={`Runs · ${id}`} title={id} sub="Loading…" />
         <div class="op-loading">Fetching trace…</div>
       </>
     );
@@ -56,7 +56,7 @@ export function TraceDetailView({ id }: Props) {
   if (feed.status === "error" && !feed.data) {
     return (
       <>
-        <ViewHead sup={`Traces · ${id}`} title={id} sub="" />
+        <ViewHead sup={`Runs · ${id}`} title={id} sub="" />
         <div class="op-error">
           Failed to load trace: {feed.error ?? "unknown error"}
         </div>
@@ -71,7 +71,7 @@ export function TraceDetailView({ id }: Props) {
   return (
     <>
       <ViewHead
-        sup={`Traces · ${id}`}
+        sup={`Runs · ${id}`}
         title={t.title || id}
         sub={`Run started ${t.started_at || "—"} · elapsed ${t.elapsed || "—"}`}
         right={

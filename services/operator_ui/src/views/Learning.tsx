@@ -182,9 +182,9 @@ export function LearningView() {
   return (
     <>
       <ViewHead
-        sup="Ops · learning"
+        sup="Improve · learning"
         title="Lessons"
-        sub="Proposed → applied triage queue. States reuse the existing /api/learning transitions."
+        sub="Reusable harness improvements awaiting operator triage."
         rnum={String(awaitingTriage)}
         rlabel="Awaiting triage"
       />

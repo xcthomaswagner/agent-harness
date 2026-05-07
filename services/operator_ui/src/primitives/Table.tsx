@@ -16,6 +16,8 @@ interface TableColumn<Row> {
   numeric?: boolean;
   /** Fixed width in CSS units. Leave unset for flex. */
   width?: string;
+  /** Optional CSS class applied to matching header and cells. */
+  className?: string;
 }
 
 interface TableProps<Row> {
@@ -83,7 +85,7 @@ export function Table<Row>({
             <th
               key={col.key}
               style={col.width ? { width: col.width } : undefined}
-              class={col.numeric ? "is-num" : undefined}
+              class={columnClass(col)}
               aria-sort={
                 sort?.key === col.key
                   ? sort.direction === "asc"
@@ -136,7 +138,7 @@ export function Table<Row>({
               {columns.map((col) => (
                 <td
                   key={col.key}
-                  class={col.numeric ? "is-num" : undefined}
+                  class={columnClass(col)}
                   style={col.width ? { width: col.width } : undefined}
                 >
                   {col.render(row)}
@@ -148,6 +150,12 @@ export function Table<Row>({
       </tbody>
     </table>
   );
+}
+
+function columnClass<Row>(column: TableColumn<Row>): string | undefined {
+  return [column.numeric ? "is-num" : "", column.className ?? ""]
+    .filter(Boolean)
+    .join(" ") || undefined;
 }
 
 function sortValueForRow<Row>(column: TableColumn<Row>, row: Row): SortValue {

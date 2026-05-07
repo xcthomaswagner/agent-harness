@@ -51,7 +51,7 @@ export function PRDetailView({ id }: Props) {
   return (
     <>
       <ViewHead
-        sup={`Traces · ${pr.ticket_id} · PR #${pr.pr_number}`}
+        sup={`Runs · ${pr.ticket_id} · PR #${pr.pr_number}`}
         title={`PR #${pr.pr_number}`}
         sub={`${pr.repo_full_name} · head ${pr.head_sha.slice(0, 8)} · opened ${pr.opened_at.slice(0, 10)}`}
         right={
@@ -61,7 +61,7 @@ export function PRDetailView({ id }: Props) {
                 href={href({ name: "trace-detail", id: pr.ticket_id })}
               >
                 <Button size="sm" variant="ghost">
-                  Trace →
+                  Run detail →
                 </Button>
               </a>
             )}
