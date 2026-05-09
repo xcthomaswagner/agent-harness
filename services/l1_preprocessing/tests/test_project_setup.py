@@ -8,7 +8,12 @@ from pathlib import Path
 import yaml
 
 import project_setup
-from project_setup import inspect_project_path, save_project_setup, setup_options
+from project_setup import (
+    delete_project_setup,
+    inspect_project_path,
+    save_project_setup,
+    setup_options,
+)
 
 
 def _patch_paths(tmp_path: Path, monkeypatch) -> Path:
@@ -123,6 +128,74 @@ def test_save_project_setup_can_create_directory_and_init_git(
     assert result["saved"] is True
     assert repo.is_dir()
     assert (repo / ".git").exists()
+
+
+def test_save_project_setup_defaults_validation_commands_from_package_scripts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    profiles = _patch_paths(tmp_path, monkeypatch)
+    repo = tmp_path / "next-app"
+    _git_repo(repo)
+    (repo / "package.json").write_text(
+        """
+        {
+          "scripts": {
+            "test": "vitest",
+            "lint": "next lint",
+            "build": "next build",
+            "e2e": "playwright test"
+          },
+          "dependencies": {"next": "latest"},
+          "devDependencies": {"vitest": "latest", "@playwright/test": "latest"}
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    save_project_setup(
+        {
+            "profile_id": "next-app",
+            "client_name": "Next App",
+            "project_path": str(repo),
+            "platform_profile": "contentstack",
+            "source_control_type": "github",
+            "github_repo": "acme/next-app",
+            "actions": {},
+        }
+    )
+
+    body = yaml.safe_load((profiles / "next-app.yaml").read_text())
+    assert body["ci_pipeline"] == {
+        "test_command": "npm run test",
+        "lint_command": "npm run lint",
+        "build_command": "npm run build",
+        "e2e_command": "npm run e2e",
+    }
+
+
+def test_delete_project_setup_removes_profile_and_optionally_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    profiles = _patch_paths(tmp_path, monkeypatch)
+    repo = tmp_path / "delete-me"
+    save_project_setup(
+        {
+            "profile_id": "delete-me",
+            "client_name": "Delete Me",
+            "project_path": str(repo),
+            "platform_profile": "generic",
+            "source_control_type": "github",
+            "github_repo": "acme/delete-me",
+            "actions": {"create_directory": True, "init_git": True},
+        }
+    )
+
+    result = delete_project_setup("delete-me", delete_directory=True)
+
+    assert result["deleted"] is True
+    assert result["deleted_directory"] is True
+    assert not (profiles / "delete-me.yaml").exists()
+    assert not repo.exists()
 
 
 def test_setup_options_reports_supported_platforms_and_env_presence(

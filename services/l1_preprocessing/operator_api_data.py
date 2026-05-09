@@ -74,6 +74,7 @@ from live_stream import (
 )
 from project_setup import (
     ProjectSetupError,
+    delete_project_setup,
     inspect_project_path,
     save_project_setup,
     setup_options,
@@ -199,6 +200,11 @@ class ProjectSetupSaveRequest(BaseModel):
     platform_settings: dict[str, str] = Field(default_factory=dict)
     env: dict[str, str] = Field(default_factory=dict)
     actions: dict[str, bool] = Field(default_factory=dict)
+
+
+class ProjectSetupDeleteRequest(BaseModel):
+    profile_id: str = Field(min_length=1, max_length=128)
+    delete_directory: bool = False
 
 
 class DashboardStateUpdate(BaseModel):
@@ -448,6 +454,18 @@ def put_project_setup(request: ProjectSetupSaveRequest) -> dict[str, Any]:
     """Create/update a client profile and local-only project settings."""
     try:
         return save_project_setup(request.model_dump())
+    except ProjectSetupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/project-setup/delete")
+def post_project_setup_delete(request: ProjectSetupDeleteRequest) -> dict[str, Any]:
+    """Delete a client profile and optionally its local project directory."""
+    try:
+        return delete_project_setup(
+            request.profile_id,
+            delete_directory=request.delete_directory,
+        )
     except ProjectSetupError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

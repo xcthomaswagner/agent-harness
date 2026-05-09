@@ -6,6 +6,8 @@ import type {
   ProjectSetupInspectResponse,
   ProjectSetupNote,
   ProjectSetupOptionsResponse,
+  ProjectSetupDeleteResponse,
+  ProjectSetupProfileSummary,
   ProjectSetupSaveResponse,
 } from "../api/types";
 import { ViewHead } from "../chrome";
@@ -132,14 +134,23 @@ export function ProjectSetupView() {
           : current.platform_profile,
       github_repo: current.github_repo || inspect.github_repo,
       default_branch: current.default_branch || inspect.git_branch || "main",
-      test_command:
-        current.test_command || inspect.detected.validation_commands?.[0] || "",
-      build_command:
-        current.build_command ||
-        inspect.detected.validation_commands?.find((cmd) => cmd.includes("build")) ||
-        "",
+      ...validationDefaults(current, inspect),
     }));
   }, [inspect]);
+
+  useEffect(() => {
+    if (selectedEnvSettings.length === 0) return;
+    setPlatformSettings((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const setting of selectedEnvSettings) {
+        if (setting.secret || !setting.default || next[setting.key]) continue;
+        next[setting.key] = setting.default;
+        changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, [selectedEnvSettings]);
 
   const patch = <K extends keyof FormState>(key: K, value: FormState[K]) => {
     setForm((current) => ({ ...current, [key]: value }));
@@ -169,6 +180,35 @@ export function ProjectSetupView() {
       setSaveResult(result);
       setState("ok");
       setMessage(`Saved ${result.profile_id}. The harness will use ${result.project_path}.`);
+    } catch (err) {
+      setState("error");
+      setMessage(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const deleteProfile = async (profile: ProjectSetupProfileSummary) => {
+    const profileLabel = `${profile.id}${profile.client ? ` (${profile.client})` : ""}`;
+    if (!window.confirm(`Delete project profile ${profileLabel}?`)) return;
+    const deleteDirectory =
+      Boolean(profile.repo_path) &&
+      profile.repo_exists &&
+      window.confirm(`Also delete the physical directory?\n\n${profile.repo_path}`);
+    setState("busy");
+    setMessage(`Deleting ${profile.id}...`);
+    try {
+      const result = await postDelete(profile.id, deleteDirectory);
+      setState("ok");
+      setMessage(
+        `Deleted ${result.profile_id}${
+          result.deleted_directory ? " and its local directory" : ""
+        }.`,
+      );
+      if (form.profile_id === profile.id) {
+        setForm(EMPTY_FORM);
+        setInspect(null);
+        setSaveResult(null);
+      }
+      options.refresh();
     } catch (err) {
       setState("error");
       setMessage(err instanceof Error ? err.message : String(err));
@@ -274,10 +314,13 @@ export function ProjectSetupView() {
                 <select
                   value={form.platform_profile}
                   onChange={(event) => {
-                    patch(
-                      "platform_profile",
-                      (event.target as HTMLSelectElement).value,
-                    );
+                    const platform = (event.target as HTMLSelectElement).value;
+                    setForm((current) => ({
+                      ...current,
+                      platform_profile: platform,
+                      ...platformValidationDefaults(platform, current),
+                    }));
+                    setSaveResult(null);
                     setPlatformSettings({});
                     setProfilePlatformSettings({});
                   }}
@@ -467,6 +510,10 @@ export function ProjectSetupView() {
           </SetupPanel>
 
           <SetupPanel title="Validation" right="commands">
+            <p class="op-setup-hint">
+              Defaults are inferred from the repo and project type. Change them only
+              when this project uses nonstandard commands.
+            </p>
             <div class="op-setup-fields">
               <Field label="Test command">
                 <input
@@ -577,7 +624,11 @@ export function ProjectSetupView() {
         <aside class="op-project-rail">
           <SetupFacts inspect={inspect} />
           <NoteList title="Readiness" notes={saveResult?.readiness ?? inspect?.notes ?? []} />
-          <ExistingProfiles options={options.data} />
+          <ExistingProfiles
+            options={options.data}
+            disabled={state === "busy"}
+            onDelete={deleteProfile}
+          />
         </aside>
       </section>
     </>
@@ -672,7 +723,15 @@ function NoteList({ title, notes }: { title: string; notes: ProjectSetupNote[] }
   );
 }
 
-function ExistingProfiles({ options }: { options?: ProjectSetupOptionsResponse }) {
+function ExistingProfiles({
+  options,
+  disabled,
+  onDelete,
+}: {
+  options?: ProjectSetupOptionsResponse;
+  disabled: boolean;
+  onDelete: (profile: ProjectSetupProfileSummary) => void;
+}) {
   const profiles = options?.profiles ?? [];
   return (
     <section class="op-setup-facts">
@@ -683,13 +742,31 @@ function ExistingProfiles({ options }: { options?: ProjectSetupOptionsResponse }
         <div class="op-setup-profile-list">
           {profiles.slice(0, 12).map((profile) => (
             <div class="op-setup-profile" key={profile.id}>
-              <strong>{profile.id}</strong>
+              <div class="op-setup-profile-head">
+                <strong>{profile.id}</strong>
+                <Button
+                  size="sm"
+                  variant="danger"
+                  disabled={disabled}
+                  onClick={() => onDelete(profile)}
+                >
+                  Delete
+                </Button>
+              </div>
               <span>{label(profile.platform_profile || "generic")}</span>
-              <span>{profile.repo_path || "no local path"}</span>
+              <span>
+                {profile.repo_path || "no local path"}
+                {profile.repo_path && !profile.repo_exists ? " · missing" : ""}
+              </span>
             </div>
           ))}
         </div>
       )}
+      <p class="op-setup-hint">
+        Existing runs reconcile to these profiles by profile id, ticket prefix, or
+        repo metadata. Older runs do not need a separate migration unless they
+        cannot be matched to a configured profile.
+      </p>
     </section>
   );
 }
@@ -769,6 +846,79 @@ function credentialEnvFields({
   return fields;
 }
 
+function validationDefaults(
+  current: FormState,
+  inspect: ProjectSetupInspectResponse,
+): Partial<FormState> {
+  const commands = inspect.detected.validation_commands ?? [];
+  const detected = {
+    test_command: firstCommand(commands, "test", ["e2e"]),
+    lint_command: firstCommand(commands, "lint"),
+    build_command: firstCommand(commands, "build"),
+    e2e_command: firstCommand(commands, "e2e"),
+  };
+  const platformDefaults = platformValidationDefaults(
+    inspect.detected_platform || current.platform_profile,
+    current,
+  );
+  return {
+    test_command:
+      current.test_command ||
+      detected.test_command ||
+      platformDefaults.test_command ||
+      "",
+    lint_command:
+      current.lint_command ||
+      detected.lint_command ||
+      platformDefaults.lint_command ||
+      "",
+    build_command:
+      current.build_command ||
+      detected.build_command ||
+      platformDefaults.build_command ||
+      "",
+    e2e_command:
+      current.e2e_command ||
+      detected.e2e_command ||
+      platformDefaults.e2e_command ||
+      "",
+  };
+}
+
+function platformValidationDefaults(
+  platform: string,
+  current: FormState,
+): Partial<FormState> {
+  if (platform === "salesforce") {
+    return {
+      test_command:
+        current.test_command ||
+        "sf apex run test --result-format human --code-coverage",
+      build_command:
+        current.build_command ||
+        "sf project deploy validate --source-dir force-app",
+    };
+  }
+  return {
+    default_branch: current.default_branch || "main",
+    branch_prefix: current.branch_prefix || "ai/",
+  };
+}
+
+function firstCommand(
+  commands: readonly string[],
+  includes: string,
+  excludes: readonly string[] = [],
+): string {
+  const needle = includes.toLowerCase();
+  return (
+    commands.find((command) => {
+      const lower = command.toLowerCase();
+      return lower.includes(needle) && excludes.every((item) => !lower.includes(item));
+    }) ?? ""
+  );
+}
+
 async function postInspect(projectPath: string): Promise<ProjectSetupInspectResponse> {
   const res = await fetch("/api/operator/project-setup/inspect", {
     method: "POST",
@@ -814,4 +964,27 @@ async function putSetup(
     throw new Error(`${res.status}: ${readableErrorText(text)}`);
   }
   return (await res.json()) as ProjectSetupSaveResponse;
+}
+
+async function postDelete(
+  profileId: string,
+  deleteDirectory: boolean,
+): Promise<ProjectSetupDeleteResponse> {
+  const res = await fetch("/api/operator/project-setup/delete", {
+    method: "POST",
+    headers: fetchHeaders({
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    }),
+    credentials: "same-origin",
+    body: JSON.stringify({
+      profile_id: profileId,
+      delete_directory: deleteDirectory,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`${res.status}: ${readableErrorText(text)}`);
+  }
+  return (await res.json()) as ProjectSetupDeleteResponse;
 }

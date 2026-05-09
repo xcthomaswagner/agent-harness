@@ -128,6 +128,7 @@ export interface ProjectSetupProfileSummary {
   client: string;
   platform_profile: string;
   repo_path: string;
+  repo_exists: boolean;
   ticket_source_type: string;
   source_control_type: string;
 }
@@ -191,6 +192,14 @@ export interface ProjectSetupSaveResponse {
   github_repo_created: boolean;
   env_written: string[];
   readiness: ProjectSetupNote[];
+}
+
+export interface ProjectSetupDeleteResponse {
+  deleted: boolean;
+  profile_id: string;
+  profile_path: string;
+  project_path: string;
+  deleted_directory: boolean;
 }
 
 export interface OperatorSystemResponse {

@@ -13,6 +13,7 @@ intended to be versioned and reviewed; tokens and local MCP paths are not.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -142,6 +143,10 @@ def setup_options() -> dict[str, Any]:
                 "client": profile.name,
                 "platform_profile": profile.platform_profile or "generic",
                 "repo_path": profile.client_repo_path,
+                "repo_exists": bool(
+                    profile.client_repo_path
+                    and Path(profile.client_repo_path).expanduser().is_dir()
+                ),
                 "ticket_source_type": profile.ticket_source_type or "jira",
                 "source_control_type": profile.source_control_type or "github",
             }
@@ -311,6 +316,38 @@ def save_project_setup(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def delete_project_setup(profile_id: str, *, delete_directory: bool = False) -> dict[str, Any]:
+    """Delete a configured client profile and optionally its local project directory."""
+
+    clean_id = profile_id.strip()
+    if not _PROFILE_ID_RE.match(clean_id):
+        raise ProjectSetupError("profile_id must use letters, numbers, dash, or underscore")
+
+    profile = load_profile(clean_id)
+    if profile is None:
+        raise ProjectSetupError(f"profile not found: {clean_id}")
+
+    repo_path = str(profile.client_repo_path or "").strip()
+    profile_path = PROFILES_DIR / f"{clean_id}.yaml"
+    if not profile_path.is_file():
+        raise ProjectSetupError(f"profile file not found: {clean_id}")
+
+    deleted_directory = False
+    if delete_directory:
+        if not repo_path:
+            raise ProjectSetupError("profile has no local project directory to delete")
+        deleted_directory = _delete_project_directory(Path(repo_path).expanduser())
+
+    profile_path.unlink()
+    return {
+        "deleted": True,
+        "profile_id": clean_id,
+        "profile_path": str(profile_path),
+        "project_path": repo_path,
+        "deleted_directory": deleted_directory,
+    }
+
+
 def _profile_data(
     payload: dict[str, Any],
     repo: Path,
@@ -323,6 +360,7 @@ def _profile_data(
     platform_settings = payload.get("platform_settings")
     if not isinstance(platform_settings, dict):
         platform_settings = {}
+    validation = _default_ci_commands(payload, repo, platform)
 
     data: dict[str, Any] = {
         "client": str(payload.get("client_name") or payload.get("profile_id") or "").strip(),
@@ -346,10 +384,10 @@ def _profile_data(
         },
         "source_control": source_control,
         "ci_pipeline": {
-            "test_command": str(payload.get("test_command") or "").strip(),
-            "lint_command": str(payload.get("lint_command") or "").strip(),
-            "build_command": str(payload.get("build_command") or "").strip(),
-            "e2e_command": str(payload.get("e2e_command") or "").strip(),
+            "test_command": validation["test_command"],
+            "lint_command": validation["lint_command"],
+            "build_command": validation["build_command"],
+            "e2e_command": validation["e2e_command"],
         },
         "test_framework": {
             "unit": str(payload.get("unit_test_framework") or "").strip(),
@@ -377,6 +415,87 @@ def _profile_data(
     if clean_platform_settings:
         data["platform_settings"] = clean_platform_settings
     return data
+
+
+def _default_ci_commands(
+    payload: dict[str, Any],
+    repo: Path,
+    platform: str,
+) -> dict[str, str]:
+    """Return validation commands, preferring explicit input then repo/tool defaults."""
+
+    commands = {
+        "test_command": str(payload.get("test_command") or "").strip(),
+        "lint_command": str(payload.get("lint_command") or "").strip(),
+        "build_command": str(payload.get("build_command") or "").strip(),
+        "e2e_command": str(payload.get("e2e_command") or "").strip(),
+    }
+    if all(commands.values()):
+        return commands
+
+    detected = _detected_validation_defaults(repo, platform)
+    for key, value in detected.items():
+        if not commands[key]:
+            commands[key] = value
+
+    if platform == "salesforce":
+        commands.setdefault("test_command", "")
+        if not commands["test_command"]:
+            commands["test_command"] = "sf apex run test --result-format human --code-coverage"
+        if not commands["build_command"]:
+            commands["build_command"] = "sf project deploy validate --source-dir force-app"
+    return commands
+
+
+def _detected_validation_defaults(repo: Path, platform: str) -> dict[str, str]:
+    defaults = {
+        "test_command": "",
+        "lint_command": "",
+        "build_command": "",
+        "e2e_command": "",
+    }
+    if not repo.exists() or not repo.is_dir():
+        return defaults
+
+    try:
+        workflow = generate_repo_workflow(repo, platform_profile=platform)
+    except RepoWorkflowError:
+        workflow = {}
+
+    detected = workflow.get("detected") if isinstance(workflow, dict) else {}
+    validation_commands = (
+        detected.get("validation_commands", []) if isinstance(detected, dict) else []
+    )
+    for raw in validation_commands if isinstance(validation_commands, list) else []:
+        command = str(raw).strip()
+        lower = command.lower()
+        if "lint" in lower and not defaults["lint_command"]:
+            defaults["lint_command"] = command
+        elif "build" in lower and not defaults["build_command"]:
+            defaults["build_command"] = command
+        elif "test" in lower and "e2e" not in lower and not defaults["test_command"]:
+            defaults["test_command"] = command
+
+    package_json = _read_json(repo / "package.json")
+    scripts = package_json.get("scripts") if isinstance(package_json.get("scripts"), dict) else {}
+    package_manager = (
+        str(detected.get("package_manager") or "") if isinstance(detected, dict) else ""
+    ) or _detect_package_manager_from_files(repo)
+    if scripts and package_manager:
+        script_map = {
+            "test_command": ("test",),
+            "lint_command": ("lint",),
+            "build_command": ("build",),
+            "e2e_command": ("e2e", "test:e2e"),
+        }
+        for key, names in script_map.items():
+            if defaults[key]:
+                continue
+            for name in names:
+                if name in scripts:
+                    defaults[key] = _script_command(package_manager, name)
+                    break
+    return defaults
 
 
 def _source_control(payload: dict[str, Any], repo: Path, kind: str) -> dict[str, Any]:
@@ -600,6 +719,41 @@ def _run(
     return result
 
 
+def _delete_project_directory(path: Path) -> bool:
+    resolved = path.resolve()
+    home = Path.home().resolve()
+    temp_roots = {
+        Path(tempfile.gettempdir()).resolve(),
+        Path("/tmp").resolve(),
+        Path("/private/tmp").resolve(),
+    }
+    blocked = {
+        Path("/").resolve(),
+        home,
+        REPO_ROOT.resolve(),
+        PROFILES_DIR.resolve(),
+        *temp_roots,
+    }
+    if resolved in blocked:
+        raise ProjectSetupError(f"refusing to delete protected directory: {resolved}")
+    try:
+        resolved.relative_to(home)
+        under_home = True
+    except ValueError:
+        under_home = False
+    under_tmp = any(str(resolved).startswith(str(root) + os.sep) for root in temp_roots)
+    if not under_home and not under_tmp:
+        raise ProjectSetupError(
+            "project directory deletion is limited to the operator home directory or /tmp"
+        )
+    if not resolved.exists():
+        return False
+    if not resolved.is_dir():
+        raise ProjectSetupError("project path is not a directory")
+    shutil.rmtree(resolved)
+    return True
+
+
 def _git_value(path: Path, *args: str) -> str:
     try:
         result = subprocess.run(
@@ -614,6 +768,37 @@ def _git_value(path: Path, *args: str) -> str:
     if result.returncode != 0:
         return ""
     return result.stdout.strip()
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _detect_package_manager_from_files(repo: Path) -> str:
+    checks = (
+        ("pnpm", "pnpm-lock.yaml"),
+        ("yarn", "yarn.lock"),
+        ("npm", "package-lock.json"),
+        ("bun", "bun.lockb"),
+    )
+    for manager, filename in checks:
+        if (repo / filename).is_file():
+            return manager
+    return "npm" if (repo / "package.json").is_file() else ""
+
+
+def _script_command(package_manager: str, script: str) -> str:
+    if package_manager == "pnpm":
+        return f"pnpm {script}"
+    if package_manager == "yarn":
+        return f"yarn {script}"
+    if package_manager == "bun":
+        return f"bun run {script}"
+    return f"npm run {script}"
 
 
 def _github_repo_from_remote(remote: str) -> str:

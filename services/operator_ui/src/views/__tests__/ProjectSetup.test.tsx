@@ -81,9 +81,25 @@ describe("ProjectSetupView", () => {
           ],
         });
       }
+      if (url === "/api/operator/project-setup/delete") {
+        expect(init?.method).toBe("POST");
+        expect(init?.headers).toMatchObject({ "X-API-Key": "sekret" });
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          profile_id: "old-client",
+          delete_directory: true,
+        });
+        return jsonResponse({
+          deleted: true,
+          profile_id: "old-client",
+          profile_path: "/repo/runtime/client-profiles/old-client.yaml",
+          project_path: "/tmp/old-client",
+          deleted_directory: true,
+        });
+      }
       return jsonResponse({}, { status: 404 });
     });
     vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("confirm", vi.fn(() => true));
 
     const { container, findByText } = render(<ProjectSetupView />);
 
@@ -116,13 +132,26 @@ describe("ProjectSetupView", () => {
 
     expect(await findByText(/Saved widgets/)).toBeTruthy();
     expect(await findByText(/Profile is ready/)).toBeTruthy();
+
+    fireEvent.click(await findByText("Delete"));
+    expect(await findByText(/Deleted old-client and its local directory/)).toBeTruthy();
   });
 });
 
 function optionsResponse() {
   return {
     platforms: ["generic", "contentstack", "salesforce", "sitecore"],
-    profiles: [],
+    profiles: [
+      {
+        id: "old-client",
+        client: "Old Client",
+        platform_profile: "generic",
+        repo_path: "/tmp/old-client",
+        repo_exists: true,
+        ticket_source_type: "jira",
+        source_control_type: "github",
+      },
+    ],
     ticket_sources: ["jira", "ado"],
     source_controls: ["github", "azure-repos"],
     platform_settings: {

@@ -1126,6 +1126,13 @@
   padding-top: 18px;
 }
 
+.op-setup-hint {
+  margin: 0 0 12px;
+  color: var(--ink-650);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .op-check {
   display: inline-flex;
   align-items: center;
@@ -1172,6 +1179,13 @@
   font-size: 12px;
   font-weight: 500;
   overflow-wrap: anywhere;
+}
+
+.op-setup-profile-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .op-setup-note {
