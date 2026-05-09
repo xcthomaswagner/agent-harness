@@ -84,6 +84,31 @@ def test_build_clone_url_ado_embeds_pat(monkeypatch: pytest.MonkeyPatch) -> None
     assert "x.visualstudio.com/XC-SF-30in30/_git/XC-SF-30in30" in url
 
 
+def test_build_clone_url_github_combines_org_repo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "FAKE_GH")
+    url = _build_clone_url({
+        "type": "github",
+        "org": "acme",
+        "repo": "widgets",
+    })
+    assert url == "https://x-access-token:FAKE_GH@github.com/acme/widgets.git"
+
+
+def test_build_clone_url_github_prefers_full_repo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "FAKE_GH")
+    url = _build_clone_url({
+        "type": "github",
+        "org": "ignored",
+        "repo": "ignored",
+        "github_repo": "acme/widgets",
+    })
+    assert url == "https://x-access-token:FAKE_GH@github.com/acme/widgets.git"
+
+
 # ---------------- _ensure_client_repo -------------------------------------
 
 

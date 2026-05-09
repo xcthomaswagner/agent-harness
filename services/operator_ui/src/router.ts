@@ -22,6 +22,7 @@ export type Route =
   | { name: "trace-detail"; id: string }
   | { name: "autonomy"; profile?: string }
   | { name: "learning" }
+  | { name: "project-setup" }
   | { name: "repo-workflow" }
   | { name: "pr-detail"; id: string }
   | { name: "not-found" };
@@ -53,6 +54,7 @@ export function parseRoute(path: string): Route {
   if (p === "/tickets") return { name: "tickets" };
   if (p === "/traces") return { name: "traces" };
   if (p === "/learning") return { name: "learning" };
+  if (p === "/project-setup") return { name: "project-setup" };
   if (p === "/repo-workflow") return { name: "repo-workflow" };
 
   const traceMatch = /^\/traces\/([^/]+)$/.exec(p);
@@ -160,6 +162,9 @@ export function href(route: Route): string {
       break;
     case "learning":
       path = joinBase("/learning");
+      break;
+    case "project-setup":
+      path = joinBase("/project-setup");
       break;
     case "repo-workflow":
       path = joinBase("/repo-workflow");

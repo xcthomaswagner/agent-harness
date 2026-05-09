@@ -26,6 +26,7 @@ const __dirname = dirname(__filename);
 // Pull API key from L1's .env so tests exercise the production
 // auth path (header-based) the SPA uses after the shell injection.
 function readApiKey(): string {
+  if (process.env.API_KEY) return process.env.API_KEY;
   const env = readFileSync(
     resolve(__dirname, "../../l1_preprocessing/.env"),
     "utf-8",
@@ -63,10 +64,10 @@ test.describe("Operator dashboard — chrome renders with real CSS", () => {
     // Topbar must exist in the main column.
     await expect(page.locator(".op-topbar")).toBeVisible();
 
-    // View title is the serif "Mission control".
+    // View title renders in the expected header treatment.
     const title = page.locator(".op-view-title");
     await expect(title).toBeVisible();
-    await expect(title).toHaveText(/Mission control/i);
+    await expect(title).toHaveText(/Command Center/i);
 
     // The title must render in the serif font (not the default sans).
     const fontFamily = await title.evaluate(
@@ -123,14 +124,14 @@ test.describe("Operator dashboard — chrome renders with real CSS", () => {
     await page.goto(shellUrl("/"));
     await page.waitForLoadState("networkidle");
 
-    // Click Traces in the sidebar.
+    // Click Runs in the sidebar.
     await page
-      .locator(".op-nav-item", { hasText: /^Traces$/ })
+      .locator(".op-nav-item", { hasText: /^Runs$/ })
       .first()
       .click();
 
-    await expect(page).toHaveURL(/\/operator\/traces/);
-    await expect(page.locator(".op-view-title")).toHaveText(/Traces/i);
+    await expect(page).toHaveURL(/\/operator\/runs/);
+    await expect(page.locator(".op-view-title")).toHaveText(/Runs/i);
   });
 
   test("Traces view renders a populated table", async ({ page }) => {
@@ -205,6 +206,16 @@ test.describe("Operator dashboard — chrome renders with real CSS", () => {
     await expect(page.locator(".op-error")).not.toBeVisible();
   });
 
+  test("Project Setup view exposes directory and project type controls", async ({
+    page,
+  }) => {
+    await page.goto(shellUrl("/project-setup"));
+    await expect(page.locator(".op-view-title")).toHaveText(/Project Setup/i);
+    await expect(page.locator("label", { hasText: "Project directory" })).toBeVisible();
+    await expect(page.locator("label", { hasText: "Project type" })).toBeVisible();
+    await expect(page.locator("button", { hasText: "Inspect directory" })).toBeVisible();
+  });
+
   test("Tickets view renders kanban + rail grid", async ({ page }) => {
     await page.goto(shellUrl("/tickets"));
     await expect(page.locator(".op-view-title")).toBeVisible();
@@ -239,6 +250,7 @@ test.describe("CSS regression check", () => {
       ".op-profiles-grid",
       ".op-lessons-strip",
       ".op-tickets-grid",
+      ".op-project-grid",
     ];
     for (const cls of required) {
       expect(css, `missing ${cls} in served CSS bundle`).toContain(cls);

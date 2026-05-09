@@ -7,11 +7,12 @@ describe("parseRoute", () => {
     expect(parseRoute("/operator")).toEqual({ name: "home" });
   });
 
-  it("runs / legacy tickets / legacy traces / learning", () => {
+  it("runs / legacy tickets / legacy traces / learning / setup", () => {
     expect(parseRoute("/operator/runs")).toEqual({ name: "runs" });
     expect(parseRoute("/operator/tickets")).toEqual({ name: "tickets" });
     expect(parseRoute("/operator/traces")).toEqual({ name: "traces" });
     expect(parseRoute("/operator/learning")).toEqual({ name: "learning" });
+    expect(parseRoute("/operator/project-setup")).toEqual({ name: "project-setup" });
   });
 
   it("trace-detail with url-encoded id", () => {
@@ -64,6 +65,7 @@ describe("href", () => {
       { name: "autonomy" } as const,
       { name: "autonomy", profile: "xcsf30" } as const,
       { name: "learning" } as const,
+      { name: "project-setup" } as const,
       { name: "pr-detail", id: "PR-9" } as const,
     ];
     for (const r of routes) {

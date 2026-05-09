@@ -2,6 +2,7 @@ export { AutonomyView } from "./Autonomy";
 export { HomeView } from "./Home";
 export { LearningView } from "./Learning";
 export { PRDetailView } from "./PRDetail";
+export { ProjectSetupView } from "./ProjectSetup";
 export { RepoWorkflowView } from "./RepoWorkflow";
 export { RunsView, TicketsView } from "./Tickets";
 export { TraceDetailView } from "./TraceDetail";

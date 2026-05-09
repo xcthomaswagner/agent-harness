@@ -123,6 +123,76 @@ export interface RepoWorkflowSaveResponse {
   updated_at: string;
 }
 
+export interface ProjectSetupProfileSummary {
+  id: string;
+  client: string;
+  platform_profile: string;
+  repo_path: string;
+  ticket_source_type: string;
+  source_control_type: string;
+}
+
+export interface ProjectSetupEnvSetting {
+  key: string;
+  label: string;
+  secret: boolean;
+  required: boolean;
+  help: string;
+  default: string;
+  present: boolean;
+}
+
+export interface ProjectSetupPlatformField {
+  key: string;
+  label: string;
+  placeholder: string;
+}
+
+export interface ProjectSetupOptionsResponse {
+  platforms: string[];
+  profiles: ProjectSetupProfileSummary[];
+  ticket_sources: string[];
+  source_controls: string[];
+  platform_settings: Record<string, ProjectSetupEnvSetting[]>;
+  profile_platform_fields: Record<string, ProjectSetupPlatformField[]>;
+}
+
+export interface ProjectSetupNote {
+  severity: "ok" | "info" | "warning" | "error";
+  message: string;
+  recommendation: string;
+}
+
+export interface ProjectSetupInspectResponse {
+  input_path: string;
+  path: string;
+  exists: boolean;
+  is_dir: boolean;
+  git_root: string;
+  is_git_repo: boolean;
+  git_branch: string;
+  git_remote: string;
+  github_repo: string;
+  suggested_profile_id: string;
+  suggested_client_name: string;
+  detected_platform: string;
+  detected: Partial<RepoWorkflowDetected>;
+  matching_profiles: string[];
+  notes: ProjectSetupNote[];
+}
+
+export interface ProjectSetupSaveResponse {
+  saved: boolean;
+  profile_id: string;
+  profile_path: string;
+  project_path: string;
+  platform_profile: string;
+  source_control_type: string;
+  github_repo_created: boolean;
+  env_written: string[];
+  readiness: ProjectSetupNote[];
+}
+
 export interface OperatorSystemResponse {
   service: string;
   version: string;

@@ -72,6 +72,12 @@ from live_stream import (
     summarize_stream_teammates,
     summarize_ticket_activity,
 )
+from project_setup import (
+    ProjectSetupError,
+    inspect_project_path,
+    save_project_setup,
+    setup_options,
+)
 from repo_workflow import (
     RepoWorkflowError,
     generate_repo_workflow,
@@ -150,6 +156,49 @@ class RepoWorkflowSaveRequest(BaseModel):
     client_profile: str = Field(default="", max_length=128)
     repo_path: str = Field(default="", max_length=1024)
     content: str = Field(min_length=1, max_length=200_000)
+
+
+class ProjectSetupInspectRequest(BaseModel):
+    project_path: str = Field(min_length=1, max_length=1024)
+
+
+class ProjectSetupSaveRequest(BaseModel):
+    profile_id: str = Field(min_length=1, max_length=128)
+    client_name: str = Field(min_length=1, max_length=200)
+    project_path: str = Field(min_length=1, max_length=1024)
+    platform_profile: str = Field(default="generic", max_length=64)
+    ticket_source_type: str = Field(default="jira", max_length=32)
+    ticket_instance: str = Field(default="", max_length=500)
+    project_key: str = Field(default="", max_length=64)
+    ado_project_name: str = Field(default="", max_length=200)
+    ai_label: str = Field(default="ai-implement", max_length=100)
+    quick_label: str = Field(default="ai-quick", max_length=100)
+    clarification_status: str = Field(default="Needs Info", max_length=100)
+    in_progress_status: str = Field(default="", max_length=100)
+    done_status: str = Field(default="Done", max_length=100)
+    source_control_type: str = Field(default="github", max_length=32)
+    github_repo: str = Field(default="", max_length=300)
+    repo_url: str = Field(default="", max_length=500)
+    source_org: str = Field(default="", max_length=300)
+    repo_name: str = Field(default="", max_length=200)
+    ado_org: str = Field(default="", max_length=500)
+    ado_project: str = Field(default="", max_length=200)
+    ado_repository_id: str = Field(default="", max_length=200)
+    default_branch: str = Field(default="main", max_length=100)
+    branch_prefix: str = Field(default="ai/", max_length=100)
+    pr_reviewers: str = Field(default="", max_length=500)
+    test_command: str = Field(default="", max_length=500)
+    lint_command: str = Field(default="", max_length=500)
+    build_command: str = Field(default="", max_length=500)
+    e2e_command: str = Field(default="", max_length=500)
+    unit_test_framework: str = Field(default="", max_length=100)
+    integration_test_framework: str = Field(default="", max_length=100)
+    e2e_test_framework: str = Field(default="", max_length=100)
+    auto_merge_enabled: bool = False
+    low_risk_ticket_types: str = Field(default="", max_length=500)
+    platform_settings: dict[str, str] = Field(default_factory=dict)
+    env: dict[str, str] = Field(default_factory=dict)
+    actions: dict[str, bool] = Field(default_factory=dict)
 
 
 class DashboardStateUpdate(BaseModel):
@@ -376,6 +425,30 @@ def put_repo_workflow(request: RepoWorkflowSaveRequest) -> dict[str, Any]:
     try:
         return save_repo_workflow(path, request.content)
     except RepoWorkflowError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/project-setup/options")
+def get_project_setup_options() -> dict[str, Any]:
+    """Return supported project setup choices and local env presence."""
+    return setup_options()
+
+
+@router.post("/project-setup/inspect")
+def post_project_setup_inspect(request: ProjectSetupInspectRequest) -> dict[str, Any]:
+    """Inspect a local directory before saving a harness project profile."""
+    try:
+        return inspect_project_path(request.project_path)
+    except ProjectSetupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/project-setup")
+def put_project_setup(request: ProjectSetupSaveRequest) -> dict[str, Any]:
+    """Create/update a client profile and local-only project settings."""
+    try:
+        return save_project_setup(request.model_dump())
+    except ProjectSetupError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 

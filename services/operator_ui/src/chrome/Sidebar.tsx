@@ -32,6 +32,7 @@ const NAV: readonly NavGroup[] = [
   {
     label: "Setup",
     items: [
+      { label: "Project Setup", target: { name: "project-setup" } },
       { label: "Repo Workflow", target: { name: "repo-workflow" } },
     ],
   },

@@ -126,7 +126,11 @@ def _build_clone_url(source_control: dict[str, Any]) -> str:
         return f"https://any:{pat}@{host}{org_path}/{project}/_git/{repo}"
     if sc_type in ("github", "git"):
         token = os.environ.get("GITHUB_TOKEN", "") or os.environ.get("GH_TOKEN", "")
-        gh_repo = str(source_control.get("repo", ""))
+        gh_repo = str(source_control.get("github_repo", "")).strip()
+        if not gh_repo:
+            repo = str(source_control.get("repo", "")).strip()
+            org = str(source_control.get("org", "")).strip()
+            gh_repo = repo if "/" in repo else f"{org}/{repo}".strip("/")
         if not (token and gh_repo):
             return ""
         return f"https://x-access-token:{token}@github.com/{gh_repo}.git"

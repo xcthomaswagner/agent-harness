@@ -808,6 +808,19 @@ def main() -> None:
             print(
                 f"[spawn] Source control context written ({profile.source_control_type})"
             )
+            profile_context = {
+                "client_profile": profile.name,
+                "client": profile.name,
+                "platform_profile": profile.platform_profile,
+                "ticket_source": profile.ticket_source,
+                "source_control": sc_context,
+                "ci_pipeline": profile.ci_pipeline,
+                "platform_settings": profile.platform_settings,
+            }
+            profile_path = worktree_dir / ".harness" / "client-profile.json"
+            with profile_path.open("w") as f:
+                json.dump(profile_context, f, indent=2)
+            print("[spawn] Client profile context written")
 
             # Rewrite git remote for Azure Repos PAT auth.
             #

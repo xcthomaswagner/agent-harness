@@ -45,6 +45,11 @@ class ClientProfile:
         return val if isinstance(val, dict) else {}
 
     @property
+    def platform_settings(self) -> dict[str, Any]:
+        val = self._data.get("platform_settings", {})
+        return val if isinstance(val, dict) else {}
+
+    @property
     def client_repo_path(self) -> str:
         val = self._data.get("client_repo", {})
         raw = str(val.get("local_path", "")) if isinstance(val, dict) else ""

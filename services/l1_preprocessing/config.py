@@ -122,6 +122,9 @@ class Settings(BaseSettings):
     contentstack_environment: str = ""      # e.g. "development"
     contentstack_branch: str = ""           # e.g. "ai" (Enterprise branching)
     contentstack_mcp_groups: str = ""       # e.g. "cma,cda"
+    # Salesforce platform profile:
+    salesforce_mcp_path: str = ""           # Optional local checkout of salesforce-mcp-server
+    sf_use_generic_unix_keychain: str = ""  # "true" recommended for sf CLI keychain issues
     # ------------------------------------------------------------------------
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
