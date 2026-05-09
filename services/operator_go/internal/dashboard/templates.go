@@ -63,7 +63,7 @@ h1 { margin: 0; font-size: 40px; line-height: 1.05; letter-spacing: -.01em; }
 .grid2 { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(280px, .85fr); gap: 28px; align-items: start; margin-bottom: 40px; }
 .cardGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
 .card { background: rgba(255,255,255,.45); border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 18px; }
-.cardTitle { font: 11px/1.25 var(--mono); letter-spacing: .06em; text-transform: uppercase; margin-bottom: 14px; overflow-wrap: anywhere; }
+.cardTitle { font: 12px var(--mono); letter-spacing: .08em; text-transform: uppercase; margin-bottom: 14px; }
 .kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .kpi small { display: block; color: var(--muted); font: 9px var(--mono); letter-spacing: .12em; text-transform: uppercase; }
 .kpi b { display: block; margin-top: 4px; font-size: 20px; font-weight: 500; }
@@ -122,7 +122,7 @@ const appJS = `
     activeProfile: '',
     lessons: [],
     lessonFilter: 'all',
-    workflow: { options: null, draft: null, draftProfile: '', draftRepoPath: '', profile: '', repoPath: '', editor: '' },
+    workflow: { options: null, draft: null, profile: '', repoPath: '', editor: '' },
     message: ''
   };
 
@@ -179,22 +179,14 @@ const appJS = `
       const option = (state.workflow.options ? state.workflow.options.profiles : []).find(function (p) { return p.client_profile === state.workflow.profile; });
       state.workflow.repoPath = option ? option.repo_path : '';
       state.workflow.draft = null;
-      state.workflow.draftProfile = '';
-      state.workflow.draftRepoPath = '';
       state.workflow.editor = '';
       renderRepoWorkflow();
     }
   }
 
   function onInput(event) {
-    if (event.target.id === 'workflow-repo') {
-      state.workflow.repoPath = event.target.value;
-      updateWorkflowDraftStatus();
-    }
-    if (event.target.id === 'workflow-editor') {
-      state.workflow.editor = event.target.value;
-      updateWorkflowDraftStatus();
-    }
+    if (event.target.id === 'workflow-repo') state.workflow.repoPath = event.target.value;
+    if (event.target.id === 'workflow-editor') state.workflow.editor = event.target.value;
   }
 
   function navigate(path) {
@@ -397,22 +389,18 @@ const appJS = `
 
   function renderRepoWorkflow() {
     const options = state.workflow.options ? state.workflow.options.profiles || [] : [];
-    const canSave = state.workflow.editor && workflowDraftMatches();
     view().innerHTML = head('Setup / repo workflow', 'Repo Workflow', 'Generate and maintain repo-local WORKFLOW.md overlays.', options.length, 'Profiles') +
       '<div class="formGrid"><label>Client profile<select id="workflow-profile">' + options.map(function (p) { return '<option value="' + esc(p.client_profile) + '"' + (p.client_profile === state.workflow.profile ? ' selected' : '') + '>' + esc(p.client_profile) + '</option>'; }).join('') + '</select></label>' +
       '<label>Repository path<input id="workflow-repo" value="' + esc(state.workflow.repoPath || '') + '" placeholder="/path/to/client/repo"></label></div>' +
-      '<div class="chips"><button class="btn dark" data-action="workflow-draft">Generate Draft</button><button id="workflow-save" class="btn" data-action="workflow-save" ' + (!canSave ? 'disabled' : '') + '>Save WORKFLOW.md</button></div>' +
-      '<div id="workflow-summary">' + workflowSummary() + '</div>' +
+      '<div class="chips"><button class="btn dark" data-action="workflow-draft">Generate Draft</button><button class="btn" data-action="workflow-save" ' + (!state.workflow.editor ? 'disabled' : '') + '>Save WORKFLOW.md</button></div>' +
+      workflowSummary() +
       '<textarea id="workflow-editor" spellcheck="false">' + esc(state.workflow.editor || '') + '</textarea>';
   }
 
   async function generateWorkflow() {
     try {
-      syncWorkflowForm();
       const data = await api('/api/operator/repo-workflow/draft', jsonPost({ client_profile: state.workflow.profile, repo_path: state.workflow.repoPath }));
       state.workflow.draft = data;
-      state.workflow.draftProfile = state.workflow.profile;
-      state.workflow.draftRepoPath = state.workflow.repoPath;
       state.workflow.editor = data.existing_text || data.draft_text || '';
       renderRepoWorkflow();
     } catch (error) { showError(error); }
@@ -420,8 +408,6 @@ const appJS = `
 
   async function saveWorkflow() {
     try {
-      syncWorkflowForm();
-      if (!workflowDraftMatches()) throw new Error('Regenerate the draft for the current repository before saving.');
       await api('/api/operator/repo-workflow', jsonPut({ client_profile: state.workflow.profile, repo_path: state.workflow.repoPath, content: state.workflow.editor }));
       state.message = 'WORKFLOW.md saved.';
       await generateWorkflow();
@@ -533,7 +519,6 @@ const appJS = `
   function workflowSummary() {
     const d = state.workflow.draft;
     if (!d) return '<div class="notice">Generate a draft to inspect repo evidence and edit WORKFLOW.md.</div>';
-    if (!workflowDraftMatches()) return '<div class="notice err">Repository or profile changed. Regenerate the draft before saving WORKFLOW.md.</div>';
     return '<div class="cardGrid">' + metricCard('Workflow', d.workflow_exists ? 'exists' : 'missing', d.workflow_path || '') + metricCard('Validation', (d.validation || []).length, '') + metricCard('Warnings', (d.warnings || []).length, '') + metricCard('Frameworks', (d.detected && d.detected.frameworks || []).join(', ') || '-', '') + '</div>';
   }
 
@@ -606,21 +591,7 @@ const appJS = `
 
   function pill(text, tone, title) { return '<span title="' + esc(title || text) + '" class="pill ' + esc(tone || 'cool') + '">' + esc(text) + '</span>'; }
   function pct(v) { return v === null || v === undefined || v === '' ? '-' : Math.round(Number(v) * 100) + '%'; }
-  function workflowDraftMatches() { return state.workflow.draft && state.workflow.draftProfile === state.workflow.profile && state.workflow.draftRepoPath === state.workflow.repoPath; }
-  function updateWorkflowDraftStatus() {
-    const save = document.getElementById('workflow-save');
-    const summary = document.getElementById('workflow-summary');
-    const canSave = state.workflow.editor && workflowDraftMatches();
-    if (save) save.disabled = !canSave;
-    if (summary && state.workflow.draft) summary.innerHTML = workflowSummary();
-  }
-  function syncWorkflowForm() {
-    const repo = document.getElementById('workflow-repo');
-    const editor = document.getElementById('workflow-editor');
-    if (repo) state.workflow.repoPath = repo.value;
-    if (editor) state.workflow.editor = editor.value;
-  }
-  function emptyDash(v) { return v ? String(v) : '-'; }
+  function emptyDash(v) { return v ? esc(v) : '-'; }
   function labelFor(k) { return ({ draft_ready: 'Draft' }[k] || titleCase(k)); }
   function titleCase(v) { return String(v).split(/[\\s_-]+/).filter(Boolean).map(function (p) { return p.charAt(0).toUpperCase() + p.slice(1).toLowerCase(); }).join(' '); }
   function enc(v) { return encodeURIComponent(v || ''); }
