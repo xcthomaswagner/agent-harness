@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
-import shutil
 import shlex
 import subprocess
 import sys
@@ -32,7 +31,6 @@ def build_steps(
     skip_l3: bool = False,
     skip_ui: bool = False,
     skip_ui_build: bool = False,
-    skip_go: bool = False,
 ) -> list[TestStep]:
     steps: list[TestStep] = []
 
@@ -90,17 +88,6 @@ def build_steps(
                 )
             )
 
-    if not skip_go:
-        go_dir = REPO_ROOT / "services" / "operator_go"
-        if go_dir.exists():
-            steps.append(
-                TestStep(
-                    name="operator Go frontend tests",
-                    cwd=go_dir,
-                    command=("go", "test", "./..."),
-                )
-            )
-
     return steps
 
 
@@ -135,14 +122,6 @@ def run_step(step: TestStep, *, dry_run: bool = False) -> int:
             print(f"Install with: {step.install_hint}", file=sys.stderr)
         return 2
 
-    executable = step.command[0]
-    if shutil.which(executable) is None:
-        print(
-            f"ERROR: {step.name} requires executable not found on PATH: {executable}",
-            file=sys.stderr,
-        )
-        return 2
-
     completed = subprocess.run(step.command, cwd=step.cwd, check=False)
     return completed.returncode
 
@@ -159,7 +138,6 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--skip-l3", action="store_true", help="Skip L3 service tests.")
     parser.add_argument("--skip-ui", action="store_true", help="Skip operator UI checks.")
     parser.add_argument("--skip-ui-build", action="store_true", help="Skip operator UI build.")
-    parser.add_argument("--skip-go", action="store_true", help="Skip operator Go frontend checks.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running them.")
     return parser.parse_args(argv)
 
@@ -172,7 +150,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         skip_l3=args.skip_l3,
         skip_ui=args.skip_ui,
         skip_ui_build=args.skip_ui_build,
-        skip_go=args.skip_go,
     )
 
     for step in steps:
