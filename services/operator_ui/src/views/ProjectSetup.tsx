@@ -180,6 +180,7 @@ export function ProjectSetupView() {
       setSaveResult(result);
       setState("ok");
       setMessage(`Saved ${result.profile_id}. The harness will use ${result.project_path}.`);
+      options.refresh();
     } catch (err) {
       setState("error");
       setMessage(err instanceof Error ? err.message : String(err));
@@ -740,7 +741,7 @@ function ExistingProfiles({
         <div class="op-rail-log-conn">No client profiles configured.</div>
       ) : (
         <div class="op-setup-profile-list">
-          {profiles.slice(0, 12).map((profile) => (
+          {profiles.map((profile) => (
             <div class="op-setup-profile" key={profile.id}>
               <div class="op-setup-profile-head">
                 <strong>{profile.id}</strong>

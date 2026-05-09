@@ -18,6 +18,8 @@ export interface ProfileSummary {
   catch: number | null;
   /** Proportion 0..1. Zero when no decisions in the window. */
   auto_merge: number;
+  /** Synthetic card for active runs that cannot be reconciled to a profile. */
+  setup_required?: boolean;
 }
 
 export interface ProfilesResponse {

@@ -663,12 +663,20 @@ def _profile_from_trace(
 def _active_trace_counts_by_profile(
     conn: Any,
     profiles_by_name: dict[str, Any],
-) -> dict[str, int]:
-    """Count active pre-PR traces for Home profile cards."""
+) -> tuple[dict[str, int], int]:
+    """Count active pre-PR traces for Home profile cards.
+
+    Returns ``(matched_counts, unmatched_count)`` so legacy or misconfigured
+    runs remain visible instead of disappearing from Client Health.
+    """
     suppressions = list_active_suppressions(conn, target_type="trace")
     pr_states = _latest_pr_state_by_ticket(conn)
     active_pr_tickets = _active_pr_ticket_ids_by_profile(conn)
+    active_pr_ticket_ids = {
+        ticket_id for ticket_ids in active_pr_tickets.values() for ticket_id in ticket_ids
+    }
     counts: dict[str, int] = {name: 0 for name in profiles_by_name}
+    unmatched = 0
     for trace in _list_traces(offset=0, limit=0):
         ticket_id = str(trace.get("ticket_id") or "")
         shaped = _shape_trace_row(
@@ -680,11 +688,13 @@ def _active_trace_counts_by_profile(
             continue
         profile = _profile_from_trace(trace, profiles_by_name)
         if not profile:
+            if ticket_id not in active_pr_ticket_ids:
+                unmatched += 1
             continue
         if ticket_id in active_pr_tickets.get(profile, set()):
             continue
         counts[profile] = counts.get(profile, 0) + 1
-    return counts
+    return counts, unmatched
 
 
 @router.get("/profiles")
@@ -723,7 +733,10 @@ def get_profiles() -> dict[str, Any]:
                 continue
             profiles_by_name[name] = profile
 
-        active_trace_counts = _active_trace_counts_by_profile(conn, profiles_by_name)
+        active_trace_counts, unmatched_trace_count = _active_trace_counts_by_profile(
+            conn,
+            profiles_by_name,
+        )
         out: list[dict[str, Any]] = []
         for name, profile in profiles_by_name.items():
             # ClientProfile exposes ``name`` and ``platform_profile`` —
@@ -746,6 +759,21 @@ def get_profiles() -> dict[str, Any]:
                     "escape": metrics.get("defect_escape_rate"),
                     "catch": metrics.get("self_review_catch_rate"),
                     "auto_merge": auto_merge,
+                }
+            )
+        if unmatched_trace_count > 0:
+            out.append(
+                {
+                    "id": "__unmatched__",
+                    "name": "Unmatched runs",
+                    "sample": "Needs setup",
+                    "in_flight": unmatched_trace_count,
+                    "completed_24h": 0,
+                    "fpa": None,
+                    "escape": None,
+                    "catch": None,
+                    "auto_merge": 0.0,
+                    "setup_required": True,
                 }
             )
         # Sort by in-flight DESC, then name ASC — busiest profiles first.

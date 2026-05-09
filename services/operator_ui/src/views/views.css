@@ -50,6 +50,10 @@
   text-decoration: none;
 }
 
+.op-profile-card.is-setup-required {
+  background: color-mix(in srgb, var(--signal-warn) 10%, var(--ink-050));
+}
+
 .op-profile-card-head {
   display: flex;
   align-items: baseline;
@@ -75,6 +79,15 @@
   grid-template-columns: repeat(3, 1fr);
   border: var(--rule);
   background: var(--ink-000);
+}
+
+.op-profile-reconcile {
+  border: var(--rule);
+  background: var(--ink-000);
+  padding: 12px;
+  color: var(--ink-700);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .op-profile-metric {

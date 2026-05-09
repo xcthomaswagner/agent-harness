@@ -133,21 +133,30 @@ function ProfilesGrid({
 }
 
 function ProfileCard({ profile: p }: { profile: ProfileSummary }) {
+  const target = p.setup_required
+    ? href({ name: "project-setup" })
+    : href({ name: "autonomy", profile: p.id });
   return (
     <a
-      class="op-profile-card"
-      href={href({ name: "autonomy", profile: p.id })}
+      class={`op-profile-card${p.setup_required ? " is-setup-required" : ""}`}
+      href={target}
     >
       <div class="op-profile-card-head">
         <span class="op-profile-name">{p.name}</span>
         <span class="op-profile-sample">{p.sample || "—"}</span>
       </div>
 
-      <div class="op-profile-metrics">
-        <ProfileMetric label="First-pass" value={p.fpa} />
-        <ProfileMetric label="Escapes" value={p.escape} />
-        <ProfileMetric label="Auto-merge" value={p.auto_merge} />
-      </div>
+      {p.setup_required ? (
+        <div class="op-profile-reconcile">
+          Create or update a project profile so these runs map to a client.
+        </div>
+      ) : (
+        <div class="op-profile-metrics">
+          <ProfileMetric label="First-pass" value={p.fpa} />
+          <ProfileMetric label="Escapes" value={p.escape} />
+          <ProfileMetric label="Auto-merge" value={p.auto_merge} />
+        </div>
+      )}
 
       <div class="op-profile-footer">
         {p.in_flight > 0 ? (

@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 import project_setup
@@ -196,6 +197,34 @@ def test_delete_project_setup_removes_profile_and_optionally_directory(
     assert result["deleted_directory"] is True
     assert not (profiles / "delete-me.yaml").exists()
     assert not repo.exists()
+
+
+def test_delete_project_setup_blocks_shared_directory_delete(
+    tmp_path: Path, monkeypatch
+) -> None:
+    profiles = _patch_paths(tmp_path, monkeypatch)
+    repo = tmp_path / "shared-client"
+    _git_repo(repo)
+
+    for profile_id in ("alpha", "bravo"):
+        save_project_setup(
+            {
+                "profile_id": profile_id,
+                "client_name": profile_id.title(),
+                "project_path": str(repo),
+                "platform_profile": "generic",
+                "source_control_type": "github",
+                "github_repo": f"acme/{profile_id}",
+                "actions": {},
+            }
+        )
+
+    with pytest.raises(project_setup.ProjectSetupError, match="still used"):
+        delete_project_setup("alpha", delete_directory=True)
+
+    assert repo.exists()
+    assert (profiles / "alpha.yaml").exists()
+    assert (profiles / "bravo.yaml").exists()
 
 
 def test_setup_options_reports_supported_platforms_and_env_presence(

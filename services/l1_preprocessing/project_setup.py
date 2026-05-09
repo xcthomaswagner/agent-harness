@@ -336,6 +336,13 @@ def delete_project_setup(profile_id: str, *, delete_directory: bool = False) -> 
     if delete_directory:
         if not repo_path:
             raise ProjectSetupError("profile has no local project directory to delete")
+        shared = _profiles_sharing_repo_path(clean_id, repo_path)
+        if shared:
+            names = ", ".join(shared)
+            raise ProjectSetupError(
+                "project directory is still used by other profile(s): "
+                f"{names}. Delete those profiles first or leave the directory in place."
+            )
         deleted_directory = _delete_project_directory(Path(repo_path).expanduser())
 
     profile_path.unlink()
@@ -346,6 +353,21 @@ def delete_project_setup(profile_id: str, *, delete_directory: bool = False) -> 
         "project_path": repo_path,
         "deleted_directory": deleted_directory,
     }
+
+
+def _profiles_sharing_repo_path(profile_id: str, repo_path: str) -> list[str]:
+    target = Path(repo_path).expanduser().resolve()
+    shared: list[str] = []
+    for name in list_profiles():
+        if name == profile_id:
+            continue
+        profile = load_profile(name)
+        if profile is None or not profile.client_repo_path:
+            continue
+        candidate = Path(profile.client_repo_path).expanduser().resolve()
+        if candidate == target:
+            shared.append(name)
+    return shared
 
 
 def _profile_data(

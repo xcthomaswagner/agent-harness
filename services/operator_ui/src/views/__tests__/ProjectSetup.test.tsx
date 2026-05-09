@@ -132,9 +132,40 @@ describe("ProjectSetupView", () => {
 
     expect(await findByText(/Saved widgets/)).toBeTruthy();
     expect(await findByText(/Profile is ready/)).toBeTruthy();
+    await waitFor(() => {
+      const optionLoads = fetchMock.mock.calls.filter(
+        ([url]) => String(url) === "/api/operator/project-setup/options",
+      );
+      expect(optionLoads.length).toBeGreaterThanOrEqual(2);
+    });
 
     fireEvent.click(await findByText("Delete"));
     expect(await findByText(/Deleted old-client and its local directory/)).toBeTruthy();
+  });
+
+  it("shows all configured profiles instead of truncating the inventory", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/operator/project-setup/options") {
+        return jsonResponse({
+          ...optionsResponse(),
+          profiles: Array.from({ length: 13 }, (_, index) => ({
+            id: `profile-${index + 1}`,
+            client: `Profile ${index + 1}`,
+            platform_profile: "generic",
+            repo_path: `/tmp/profile-${index + 1}`,
+            repo_exists: true,
+            ticket_source_type: "jira",
+            source_control_type: "github",
+          })),
+        });
+      }
+      return jsonResponse({}, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { findByText } = render(<ProjectSetupView />);
+
+    expect(await findByText("profile-13")).toBeTruthy();
   });
 });
 

@@ -262,6 +262,48 @@ def test_profiles_count_active_pre_pr_traces(
     assert profile["in_flight"] == 1
 
 
+def test_profiles_surface_unmatched_active_traces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Legacy active traces that cannot map to a profile stay visible."""
+    db_path = tmp_path / "autonomy.db"
+    monkeypatch.setattr(settings, "autonomy_db_path", str(db_path))
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "dashboard_allow_anonymous", True)
+
+    profiles_dir = tmp_path / "client-profiles"
+    _write_profile(profiles_dir, "alpha", platform="contentstack", project_key="ALPHA")
+    import client_profile as cp_module
+    import tracer as tracer_module
+
+    monkeypatch.setattr(cp_module, "PROFILES_DIR", profiles_dir)
+    logs_dir = tmp_path / "logs"
+    monkeypatch.setattr(tracer_module, "LOGS_DIR", logs_dir)
+
+    conn = open_connection(db_path)
+    try:
+        ensure_schema(conn)
+    finally:
+        conn.close()
+
+    _write_trace(
+        logs_dir,
+        "LEGACY-1",
+        events=[
+            ("webhook", "webhook_received"),
+            ("pipeline", "processing_started"),
+            ("pipeline", "l2_dispatched"),
+        ],
+    )
+
+    c = TestClient(_mk_app())
+    profiles = c.get("/api/operator/profiles").json()["profiles"]
+    [unmatched] = [profile for profile in profiles if profile["id"] == "__unmatched__"]
+    assert unmatched["name"] == "Unmatched runs"
+    assert unmatched["in_flight"] == 1
+    assert unmatched["setup_required"] is True
+
+
 def test_profiles_do_not_double_count_trace_with_active_pr_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
