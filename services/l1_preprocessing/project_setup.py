@@ -21,7 +21,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -276,7 +276,10 @@ def save_project_setup(payload: dict[str, Any]) -> dict[str, Any]:
         raise ProjectSetupError("project_path is required")
     repo = Path(project_path).expanduser()
 
-    actions = payload.get("actions") if isinstance(payload.get("actions"), dict) else {}
+    raw_actions = payload.get("actions")
+    actions: dict[str, Any] = (
+        cast(dict[str, Any], raw_actions) if isinstance(raw_actions, dict) else {}
+    )
     if actions.get("create_directory"):
         repo.mkdir(parents=True, exist_ok=True)
     if not repo.exists() or not repo.is_dir():
@@ -300,7 +303,10 @@ def save_project_setup(payload: dict[str, Any]) -> dict[str, Any]:
     profile_data = _profile_data(payload, repo, source_control)
     profile_path = _write_profile(profile_id, profile_data)
 
-    env_updates = payload.get("env") if isinstance(payload.get("env"), dict) else {}
+    raw_env = payload.get("env")
+    env_updates: dict[str, Any] = (
+        cast(dict[str, Any], raw_env) if isinstance(raw_env, dict) else {}
+    )
     env_written = _write_env_updates(env_updates)
 
     return {

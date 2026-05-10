@@ -376,7 +376,12 @@ def list_runs(
         params.append(job_key)
     sql += " ORDER BY started_at DESC, id DESC LIMIT ?"
     params.append(max(1, min(limit, 100)))
-    return [_shape_run(row) for row in conn.execute(sql, params).fetchall()]
+    runs: list[dict[str, Any]] = []
+    for row in conn.execute(sql, params).fetchall():
+        run = _shape_run(row)
+        if run is not None:
+            runs.append(run)
+    return runs
 
 
 def record_event(
