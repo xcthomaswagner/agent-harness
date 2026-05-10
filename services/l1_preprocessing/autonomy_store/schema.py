@@ -159,6 +159,15 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
             )
         version = 8
         logger.info("autonomy_schema_migrated", version=version)
+    if version < 9:
+        with conn:
+            _migrate_to_v9(conn)
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (9, _now_iso()),
+            )
+        version = 9
+        logger.info("autonomy_schema_migrated", version=version)
     return version
 
 
@@ -645,6 +654,73 @@ def _migrate_to_v8(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_dashboard_suppressions_target "
         "ON dashboard_suppressions (target_type, target_id, active)"
+    )
+
+
+def _migrate_to_v9(conn: sqlite3.Connection) -> None:
+    """v9: operator automations config, history, and event stream."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS automation_jobs (
+            job_key TEXT PRIMARY KEY,
+            label TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 0,
+            interval_seconds INTEGER NOT NULL,
+            scope TEXT NOT NULL DEFAULT 'all',
+            config_json TEXT NOT NULL DEFAULT '{}',
+            next_run_at TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS automation_runs (
+            id INTEGER PRIMARY KEY,
+            job_key TEXT NOT NULL,
+            status TEXT NOT NULL,
+            triggered_by TEXT NOT NULL DEFAULT 'scheduler',
+            started_at TEXT NOT NULL,
+            finished_at TEXT NOT NULL DEFAULT '',
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            summary TEXT NOT NULL DEFAULT '',
+            details_json TEXT NOT NULL DEFAULT '{}',
+            error TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_automation_runs_job_started "
+        "ON automation_runs (job_key, started_at DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_automation_runs_status_started "
+        "ON automation_runs (status, started_at DESC)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS automation_events (
+            id INTEGER PRIMARY KEY,
+            job_key TEXT NOT NULL,
+            run_id INTEGER REFERENCES automation_runs(id),
+            severity TEXT NOT NULL DEFAULT 'info',
+            target_type TEXT NOT NULL DEFAULT '',
+            target_id TEXT NOT NULL DEFAULT '',
+            message TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_automation_events_created "
+        "ON automation_events (created_at DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_automation_events_target "
+        "ON automation_events (target_type, target_id, created_at DESC)"
     )
 
 

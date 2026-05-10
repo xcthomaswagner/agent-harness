@@ -1,4 +1,5 @@
 export { AutonomyView } from "./Autonomy";
+export { AutomationsView } from "./Automations";
 export { HomeView } from "./Home";
 export { LearningView } from "./Learning";
 export { PRDetailView } from "./PRDetail";

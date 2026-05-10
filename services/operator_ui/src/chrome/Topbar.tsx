@@ -121,6 +121,8 @@ function crumbFor(route: Route): Crumb[] {
         { label: "Runs" },
         { label: route.id, strong: true },
       ];
+    case "automations":
+      return [{ label: "Operate" }, { label: "Automations", strong: true }];
     case "autonomy":
       return [
         { label: "Improve" },
@@ -131,6 +133,8 @@ function crumbFor(route: Route): Crumb[] {
       ];
     case "learning":
       return [{ label: "Improve" }, { label: "Learning", strong: true }];
+    case "project-setup":
+      return [{ label: "Setup" }, { label: "Project Setup", strong: true }];
     case "repo-workflow":
       return [{ label: "Setup" }, { label: "Repo Workflow", strong: true }];
     case "pr-detail":

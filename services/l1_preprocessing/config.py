@@ -103,6 +103,10 @@ class Settings(BaseSettings):
     learning_outcomes_interval_hours: int = 24
     learning_outcomes_window_days: int = 14
 
+    # Operator automations. Jobs are configured in autonomy.db and surfaced
+    # in the dashboard; this flag is the coarse service-level kill switch.
+    automation_scheduler_enabled: bool = True
+
     # Service
     log_level: str = "INFO"
 

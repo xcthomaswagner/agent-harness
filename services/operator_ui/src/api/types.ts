@@ -58,6 +58,67 @@ export interface ModelPolicyResponse {
   roles: ModelPolicyRole[];
 }
 
+export type AutomationRunStatus = "running" | "succeeded" | "failed" | "skipped";
+
+export interface AutomationRunSummary {
+  id: number;
+  job_key: string;
+  status: AutomationRunStatus;
+  triggered_by: string;
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+  summary: string;
+  details: Record<string, unknown>;
+  error: string;
+}
+
+export interface AutomationJobSummary {
+  job_key: string;
+  label: string;
+  description: string;
+  enabled: boolean;
+  interval_seconds: number;
+  scope: string;
+  config: Record<string, unknown>;
+  next_run_at: string;
+  created_at: string;
+  updated_at: string;
+  last_run: AutomationRunSummary | null;
+}
+
+export interface AutomationEventSummary {
+  id: number;
+  job_key: string;
+  run_id: number | null;
+  severity: "info" | "warning" | "error";
+  target_type: string;
+  target_id: string;
+  message: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface AutomationProfileOption {
+  id: string;
+  name: string;
+}
+
+export interface AutomationsResponse {
+  jobs: AutomationJobSummary[];
+  recent_events: AutomationEventSummary[];
+  interval_options: number[];
+  profiles: AutomationProfileOption[];
+}
+
+export interface AutomationUpdateResponse {
+  job: AutomationJobSummary;
+}
+
+export interface AutomationRunResponse {
+  run: AutomationRunSummary;
+}
+
 export interface RepoWorkflowProfileOption {
   client_profile: string;
   platform_profile: string;

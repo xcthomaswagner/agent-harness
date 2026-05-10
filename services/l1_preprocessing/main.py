@@ -40,6 +40,10 @@ from adapters.ado_adapter import AdoAdapter
 from adapters.jira_adapter import JiraAdapter
 from auth import _require_api_key as _require_api_key
 from auth import _require_dashboard_auth as _require_dashboard_auth
+from automation_scheduler import (
+    start_automation_scheduler,
+    stop_automation_scheduler,
+)
 from autonomy_dashboard import router as autonomy_dashboard_router
 from autonomy_ingest import router as autonomy_router
 
@@ -118,7 +122,10 @@ logger = structlog.get_logger()
 @asynccontextmanager
 async def _app_lifespan(_: FastAPI) -> AsyncIterator[None]:
     await _validate_config()
-    yield
+    try:
+        yield
+    finally:
+        await stop_automation_scheduler()
 
 
 app = FastAPI(
@@ -278,6 +285,8 @@ async def _validate_config() -> None:
     # Start the self-learning outcomes scheduler when enabled.
     if settings.learning_outcomes_enabled:
         _spawn_background_task(_learning_outcomes_loop())
+    if settings.automation_scheduler_enabled:
+        start_automation_scheduler()
 
 # Hold references to background tasks so they aren't garbage-collected.
 # Tasks are removed from the set via ``_spawn_background_task`` below —

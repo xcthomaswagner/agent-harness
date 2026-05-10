@@ -3,6 +3,7 @@ import { useRoute } from "./router";
 import type { Route } from "./router";
 import {
   AutonomyView,
+  AutomationsView,
   HomeView,
   LearningView,
   PRDetailView,
@@ -37,6 +38,8 @@ function ViewFor({ route }: { route: Route }) {
       return <RunsView />;
     case "trace-detail":
       return <TraceDetailView id={route.id} />;
+    case "automations":
+      return <AutomationsView />;
     case "autonomy":
       return <AutonomyView profile={route.profile} />;
     case "learning":

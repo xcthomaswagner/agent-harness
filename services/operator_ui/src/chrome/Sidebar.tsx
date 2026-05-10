@@ -20,6 +20,7 @@ const NAV: readonly NavGroup[] = [
     items: [
       { label: "Command Center", target: { name: "home" } },
       { label: "Runs", target: { name: "runs" } },
+      { label: "Automations", target: { name: "automations" } },
     ],
   },
   {

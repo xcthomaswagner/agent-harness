@@ -1232,3 +1232,198 @@
     grid-template-columns: 1fr;
   }
 }
+
+.op-automation-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  border-top: var(--rule);
+  border-left: var(--rule);
+  margin-bottom: 28px;
+}
+
+.op-automation-summary-cell {
+  border-right: var(--rule);
+  border-bottom: var(--rule);
+  background: var(--ink-050);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.op-automation-summary-cell span,
+.op-automation-meta-cell span,
+.op-automation-field span {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-500);
+}
+
+.op-automation-summary-cell strong {
+  font-family: var(--font-serif);
+  font-size: 32px;
+  line-height: 1;
+  color: var(--ink-950);
+}
+
+.op-automation-summary-cell strong.is-ok {
+  color: var(--signal-ok);
+}
+
+.op-automation-summary-cell strong.is-err {
+  color: var(--signal-err);
+}
+
+.op-automation-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 18px;
+}
+
+.op-automation-card {
+  border: var(--rule);
+  background: var(--ink-050);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.op-automation-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.op-automation-card h2 {
+  margin: 0 0 6px;
+  color: var(--ink-950);
+  font-family: var(--font-serif);
+  font-size: 22px;
+  line-height: 1.1;
+}
+
+.op-automation-card p {
+  margin: 0;
+  color: var(--ink-650);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.op-automation-meta {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border-top: var(--rule-dim);
+  border-left: var(--rule-dim);
+}
+
+.op-automation-meta-cell {
+  border-right: var(--rule-dim);
+  border-bottom: var(--rule-dim);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.op-automation-meta-cell strong {
+  color: var(--ink-850);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.op-automation-meta-cell strong.is-err {
+  color: var(--signal-err);
+}
+
+.op-automation-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(170px, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.op-automation-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.op-automation-field input,
+.op-automation-field select {
+  width: 100%;
+  min-height: 36px;
+  border: var(--rule);
+  background: var(--surface);
+  color: var(--ink-900);
+  padding: 7px 9px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+}
+
+.op-automation-events {
+  border: var(--rule);
+  background: var(--ink-050);
+}
+
+.op-automation-event {
+  display: grid;
+  grid-template-columns: 130px 84px 180px 150px 1fr;
+  gap: 12px;
+  align-items: baseline;
+  padding: 10px 12px;
+  border-bottom: var(--rule-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.op-automation-event:last-child {
+  border-bottom: 0;
+}
+
+.op-automation-event span {
+  color: var(--ink-600);
+  overflow-wrap: anywhere;
+}
+
+.op-automation-event span.is-warning {
+  color: var(--signal-warn);
+}
+
+.op-automation-event span.is-error {
+  color: var(--signal-err);
+}
+
+.op-automation-event strong {
+  color: var(--ink-850);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.op-automation-event p {
+  margin: 0;
+  color: var(--ink-900);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  .op-automation-summary,
+  .op-automation-grid,
+  .op-automation-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .op-automation-event {
+    grid-template-columns: 1fr;
+  }
+}

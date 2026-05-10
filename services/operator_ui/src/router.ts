@@ -20,6 +20,7 @@ export type Route =
   | { name: "tickets" }
   | { name: "traces" }
   | { name: "trace-detail"; id: string }
+  | { name: "automations" }
   | { name: "autonomy"; profile?: string }
   | { name: "learning" }
   | { name: "project-setup" }
@@ -53,6 +54,7 @@ export function parseRoute(path: string): Route {
   if (p === "/runs") return { name: "runs" };
   if (p === "/tickets") return { name: "tickets" };
   if (p === "/traces") return { name: "traces" };
+  if (p === "/automations") return { name: "automations" };
   if (p === "/learning") return { name: "learning" };
   if (p === "/project-setup") return { name: "project-setup" };
   if (p === "/repo-workflow") return { name: "repo-workflow" };
@@ -152,6 +154,9 @@ export function href(route: Route): string {
       break;
     case "trace-detail":
       path = joinBase(`/traces/${encodeURIComponent(route.id)}`);
+      break;
+    case "automations":
+      path = joinBase("/automations");
       break;
     case "autonomy":
       path = joinBase(

@@ -38,6 +38,23 @@ from shared.model_policy import (
 )
 
 from auth import _require_dashboard_auth
+from automation_scheduler import run_automation_now
+from automation_store import (
+    INTERVAL_OPTIONS,
+    ensure_default_jobs,
+)
+from automation_store import (
+    list_events as list_automation_events,
+)
+from automation_store import (
+    list_jobs as list_automation_jobs,
+)
+from automation_store import (
+    list_runs as list_automation_runs,
+)
+from automation_store import (
+    update_job as update_automation_job,
+)
 from autonomy_metrics import (
     compute_daily_trend,
     compute_profile_metrics,
@@ -59,12 +76,12 @@ from autonomy_store.lessons import list_lesson_candidates
 from autonomy_store.pr_runs import (
     ACTIVE_PR_RUN_STATES,
     list_pr_runs,
-    mark_stale_pr_runs,
     set_pr_run_lifecycle_state,
     set_pr_runs_lifecycle_state_for_ticket,
 )
 from autonomy_store.schema import resolve_db_path
 from client_profile import list_profiles, load_profile
+from dashboard_reconciliation import reconcile_stale_runs
 from live_stream import (
     _find_session_streams,
     _worktree_root_for_ticket,
@@ -216,6 +233,13 @@ class DashboardStateUpdate(BaseModel):
 class DashboardCleanupRequest(BaseModel):
     stale_after_hours: int = Field(default=168, ge=1, le=24 * 90)
     dry_run: bool = False
+
+
+class AutomationJobUpdate(BaseModel):
+    enabled: bool
+    interval_seconds: int = Field(ge=60, le=7 * 24 * 60 * 60)
+    scope: str = Field(default="all", max_length=128)
+    config: dict[str, Any] = Field(default_factory=dict)
 
 
 class _TraceLifecycleDecision(BaseModel):
@@ -375,6 +399,97 @@ def get_model_policy() -> dict[str, Any]:
 def put_model_policy(update: ModelPolicyUpdate) -> dict[str, Any]:
     """Persist operator-selected model/reasoning choices."""
     return _write_model_policy_file(update)
+
+
+def _automation_profiles() -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for name in list_profiles():
+        profile = load_profile(name)
+        out.append(
+            {
+                "id": name,
+                "name": str(getattr(profile, "name", "") or name),
+            }
+        )
+    return out
+
+
+@router.get("/automations")
+def get_automations() -> dict[str, Any]:
+    """Return automation config, recent runs, and operator-visible events."""
+    conn = open_connection(_db_path_from_settings())
+    try:
+        ensure_schema(conn)
+        ensure_default_jobs(conn)
+        return {
+            "jobs": list_automation_jobs(conn),
+            "recent_events": list_automation_events(conn, limit=30),
+            "interval_options": list(INTERVAL_OPTIONS),
+            "profiles": _automation_profiles(),
+        }
+    finally:
+        conn.close()
+
+
+@router.put("/automations/{job_key}")
+def put_automation(job_key: str, update: AutomationJobUpdate) -> dict[str, Any]:
+    """Update one automation job's toggle, interval, scope, or config."""
+    valid_scopes = {"all"} | set(list_profiles())
+    if update.scope not in valid_scopes:
+        raise HTTPException(status_code=400, detail=f"unknown scope: {update.scope}")
+    conn = open_connection(_db_path_from_settings())
+    try:
+        ensure_schema(conn)
+        ensure_default_jobs(conn)
+        try:
+            job = update_automation_job(
+                conn,
+                job_key,
+                enabled=update.enabled,
+                interval_seconds=update.interval_seconds,
+                scope=update.scope,
+                config=update.config,
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"automation job not found: {job_key}",
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"job": job}
+    finally:
+        conn.close()
+
+
+@router.post("/automations/{job_key}/run")
+async def post_automation_run(job_key: str) -> dict[str, Any]:
+    """Run one automation job immediately and return the recorded run."""
+    try:
+        run = await run_automation_now(job_key, triggered_by="operator")
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"automation job not found: {job_key}",
+        ) from exc
+    return {"run": run}
+
+
+@router.get("/automations/{job_key}/runs")
+def get_automation_runs(job_key: str) -> dict[str, Any]:
+    """Return recent run history for one automation job."""
+    conn = open_connection(_db_path_from_settings())
+    try:
+        ensure_schema(conn)
+        ensure_default_jobs(conn)
+        if job_key not in {job["job_key"] for job in list_automation_jobs(conn)}:
+            raise HTTPException(
+                status_code=404,
+                detail=f"automation job not found: {job_key}",
+            )
+        return {"runs": list_automation_runs(conn, job_key=job_key, limit=30)}
+    finally:
+        conn.close()
 
 
 @router.get("/repo-workflow/options")
@@ -1697,37 +1812,12 @@ def post_dashboard_reconcile_stale(
     request: DashboardCleanupRequest,
 ) -> dict[str, Any]:
     """Backfill trace lifecycle, then mark old active pr_runs stale."""
-    cutoff = (datetime.now(UTC) - timedelta(hours=request.stale_after_hours)).isoformat()
-    reason = f"no lifecycle observation since {cutoff}"
-    conn = open_connection(_db_path_from_settings())
-    try:
-        ensure_schema(conn)
-        lifecycle_count, terminal_ids = _reconcile_pr_run_lifecycle_from_traces(
-            conn,
-            dry_run=request.dry_run,
-        )
-        if request.dry_run:
-            count = _count_stale_pr_runs_after_trace_reconcile(
-                conn,
-                older_than_iso=cutoff,
-                exclude_ids=terminal_ids,
-            )
-        else:
-            count = mark_stale_pr_runs(
-                conn,
-                older_than_iso=cutoff,
-                reason=reason,
-                created_by="operator_dashboard",
-                dry_run=False,
-            )
-    finally:
-        conn.close()
-    return {
-        "status": "dry_run" if request.dry_run else "accepted",
-        "stale_after_hours": request.stale_after_hours,
-        "lifecycle_reconciled": lifecycle_count,
-        "matched": count,
-    }
+    return reconcile_stale_runs(
+        _db_path_from_settings(),
+        stale_after_hours=request.stale_after_hours,
+        dry_run=request.dry_run,
+        created_by="operator_dashboard",
+    )
 
 
 # --- PR drilldown --------------------------------------------------------
